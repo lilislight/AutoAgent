@@ -269,8 +269,7 @@ class CliExecutionTests(ProjectFixture, unittest.TestCase):
                 "--entry-node", "entry", "--input-json", '{"text":"hello"}', "--wait", "terminal", "--format", "json"],
                 env=self.environment(), stdout=subprocess.PIPE, stderr=log, text=True)
             try:
-                # Wait for actual Operator entry; SDK Agent registration is
-                # part of project startup, and this is not a startup benchmark.
+                # Wait for actual Operator entry rather than timing project startup.
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
                     if self.started.exists():

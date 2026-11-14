@@ -22,10 +22,13 @@ class MCPResourceSource:
     """
 
     def __init__(self, resources: AgentResourceRegistry, registry, *, name=None, reconnect_policy=None,
-                 workflows=(), policy=None):
+                 workflows=(), policy=None, watch=True):
         self.resources, self.registry = resources, registry
         self.name = name or "mcp:" + registry.server_id
         self.reconnect_policy = reconnect_policy
+        if type(watch) is not bool:
+            raise TypeError("watch must be a boolean.")
+        self.watch = watch
         from .resources import workflow_scope
         self.workflows, self.policy = workflow_scope(workflows), policy
         self.last_error = None
@@ -53,6 +56,8 @@ class MCPResourceSource:
         if not self._active:
             raise RuntimeError("Enter the MCP resource source before refreshing it.")
         await self.registry.refresh()
+        if not self._active:
+            return
         if self._task is not None and self._task.done():
             ready = asyncio.get_running_loop().create_future()
             self._task = asyncio.create_task(self._watch(ready))
@@ -69,8 +74,9 @@ class MCPResourceSource:
         try:
             await self.registry.aprepare()
             self._publish(self.registry)
-            self._task = asyncio.create_task(self._watch(ready))
-            await ready
+            if self.watch:
+                self._task = asyncio.create_task(self._watch(ready))
+                await ready
             return self
         except BaseException:
             await self.__aexit__(None, None, None)
@@ -144,6 +150,8 @@ class SkillDirectorySource:
         async with self._lock:
             try:
                 replacement = await asyncio.to_thread(self._scan)
+                if not self._active:
+                    return
                 identity = tuple(sorted((key, value[0]) for key, value in replacement.items()))
                 publish = not stable or identity == self._candidate
                 self._candidate = identity

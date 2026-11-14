@@ -18,7 +18,7 @@ export function MessageQueue({ items, pending, canSendNow, onAction }: {
         <div className="agent-queue-row"><span className="agent-queue-position">{index + 1}</span>
           <button className="agent-queue-preview" aria-expanded={expanded === item.id} onClick={() => setExpanded(value => value === item.id ? null : item.id)}>{item.message}</button>
           {busy || !editable ? <LoadingIndicator label={busy ? 'Updating queued message' : item.state === 'sending' ? 'Sending message' : 'Starting task'} small /> : <>
-            {item.state === 'blocked' ? <button className="agent-queue-continue" disabled={pending !== null} onClick={() => onAction(item, 'continue')}>Continue</button> : null}
+            {item.state === 'blocked' ? <button className="agent-queue-continue" disabled={pending !== null} onClick={() => onAction(item, 'continue')}>Continue queue</button> : null}
             <Tooltip content="Send to the current task now"><button className="agent-icon-button" aria-label={`Send queued message ${index + 1} now`} disabled={pending !== null || !canSendNow} onClick={() => onAction(item, 'send_now')}><AgentIcon name="message" /></button></Tooltip>
             <Tooltip content="Remove from queue"><button className="agent-icon-button" aria-label={`Cancel queued message ${index + 1}`} disabled={pending !== null} onClick={() => onAction(item, 'cancel')}><AgentIcon name="close" /></button></Tooltip>
           </>}

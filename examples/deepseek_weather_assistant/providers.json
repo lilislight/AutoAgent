@@ -1,0 +1,23 @@
+{
+  "default_model": {
+    "provider": "deepseek",
+    "model": "deepseek-flash"
+  },
+  "compaction_model": null,
+  "providers": {
+    "deepseek": {
+      "enabled": true,
+      "backend": "openai",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "models": [
+        {
+          "id": "deepseek-flash",
+          "name": "DeepSeek Flash",
+          "enabled": true,
+          "model_info": {}
+        }
+      ]
+    }
+  }
+}

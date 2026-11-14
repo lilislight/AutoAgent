@@ -171,6 +171,17 @@ class ToolSet:
                        context=self.context, hooks=self.hooks, policy=self.policy,
                        approval_mode=self.approval_mode)
 
+    @staticmethod
+    def _operation_context(call, prepared):
+        """Let discovered file targets use the same declarative policies as dispatch."""
+        from .tool_policy import ToolPolicy
+        scopes = prepared.policy_scopes if prepared.policy_scopes is not None else prepared.scopes
+        policies = tuple(scope.policy for scope in scopes if isinstance(scope.policy, ToolPolicy))
+        if policies:
+            prepared.context = replace(prepared.context, services={**prepared.context.services,
+                "tool_operation_policies": policies}).for_call(call, prepared.record)
+        return prepared
+
     def _prepare(self, call, context) -> _Prepared | LLMToolResult:
         current = resolve_context(call, context, self.context)
         if call.name not in self._tools:
@@ -186,7 +197,7 @@ class ToolSet:
                     prepared.policy_scopes = (self,)
                 elif prepared.policy_scopes is not None:
                     prepared.policy_scopes = (self, *prepared.policy_scopes)
-            return prepared
+            return self._operation_context(call, prepared) if isinstance(prepared, _Prepared) else prepared
         if isinstance(selected, Tool):
             values = selected._prepare(call)
             if isinstance(values, LLMToolResult):
@@ -241,7 +252,7 @@ class ToolSet:
                     current = replace(current, operations=expected).for_call(call, record)
             except ToolBusinessError as error:
                 return error_result(call, error.code, str(error))
-        return _Prepared(selected, arguments, record, current, (self,))
+        return self._operation_context(call, _Prepared(selected, arguments, record, current, (self,)))
 
     @staticmethod
     def _sync_callback(callback, *arguments):
@@ -287,6 +298,8 @@ class ToolSet:
                         operations=[value.model_dump(mode="json") for value in current.operations],
                         definitions=[scope._tools[call.name].definition.model_dump(mode="json")
                                      for scope in prepared.scopes])
+        if current.attributes:
+            identity["context_attributes"] = _plain(current.attributes)
         digest = hashlib.sha256(json.dumps(identity, ensure_ascii=False, sort_keys=True,
                                           allow_nan=False, separators=(",", ":")).encode()).hexdigest()
         return ToolApprovalRequest(id=digest, call=call, arguments=prepared.record,

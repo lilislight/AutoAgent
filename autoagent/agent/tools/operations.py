@@ -1,40 +1,25 @@
 """Parameter-aware permissions shared by file, command and application Tools."""
 
 from collections.abc import Callable
-from fnmatch import fnmatchcase
 import inspect
-from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, JsonValue
 
 from ..models._base import Model, NonEmpty
 from .permissions import ToolDecision
 
 
 class ToolOperation(Model):
-    """An application-resolved operation; never accepted from model arguments."""
+    """One Tool-resolved action/target; never accepted from model arguments.
+
+    Action names are extensible (conventionally domain.verb). The Tool defines
+    resource normalization and its JSON attributes; SDK imposes no risk category.
+    A missing resource does not assert that the action has no side effects.
+    """
 
     action: NonEmpty
-    resource: NonEmpty
-    attributes: dict[str, str] = Field(default_factory=dict)
-
-
-class ToolOperationRule(Model):
-    """Last matching rule wins within a policy; separate boundaries intersect."""
-
-    action: str = "*"
-    resource: str = "*"
-    attributes: dict[str, str] = Field(default_factory=dict)
-    decision: Literal["allow", "ask", "deny"] = "ask"
-    reason: str | None = None
-
-    def matches(self, operation):
-        return (fnmatchcase(operation.action, self.action) and fnmatchcase(operation.resource, self.resource)
-            and all(key in operation.attributes and fnmatchcase(operation.attributes[key], pattern)
-                for key, pattern in self.attributes.items()))
-
-    def evaluate(self, operation):
-        return ToolDecision(action=self.decision, reason=self.reason)
+    resource: NonEmpty | None = None
+    attributes: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 def combine_decisions(decisions):
@@ -70,4 +55,4 @@ class ToolOperationPolicy:
         return combine_decisions(decisions)
 
 
-__all__ = ["ToolOperation", "ToolOperationRule", "ToolOperationPolicy", "combine_decisions"]
+__all__ = ["ToolOperation", "ToolOperationPolicy", "combine_decisions"]

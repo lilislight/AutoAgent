@@ -290,6 +290,9 @@ async def start_llm_call(owner, request, *, kind="generation", streaming=False):
     config = getattr(owner, "config", None)
     billing = {"pricing_provider": getattr(config, "pricing_provider", None)
                or getattr(config, "model_prefix", None) or owner.provider_id}
+    from .cost import current_token_pricing
+    if (pricing := current_token_pricing()) is not None:
+        billing["token_pricing"] = pricing
     options = request.provider_options
     if options is not None and options.values.get("service_tier") is not None:
         billing["service_tier"] = options.values["service_tier"]

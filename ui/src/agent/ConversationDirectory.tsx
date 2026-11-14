@@ -1,15 +1,19 @@
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import { useInfiniteQuery } from '@tanstack/react-query';
 import { BusyLabel, SkeletonText } from '../components/LoadingState.js';
 import { Tooltip } from '../components/Tooltip.js';
 import { AnimatedRegion, Chevron } from './AgentDisclosure.js';
 import { AgentIcon } from './AgentIcon.js';
 import type { AgentSession, AgentWorkspaceInfo, Page } from './types.js';
+import { useSessionActivity, type DirectoryActivity } from './useSessionActivity.js';
+import { sessionRunning } from './sessionActivity.js';
+import { SessionActivityBadge } from './SessionActivityBadge.js';
 
 /** null selects the global Recent list. */
 export type SessionLoader = (workspace: string | null, cursor: string | null, signal: AbortSignal) => Promise<Page<AgentSession>>;
 
-const CONVERSATIONS_PER_BATCH = 5;
+const INITIAL_CONVERSATIONS = 5;
+const CONVERSATIONS_PER_BATCH = 20;
 
 function useDisclosure(scope: string, initial: boolean) {
   const key = `autoagent:directory:${scope}`;
@@ -30,27 +34,37 @@ function SessionSkeleton({ count = 3 }: { count?: number }) {
 }
 
 export function WorkspaceGroup({ item, selected, session, active, load, onSelect, onNew, onTitle, duplicateName = false,
-  workspaces = [], storageScope = '', canCreate = true }: {
+  workspaces = [], storageScope = '', canCreate = true, activity }: {
   item: AgentWorkspaceInfo | null; selected: boolean; session: string | null; active: boolean;
   load: SessionLoader; onSelect: (row: AgentSession, workspace: string | null) => void;
   onNew: (workspace: string | null) => void; onTitle: (session: string, title: string) => void; duplicateName?: boolean;
   workspaces?: AgentWorkspaceInfo[]; storageScope?: string; canCreate?: boolean;
+  activity?: DirectoryActivity;
 }) {
   const scope = item?.id ?? null, name = item?.name ?? 'Recent', id = useId();
-  const [visibleCount, setVisibleCount] = useState(CONVERSATIONS_PER_BATCH);
+  const [visibleCount, setVisibleCount] = useState(INITIAL_CONVERSATIONS);
   const [open, setOpen] = useDisclosure(`${storageScope}:${scope ?? 'recent'}`, selected || item === null);
   const query = useInfiniteQuery({ queryKey: ['agent-sessions', scope], queryFn: ({ pageParam, signal }) => load(scope, pageParam, signal),
     initialPageParam: null as string | null, getNextPageParam: page => page.next_cursor,
-    enabled: active && open, staleTime: 15000, refetchInterval: active && open ? 15000 : false, retry: false });
-  const rows = query.data?.pages.flatMap(page => page.items) ?? [];
+    enabled: active && open, staleTime: 15000, refetchInterval: query => active && open ? (
+      query.state.data?.pages.some(page => page.items.some(sessionRunning)) ? 2000 : 15000) : false, retry: false });
+  const rows = useMemo(() => query.data?.pages.flatMap(page => page.items) ?? [], [query.data]);
+  const observe = activity?.observe;
+  useEffect(() => { if (query.data && observe) observe(rows); }, [rows, query.data, observe]);
   const visibleRows = rows.slice(0, visibleCount);
   const showMore = async () => {
     if (query.isFetchingNextPage) return;
-    if (visibleCount >= rows.length && query.hasNextPage) {
+    const target = visibleCount + CONVERSATIONS_PER_BATCH;
+    let count = rows.length, hasNext = query.hasNextPage;
+    while (target > count && hasNext) {
       const result = await query.fetchNextPage();
       if (result.isError) return;
+      const loaded = result.data?.pages.reduce((total, page) => total + page.items.length, 0) ?? count;
+      if (loaded <= count) break;
+      count = loaded;
+      hasNext = result.hasNextPage;
     }
-    setVisibleCount(count => count + CONVERSATIONS_PER_BATCH);
+    setVisibleCount(target);
   };
   const title = rows.find(row => row.session_id === session)?.title;
   useEffect(() => { if (selected && scope !== null) setOpen(true); }, [selected, scope, setOpen]);
@@ -70,9 +84,13 @@ export function WorkspaceGroup({ item, selected, session, active, load, onSelect
       {query.isLoading ? <SessionSkeleton /> : null}
       <ul className="agent-group-sessions">{visibleRows.map(row => {
         const bound = row.workspace_id ? workspaces.find(value => value.id === row.workspace_id) : undefined;
-        return <li key={row.session_id}><Tooltip content={row.title}><button type="button" className={`agent-group-session ${row.session_id === session ? 'is-selected' : ''}`} aria-current={row.session_id === session ? 'page' : undefined} onClick={() => onSelect(row, item?.id ?? row.workspace_id ?? null)}>
+        const observed = activity?.sessions[row.session_id];
+        const running = observed ? sessionRunning({ status: observed.status, control_state: observed.control }) : sessionRunning(row);
+        const unread = row.session_id !== session && !!observed?.unread;
+        return <li key={row.session_id}><Tooltip content={row.title}><button type="button" className={`agent-group-session ${row.session_id === session ? 'is-selected' : ''}`} aria-current={row.session_id === session ? 'page' : undefined} onClick={() => { activity?.read(row.session_id); onSelect(row, item?.id ?? row.workspace_id ?? null); }}>
           <span className="agent-session-title">{row.title}</span>
           {!item && row.workspace_id ? <Tooltip content={bound ? `${bound.name} · ${bound.path ?? bound.id}` : row.workspace_id}><span className="agent-recent-workspace" role="img" aria-label={`Workspace: ${bound?.name ?? row.workspace_id}`}><AgentIcon name="folder" /></span></Tooltip> : null}
+          <SessionActivityBadge running={running} unread={unread} />
         </button></Tooltip></li>;
       })}</ul>
       {query.error ? <div className="agent-group-error" role="alert"><p>{query.error.message}</p><button type="button" onClick={() => void query.refetch()}>Retry</button></div> : null}
@@ -90,6 +108,7 @@ export function ConversationDirectory({ items, loading, error, onRetry, workspac
   onTitle: (session: string, title: string) => void; onAddWorkspace: () => void; storageScope?: string; canCreate?: boolean;
 }) {
   const [open, setOpen] = useDisclosure(`${storageScope}:workspaces`, true), id = useId();
+  const activity = useSessionActivity(storageScope, session, active);
   const groups = items ?? [];
   const missing = items && workspace && !groups.some(item => item.id === workspace) ? { id: workspace, name: 'Unavailable workspace', backend: 'unknown', path: null, is_project: false, available: false } satisfies AgentWorkspaceInfo : null;
   const all = [...groups, ...(missing ? [missing] : [])];
@@ -101,9 +120,9 @@ export function ConversationDirectory({ items, loading, error, onRetry, workspac
       <AnimatedRegion id={id} open={open}>
         {loading ? <div className="agent-workspace-group" role="status" aria-label="Loading workspaces"><div className="agent-workspace-group-heading agent-workspace-group-toggle" aria-hidden="true"><span className="agent-workspace-folder"><AgentIcon name="folder" /></span><SkeletonText width="110px" /></div><SessionSkeleton /></div> : null}
         {error ? <div className="sidebar-error" role="alert"><p>{error.message}</p><button type="button" onClick={onRetry}>Retry</button></div> : null}
-        {all.map(item => <WorkspaceGroup key={item.id} item={item} selected={workspace === item.id} session={session} active={active && open} load={load} onSelect={onSelect} onNew={onNew} onTitle={onTitle} storageScope={storageScope} canCreate={canCreate} duplicateName={groups.filter(other => other.name === item.name).length > 1} />)}
+        {all.map(item => <WorkspaceGroup key={item.id} item={item} selected={workspace === item.id} session={session} active={active && open} load={load} onSelect={onSelect} onNew={onNew} onTitle={onTitle} storageScope={storageScope} canCreate={canCreate} activity={activity} duplicateName={groups.filter(other => other.name === item.name).length > 1} />)}
       </AnimatedRegion>
     </section>
-    <WorkspaceGroup item={null} selected={false} session={session} active={active} load={load} onSelect={onSelect} onNew={onNew} onTitle={onTitle} storageScope={storageScope} canCreate={canCreate} workspaces={all} />
+    <WorkspaceGroup item={null} selected={false} session={session} active={active} load={load} onSelect={onSelect} onNew={onNew} onTitle={onTitle} storageScope={storageScope} canCreate={canCreate} workspaces={all} activity={activity} />
   </div>;
 }

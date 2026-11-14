@@ -64,7 +64,7 @@ class LocalExecutionService:
         self.analyzer = analyzer or TreeSitterShellAnalyzer()
         self.policy = policy
         from ..files import LocalFileService
-        self.files = LocalFileService(self.root, working_directory=working_directory)
+        self.files = LocalFileService(self.root, working_directory=working_directory, config=self.config.file_policy)
         root_stat = self.root.stat()
         self._root_identity = f"{root_stat.st_dev}:{root_stat.st_ino}"
         # Runtime-only environment. Do not inherit arbitrary application tokens,
@@ -179,7 +179,7 @@ class LocalExecutionService:
         return maximum
 
     def _plan(self, arguments, context=None):
-        command = arguments["command"]
+        command = arguments
         cwd = self._directory(arguments.get("cwd", "."))
         timeout = arguments.get("timeout_seconds")
         timeout = self.config.default_timeout_seconds if timeout is None else timeout
@@ -292,7 +292,7 @@ class LocalExecutionService:
 
     def _rule(self, operation):
         if operation.action.startswith("process."):
-            return ToolDecision(action="ask" if operation.action == "process.write" else "allow")
+            return ToolDecision(action=self.config.process_write_decision if operation.action == "process.write" else "allow")
         attributes = operation.attributes
         args = tuple(json.loads(attributes["args"]))
         selected = ToolDecision(action=self.config.default_decision, reason=attributes.get("analysis_reason") or "Unmatched command")
@@ -367,7 +367,8 @@ class LocalExecutionService:
                     await asyncio.wait_for(record.handle.wait(), seconds)
                 except TimeoutError:
                     pass
-            result = await record.handle.read(None, max_bytes=self._output_limit(arguments, logged=sink is not None), wait_seconds=0)
+            result = await record.handle.read(None, max_bytes=self._output_limit(arguments, logged=sink is not None), wait_seconds=0,
+                max_line_bytes=self.config.max_line_bytes)
             return self._output(record, result)
         except asyncio.CancelledError:
             await settle(asyncio.create_task(record.stop()))
@@ -379,6 +380,15 @@ class LocalExecutionService:
             and value is not None and value != "" and not (key == "truncated" and value is False)}
         if result["truncated"]:
             visible["retained_start"] = result["retained_start"]
+            hints = []
+            if result.get("preview_omitted_bytes"):
+                hints.append(f"Earlier retained output is available with manage_process read cursor={result['retained_start']}.")
+            if result.get("line_truncated"):
+                hints.append("Use manage_process read with max_line_bytes=0 for raw lines.")
+            if result.get("dropped_prefix_bytes"):
+                hints.append("Older output left the memory buffer; consult log_path if configured.")
+            if hints:
+                visible["output_hint"] = " ".join(hints)
         return ToolOutput(structured_content={"process_id": record.id, "cwd": record.cwd, **visible},
             tool_metadata={"execution": {key: result[key] for key in ("wall_time_seconds", "total_output_bytes", "retained_start")}},
             is_error=result["state"] in {"timed_out", "terminated"} or result["exit_code"] not in (None, 0)
@@ -435,7 +445,8 @@ class LocalExecutionService:
         try:
             logged = getattr(getattr(record.handle, "spec", None), "output_log", None) is not None
             result = await record.handle.read(request.get("cursor"), max_bytes=self._output_limit(request, logged=logged),
-                wait_seconds=0 if action == "wait" else request.get("wait_seconds", 0))
+                wait_seconds=0 if action == "wait" else request.get("wait_seconds", 0),
+                max_line_bytes=self.config.max_line_bytes if request.get("max_line_bytes") is None else request["max_line_bytes"])
         except ValueError as error:
             raise ToolBusinessError(str(error), code="invalid_cursor") from error
         if action == "terminate":

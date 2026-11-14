@@ -188,7 +188,7 @@ class LocalProcess:
         await self._stop_once()
         await self.wait()
 
-    async def read(self, cursor, *, max_bytes, wait_seconds):
+    async def read(self, cursor, *, max_bytes, wait_seconds, max_line_bytes=None):
         if cursor is not None and cursor > self._end:
             raise ValueError(f"Cursor {cursor} is past current output position {self._end}. "
                 "Use the previous next_cursor for this process; cursors are byte offsets, not timestamps or line numbers.")
@@ -213,14 +213,31 @@ class LocalProcess:
             if left < right:
                 streams[name].extend(data[left - offset:right - offset])
         result = {name: bytes(data).decode("utf-8") for name, data in streams.items()}
+        if max_line_bytes:
+            from .preview import preview
+            if max_bytes >= 64:
+                max_line_bytes = min(max_line_bytes, max_bytes // 2)
+            result = preview(self._chunks, self._start if cursor is None else position, self._end,
+                max_bytes=max_bytes, line_bytes=max_line_bytes, tail=cursor is None)
+            end = result["next_cursor"]
+            if cursor is None:
+                position = self._start
+        preview_omitted = result.get("preview_omitted_bytes", 0)
+        line_omitted = result.get("omitted_line_bytes", 0)
         result.update(state=self.state, exit_code=self.process.returncode,
             wall_time_seconds=round((self.finished or time.monotonic()) - self.started, 3),
             next_cursor=end, retained_start=self._start, total_output_bytes=self._end,
-            truncated=requested < position or cursor is None and position > 0,
+            truncated=requested < position or cursor is None and position > 0 or bool(preview_omitted or line_omitted),
             has_more=end < self._end, reason=self.reason, error=self.error)
-        omitted = position - (cursor if cursor is not None else 0)
-        if omitted > 0:
-            result["skipped_bytes"] = omitted
+        dropped = max(0, self._start - (cursor or 0))
+        if dropped:
+            result["dropped_prefix_bytes"] = dropped
+        if not max_line_bytes and (omitted := position - (cursor or 0)) > dropped:
+            result["preview_omitted_bytes"] = omitted - dropped
+        if line_omitted:
+            result["line_truncated"] = True
+        result = {key: value for key, value in result.items()
+            if key not in {"preview_omitted_bytes", "omitted_line_bytes"} or value}
         if self.spec.output_log is not None:
             result.update(self.spec.output_log.summary())
         return result

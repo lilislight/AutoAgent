@@ -111,13 +111,13 @@ class CliUsabilityTests(unittest.TestCase):
         """Server startup errors explain the missing setting without a Uvicorn traceback or false ready report."""
         project = Path(__file__).resolve().parents[1] / "examples/deepseek_weather_assistant"
         environment = {key: value for key, value in os.environ.items() if not key.startswith("AUTOAGENT_")}
-        environment.update(AUTOAGENT_LLM_MODEL="test", AUTOAGENT_LLM_PROVIDER="deepseek")
+        environment.pop("DEEPSEEK_API_KEY", None)
         with tempfile.TemporaryDirectory() as directory:
             environment["AUTOAGENT_DATABASE_URL"] = "sqlite+aiosqlite:///" + str(Path(directory) / "runtime.db")
             result = subprocess.run([sys.executable, "-m", "autoagent", "--project", str(project),
                 "--no-env-file", "server", "--no-ui", "--format", "json"], env=environment,
                 capture_output=True, text=True, timeout=20)
         self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
-        self.assertIn("AUTOAGENT_LLM_API_KEY", json.loads(result.stdout)["error"]["message"])
+        self.assertIn("DEEPSEEK_API_KEY", json.loads(result.stdout)["error"]["message"])
         self.assertNotIn("Traceback", result.stderr)
         self.assertNotIn('"status": "ready"', result.stdout)

@@ -25,7 +25,12 @@ class DeepSeekProviderConfig(OpenAIProviderConfig):
 
 
 def _check(request, provider_id, protocol, *, beta=False):
-    options = request.provider_options.values if request.provider_options is not None else {}
+    options = dict(request.provider_options.values) if request.provider_options is not None else {}
+    if request.reasoning_effort is not None:
+        if chat:
+            options["reasoning_effort"] = request.reasoning_effort
+        else:
+            options["reasoning"] = {**options.get("reasoning", {}), "effort": request.reasoning_effort}
     chat = protocol == "openai.chat_completions"
     allowed = ({"thinking", "reasoning_effort", "stop", "logprobs", "top_logprobs", "user_id"}
                if chat else {"reasoning", "top_logprobs", "user"})

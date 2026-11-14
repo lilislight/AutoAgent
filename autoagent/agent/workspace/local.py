@@ -73,7 +73,7 @@ class LocalWorkspace:
                 except (OSError, UnicodeError, SkillError) as error:
                     raise WorkspaceError("Workspace instructions are unreadable.") from error
             skill_root = current / ".agents" / "skills"
-            if skill_root.exists() or skill_root.is_symlink():
+            if current == root and (skill_root.exists() or skill_root.is_symlink()):
                 selected = self._contained(skill_root, root)
                 found = SkillSet.discover([selected])
                 if self._contained(skill_root, root) != selected:

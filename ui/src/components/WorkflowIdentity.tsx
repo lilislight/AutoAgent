@@ -25,7 +25,6 @@ export function WorkflowIdentityDetails({ workflow }: { workflow: Identity }) {
     timer.current = setTimeout(() => setFeedback(null), 2000);
   };
   return <div className="workflow-identity-details">
-    <p>Version is declared by the Workflow. Revision identifies the exact saved definition.</p>
     <dl>{[
       ['Workflow ID', workflow.workflow_id],
       ['Version', workflow.workflow_version],

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 from typing import Literal
 
 from ..models import FileContent, ImageContent, VideoContent
@@ -13,6 +12,7 @@ from .config import OpenAIProviderConfig
 from .embedding import OpenAIEmbeddingProvider
 from .openai import OpenAIProvider
 from .responses import ResponsesAdapter
+from ._litellm_sdk import load_litellm_sdk
 
 
 class LiteLLMProviderConfig(OpenAIProviderConfig):
@@ -70,7 +70,7 @@ class _LiteLLMTransport:
         self._bind_loop()
         if self._sdk is None:
             try:
-                self._sdk = importlib.import_module("litellm")
+                self._sdk = load_litellm_sdk()
             except ImportError as error:
                 raise ImportError("Install autoagent[litellm] to use the LiteLLM Provider.") from error
         return self._sdk
@@ -124,6 +124,15 @@ class LiteLLMProvider(_LiteLLMTransport, OpenAIProvider):
 
     async def _create(self, params):
         return await self._call_sdk("aresponses" if self.protocol == "openai.responses" else "acompletion", params)
+
+    def context_message_role(self, model: str | None = None) -> str:
+        # Preserve late context on arbitrary vendor bridges/local chat templates.
+        # Only a positively identified native OpenAI route opts into system.
+        from urllib.parse import urlsplit
+        prefix = self.config.model_prefix
+        route = prefix.split("/", 1)[0] if prefix else (model or "").split("/", 1)[0]
+        host = urlsplit(self.config.base_url or "").hostname
+        return "system" if route == "openai" and host in (None, "api.openai.com") else "user"
 
     async def _close_stream(self, source):
         # Responses iterators do not expose close methods. The Chat bridge

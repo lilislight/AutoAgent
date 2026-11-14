@@ -120,6 +120,20 @@ class StreamModelTests(unittest.TestCase):
 
 @unittest.skipUnless(AsyncOpenAI is not None, "Install autoagent[agent] for SDK transport tests")
 class ProviderSDKTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reasoning_effort_uses_the_selected_protocol_field(self):
+        """A normalized effort reaches each real SDK request in its protocol's expected location."""
+        for protocol in ("chat", "responses"):
+            with self.subTest(protocol=protocol):
+                provider, _, captured = self.provider(protocol)
+                await provider.ainvoke(request(reasoning_effort="high"))
+                body = captured[0][1]
+                if protocol == "chat":
+                    self.assertEqual(body["reasoning_effort"], "high")
+                    self.assertNotIn("reasoning", body)
+                else:
+                    self.assertEqual(body["reasoning"], {"effort": "high"})
+                    self.assertNotIn("reasoning_effort", body)
+
     def provider(self, protocol="responses", *, reply=None, handler=None, **kwargs):
         captured = []
         async def handle(req):

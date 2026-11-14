@@ -266,7 +266,7 @@ class HostAgentCapabilityTests(unittest.IsolatedAsyncioTestCase):
             yield
         host = self.host(workflows=[Workflow("plain", nodes=[Node("work", identity)])], lifespan=resources)
         async with host:
-            self.assertEqual(host._runtime.app.operator_registry.for_capability(LLM_CALL.id), ())
+            self.assertEqual(len(host._runtime.app.operator_registry.for_capability(LLM_CALL.id)), 1)
             result = await host.join(await host.execute("plain", {"value": 1}))
             self.assertEqual(result.status, "completed", result.error)
 

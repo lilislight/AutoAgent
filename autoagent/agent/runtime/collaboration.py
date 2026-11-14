@@ -106,7 +106,8 @@ class AgentCollaboration:
         from autoagent.agent.tools.context import tool_context
         with tool_context(None):
             handle = await commands.execute(Spawn(workflow.workflow_revision_id, target.entry_node_id),
-                AgentInput(message=task, model={"provider": snapshot.settings.model.provider, "model": snapshot.settings.model.model}), key="spawn")
+                AgentInput(message=task, model={"provider": snapshot.settings.model.provider, "model": snapshot.settings.model.model,
+                    "reasoning_effort": snapshot.settings.model.reasoning_effort}), key="spawn")
         raw = await commands.execute(Status(), handle, key="spawn-status")
         raw = raw.target_only()
         receipt = self.observation(raw, "child")

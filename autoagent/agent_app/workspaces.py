@@ -5,13 +5,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from autoagent.agent.workspace import LocalWorkspace, WorkspaceError
-from autoagent.host.agent_workspaces import AgentWorkspaces
+from .workspace_resources import AgentWorkspaces
 
 
 class ApplicationWorkspaces(AgentWorkspaces):
     def __init__(self, service):
         super().__init__(service)
-        self.storage = service
 
     @staticmethod
     def configuration(workspace):
@@ -19,9 +18,7 @@ class ApplicationWorkspaces(AgentWorkspaces):
 
 
     async def restore(self):
-        if self.storage is None:
-            return
-        storage = self.storage
+        storage = self.service
         root = self.service.host.root.resolve()
         records = await storage.workspace_records()
         # Reuse the registered identity for this directory. A saved Workspace
@@ -61,8 +58,7 @@ class ApplicationWorkspaces(AgentWorkspaces):
             raise WorkspaceError("The project Workspace always uses the current project root.")
         if not replace and any(item.info.id == workspace.id for item in self.registry.entries()):
             raise WorkspaceError("Workspace is already registered.")
-        if self.storage is not None:
-            await self.storage.register_workspace_record(self.configuration(workspace))
+        await self.service.register_workspace_record(self.configuration(workspace))
         self.registry.register(workspace, replace=replace)
 
 

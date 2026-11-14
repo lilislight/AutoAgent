@@ -1,220 +1,234 @@
-"""Host Agent environment profiles, resource ownership and complete request defaults."""
-
+"""Shared Host JSON catalog, refresh, explicit embedding setup, and accounted calls."""
 import asyncio
 from contextlib import asynccontextmanager
-import os
+import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
-from autoagent import InputMappingContext, Node, Workflow
-from autoagent.agent import EMBEDDING, LLM_CALL, LLMRequest, llm_call_operator
-from autoagent.host import AgentSettings, AutoAgentHost, HostSettings, embedding_request, llm_request
-from tests.test_agent_capabilities import DemoEmbedding, DemoLLM, request
+import httpx
+from openai import AsyncOpenAI
+
+from autoagent import Node, Workflow, InputMappingContext
+from autoagent.agent import LLM_CALL, EMBEDDING, embedding_operator, LLMRequest, EmbeddingRequest
+from autoagent.host import AutoAgentHost, HostSettings
+from autoagent.host.providers import CatalogProvider, ModelInfo
+from tests.test_agent_providers import request, chat_body
+from tests.test_agent_capabilities import DemoEmbedding
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 
 
-class AgentSettingsTests(unittest.TestCase):
-    def test_unconfigured_profiles_and_explicit_requests_need_no_credentials(self):
-        """An empty route stays disabled; explicit model requests work independently of Host defaults."""
-        self.assertIsNone(AgentSettings.from_environment({}))
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(llm_request(model="chosen", input=request().input).model, "chosen")
-            self.assertEqual(embedding_request(model="vectors", input="hello").model, "vectors")
-            with self.assertRaisesRegex(ValueError, "AUTOAGENT_LLM_MODEL"):
-                llm_request(input=request().input)
-
-    def test_routes_validate_transport_and_never_put_credentials_in_requests(self):
-        """Provider and backend are independent, while request defaults contain no connection secrets."""
-        env = dict(AUTOAGENT_LLM_PROVIDER="deepseek", AUTOAGENT_LLM_BACKEND="litellm",
-                   AUTOAGENT_LLM_MODEL="demo", AUTOAGENT_LLM_API_KEY="private-value",
-                   AUTOAGENT_LLM_MAX_OUTPUT_TOKENS="123", AUTOAGENT_LLM_STREAMING="true")
-        settings = AgentSettings.from_environment(env)
-        self.assertTrue(settings.streaming)
-        self.assertNotIn("private-value", repr(settings))
-        with patch.dict(os.environ, env, clear=True):
-            value = llm_request(input=request().input, options={"thinking": {"type": "disabled"}})
-            self.assertEqual(value.model, "demo")
-            self.assertEqual(value.max_output_tokens, 123)
-            self.assertTrue(value.streaming)
-            self.assertEqual(value.provider_options.provider_id, "deepseek")
-            self.assertNotIn("private-value", value.model_dump_json())
-            self.assertEqual(llm_request(model="override", input=request().input, max_output_tokens=7).max_output_tokens, 7)
-            explicit = llm_request(model=None, input=request().input, streaming=False, max_output_tokens=None)
-            self.assertIsNone(explicit.model)
-            self.assertFalse(explicit.streaming)
-            self.assertIsNone(explicit.max_output_tokens)
-        for field, value in (("BACKEND", "direct"), ("TIMEOUT_SECONDS", "nan"), ("STREAMING", "maybe"),
-                             ("MAX_OUTPUT_TOKENS", "0"), ("PROTOCOL", "unknown")):
-            with self.subTest(field=field), self.assertRaises(ValueError):
-                AgentSettings.from_environment(dict(env, **{"AUTOAGENT_LLM_" + field: value}))
-
-    def test_request_defaults_work_without_a_default_model(self):
-        """Per-call models use environment defaults without requiring a Host default model or credentials."""
-        with patch.dict(os.environ, {"AUTOAGENT_LLM_STREAMING": "true", "AUTOAGENT_LLM_MAX_OUTPUT_TOKENS": "321"}, clear=True):
-            value = llm_request(model="per-node", input=request().input)
-            self.assertTrue(value.streaming)
-            self.assertEqual(value.max_output_tokens, 321)
-            direct = LLMRequest(model="direct", input=request().input)
-            self.assertFalse(direct.streaming)
-            self.assertIsNone(direct.max_output_tokens)
-        with patch.dict(os.environ, {}, clear=True):
-            self.assertIsNone(llm_request(model=None, input=request().input).model)
-            with self.assertRaises(ValueError):
-                llm_request(model="", input=request().input)
-
-    def test_provider_factories_choose_vendor_and_protocol_without_loading_sdks(self):
-        """Factory selection keeps vendor adaptations, OpenAI-compatible connections and embeddings explicit."""
-        from autoagent.agent import DeepSeekProvider, LiteLLMProvider, OpenAIResponsesProvider, OpenAIEmbeddingProvider
-        for changes, expected in (({"provider": "deepseek"}, DeepSeekProvider),
-                                  ({"provider": "deepseek", "backend": "litellm"}, LiteLLMProvider),
-                                  ({"protocol": "openai.responses"}, OpenAIResponsesProvider)):
-            provider = AgentSettings(model="demo", api_key="test", **changes).create_provider()
-            self.assertIsInstance(provider, expected)
-        self.assertIsInstance(AgentSettings(model="embedding", api_key="test").create_provider(embedding=True), OpenAIEmbeddingProvider)
-        with self.assertRaisesRegex(ValueError, "AUTOAGENT_LLM_API_KEY"):
-            AgentSettings(model="demo").create_provider()
-        with self.assertRaisesRegex(ValueError, "BASE_URL"):
-            AgentSettings(provider="unknown", model="demo", api_key="test").create_provider()
-
-    def test_env_example_documents_every_agent_profile_option(self):
-        """Trace both actual environment parsers and compare their consumed names with the root example."""
-        names = set()
-        class Environment(dict):
-            def get(self, key, default=None):
-                names.add(key)
-                return super().get(key, default)
-        for prefix, embedding in (("AUTOAGENT_LLM_", False), ("AUTOAGENT_EMBEDDING_", True)):
-            AgentSettings.from_environment(Environment({prefix + "MODEL": "demo"}), embedding=embedding)
-        documented = {line.split("=", 1)[0] for line in (Path(__file__).resolve().parents[1] / ".env.example").read_text().splitlines()
-                      if line.startswith(("AUTOAGENT_LLM_", "AUTOAGENT_EMBEDDING_"))}
-        self.assertEqual(names, documented)
+class CatalogSchemaTests(unittest.TestCase):
+    def test_only_three_prices_and_two_limits_are_configurable(self):
+        """Unsupported billing fields and invalid prices cannot enter the project catalog."""
+        for data in ({'cache_creation_input_token_cost':1}, {'input_cost_per_token':-1}, {'max_input_tokens':0}):
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                ModelInfo.model_validate_json(json.dumps(data))
 
 
-class HostAgentDefaultsTests(unittest.IsolatedAsyncioTestCase):
+class HostCatalogContracts:
     async def asyncSetUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.url = "sqlite+aiosqlite:///" + str(Path(self.temp.name) / "runtime.db")
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.url = await self.database_url()
 
-    async def asyncTearDown(self):
-        self.temp.cleanup()
+    async def database_url(self):
+        return 'sqlite+aiosqlite:///' + str(self.root / 'runtime.db')
 
-    def host(self, **kwargs):
-        return AutoAgentHost(settings=HostSettings(database_url=self.url), **kwargs)
+    def write(self, *, backend='openai', rate='0.000001', **changes):
+        provider = dict(backend=backend, api_key='${TEST_MODEL_KEY}', models=[dict(id='tiny', name='Tiny',
+            reasoning_effort=dict(values=['low','high'], default='low'),
+            model_info=dict(max_input_tokens=100000, max_output_tokens=4096, input_cost_per_token=rate,
+                output_cost_per_token='0.000003', cache_read_input_token_cost=0))])
+        provider.update(changes)
+        (self.root / 'providers.json').write_text(json.dumps(dict(providers={'local':provider})))
 
-    async def test_connection_without_default_model_uses_request_level_settings(self):
-        """A connection-only Host serves per-call models and honors streaming overrides on its Runtime loop."""
-        provider = DemoLLM()
-        @asynccontextmanager
-        async def resource():
-            try:
-                yield provider
-            finally:
-                await provider.aclose()
-        def factory(settings, *, embedding=False):
-            self.assertIsNone(settings.model)
-            return resource()
+    def host(self, workflows=(), **kwargs):
+        from autoagent.host.persistence import PersistenceConfig
+        return AutoAgentHost(root=self.root, workflows=workflows,
+            settings=HostSettings(database_url=self.url, persistence=PersistenceConfig()),
+            environment={'TEST_MODEL_KEY':'PRIVATE_MODEL_KEY'}, **kwargs)
+
+    async def test_catalog_is_shared_without_enabling_agent_app_and_keys_are_private(self):
+        """Host-only projects expose model metadata and resolve environment keys without returning secrets."""
+        self.write()
+        async with self.host() as host:
+            result = await host.providers.describe()
+            self.assertNotIn("agent", host.applications)
+            self.assertNotIn('PRIVATE_MODEL_KEY', json.dumps(result))
+            model = result['items'][0]['models'][0]
+            self.assertEqual(model['model_info']['max_input_tokens'], 100000)
+            self.assertEqual(model['model_info']['max_output_tokens'], 4096)
+            self.assertEqual(host.providers.get('local').config.api_key.get_secret_value(), 'PRIVATE_MODEL_KEY')
+
+    async def test_reload_is_atomic_and_replaces_only_valid_complete_configuration(self):
+        """Invalid reloads preserve usable connections, while disable and removal take effect on successful reload."""
+        self.write()
+        async with self.host() as host:
+            before = await host.providers.describe()
+            (self.root / 'providers.json').write_text('{"api_key":"PRIVATE_MODEL_KEY",')
+            with self.assertRaises(ValueError) as caught:
+                await host.providers.reload()
+            self.assertNotIn('PRIVATE_MODEL_KEY', str(caught.exception))
+            self.assertEqual((await host.providers.describe())['version'], before['version'])
+            self.write(enabled=False)
+            await host.providers.reload()
+            with self.assertRaises(ValueError):
+                host.providers.get('local')
+            (self.root / 'providers.json').write_text('{"providers":{}}')
+            await host.providers.reload()
+            self.assertEqual((await host.providers.describe())['items'], [])
+
+    async def test_reload_preserves_unchanged_provider_instances_and_versions(self):
+        """Editing another connection does not replace an unchanged client or invalidate its history affinity."""
+        self.write()
+        async with self.host() as host:
+            original = host.providers.get('local')
+            configuration = json.loads((self.root / 'providers.json').read_text())
+            configuration['providers']['other'] = {'enabled':False, 'models':[{'id':'other-model'}]}
+            (self.root / 'providers.json').write_text(json.dumps(configuration))
+            await host.providers.reload()
+            self.assertIs(host.providers.get('local'), original)
+            self.assertEqual(host.providers.registration('local').version, original.version)
+            count = len(host.providers.instances)
+            await host.providers.reload()
+            self.assertEqual(len(host.providers.instances), count)
+
+    async def test_litellm_metadata_is_local_and_json_overrides_only_selected_fields(self):
+        """LiteLLM fills missing metadata offline; native connections use only JSON prices."""
+        self.write(backend='litellm')
+        catalog = {'tiny':dict(max_input_tokens=5, max_output_tokens=7, input_cost_per_token='9',
+            output_cost_per_token='8', cache_read_input_token_cost='6', cache_creation_input_token_cost='99')}
+        with patch('autoagent.host.providers.load_litellm_catalog', return_value=(catalog, 'local')), \
+                patch('autoagent.agent.providers._litellm_sdk.load_litellm_sdk'):
+            async with self.host() as host:
+                info = (await host.providers.describe())['items'][0]['models'][0]['model_info']
+                self.assertEqual(info['input_cost_per_token'], '0.000001')
+                self.assertEqual(info['max_output_tokens'], 4096)
+                self.assertNotIn('cache_creation_input_token_cost', info)
+                self.write()
+                await host.providers.reload()
+                self.assertEqual((await host.providers.describe())['items'][0]['backend'], 'openai')
+
+    async def test_enabled_litellm_is_initialized_before_catalog_use(self):
+        """Host startup prepares enabled SDKs before the project can accept model requests."""
+        self.write(backend='litellm')
+        with patch('autoagent.host.providers.load_litellm_catalog', return_value=({}, 'local')), \
+                patch('autoagent.agent.providers._litellm_sdk.load_litellm_sdk') as prepare:
+            async with self.host() as host:
+                prepare.assert_called_once_with()
+                self.assertEqual(host.providers.get('local').config.backend, 'litellm')
+
+    async def test_disabled_litellm_does_not_initialize_optional_sdk(self):
+        """Disabled connections and models do not require loading the optional LiteLLM SDK."""
+        with patch('autoagent.host.providers.load_litellm_catalog', return_value=({}, 'local')), \
+                patch('autoagent.agent.providers._litellm_sdk.load_litellm_sdk') as prepare:
+            self.write(backend='litellm', enabled=False)
+            async with self.host() as host:
+                prepare.assert_not_called()
+                self.write(backend='litellm', models=[{'id':'tiny', 'enabled':False}])
+                await host.providers.reload()
+                prepare.assert_not_called()
+
+    async def test_sdk_initialization_failure_preserves_published_catalog(self):
+        """Reload cannot publish a LiteLLM connection until its SDK is successfully initialized."""
+        self.write()
+        async with self.host() as host:
+            original = host.providers.get('local')
+            before = await host.providers.describe()
+            self.write(backend='litellm')
+            with patch('autoagent.host.providers.load_litellm_catalog', return_value=({}, 'local')), \
+                    patch('autoagent.agent.providers._litellm_sdk.load_litellm_sdk') as prepare:
+                prepare.side_effect = ImportError('SDK initialization failed')
+                with self.assertRaisesRegex(ImportError, 'SDK initialization failed'):
+                    await host.providers.reload()
+                self.assertIs(host.providers.get('local'), original)
+                self.assertEqual((await host.providers.describe())['version'], before['version'])
+                prepare.side_effect = None
+                await host.providers.reload()
+                self.assertEqual(host.providers.get('local').config.backend, 'litellm')
+
+    async def test_custom_workflow_calls_are_recorded_once_and_prices_are_pinned_across_reload(self):
+        """A refresh during a real SDK request cannot reprice its usage or duplicate its call record."""
+        self.write()
+        entered, release = threading.Event(), threading.Event()
+        async def respond(http_request):
+            entered.set()
+            await asyncio.to_thread(release.wait, 10)
+            body = chat_body()
+            body['model'] = 'tiny'
+            return httpx.Response(200, json=body)
+        original = CatalogProvider._make_transport
+        clients = []
+        def factory(owner, kind, config, **kwargs):
+            client = AsyncOpenAI(api_key=config.api_key.get_secret_value(), http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)))
+            clients.append(client)
+            return original(owner, kind, config, client=client, **kwargs)
         def model_input(ctx: InputMappingContext) -> LLMRequest:
-            return llm_request(input=request().input, **dict(ctx.invocation_input))
-        workflow = Workflow("per-call", nodes=[Node("call", LLM_CALL, input_mapping=model_input)])
-        env = {"AUTOAGENT_LLM_API_KEY": "test", "AUTOAGENT_LLM_STREAMING": "true",
-               "AUTOAGENT_LLM_MAX_OUTPUT_TOKENS": "512"}
-        with patch.object(AgentSettings, "create_provider", factory):
-            async with self.host(workflows=[workflow], environment=env) as host:
-                for payload in ({"model": "small", "streaming": False, "max_output_tokens": 128},
-                                {"model": "large"}):
-                    result = await host.join(await host.execute(workflow.id, payload))
-                    self.assertEqual(result.status, "completed", result.error)
-        self.assertEqual([(mode, value.model, value.max_output_tokens, value.streaming)
-                          for mode, value in provider.calls],
-                         [("invoke", "small", 128, False), ("stream", "large", 512, True)])
-        self.assertTrue(provider.closed)
+            return request(model='tiny', routing={'provider':'local'})
+        workflow = Workflow('custom', nodes=[Node('call', LLM_CALL, input_mapping=model_input)])
+        with patch.object(CatalogProvider, '_make_transport', factory):
+            async with self.host([workflow]) as host:
+                ref = await host.execute('custom', {})
+                self.assertTrue(await asyncio.to_thread(entered.wait, 10))
+                self.write(rate='1')
+                await host.providers.reload()
+                release.set()
+                result = await host.join(ref)
+                self.assertEqual(result.status, 'completed', result.error)
+                usage = await host.token_usage(invocation_id=ref.invocation_id)
+                self.assertEqual(usage.call_count, 1)
+                self.assertEqual(usage.cost_usd, '0.000009')
+        for client in clients:
+            await client.close()
 
-    async def test_request_defaults_alone_do_not_create_a_host_connection(self):
-        """Setting streaming defaults without a model or key does not import SDKs or demand credentials."""
-        with patch.object(AgentSettings, "create_provider", side_effect=AssertionError("Unexpected connection")):
-            async with self.host(workflows=[Workflow("unbound", nodes=[Node("call", LLM_CALL)])],
-                                 environment={"AUTOAGENT_LLM_STREAMING": "true"}) as host:
-                self.assertEqual(host._runtime.app.operator_registry.for_capability(LLM_CALL.id), ())
+    async def test_json_default_routes_generic_calls_and_preserves_default_effort(self):
+        """A normal Workflow with no request model uses the Host JSON selection, including its effort."""
+        from unittest.mock import AsyncMock
+        from autoagent.agent import LLMResponse, LLMMessage, TextContent
+        from autoagent.host.providers import CatalogProvider
+        self.write()
+        path = self.root / 'providers.json'
+        config = json.loads(path.read_text())
+        config['default_model'] = {'provider':'local','model':'tiny','reasoning_effort':'high'}
+        path.write_text(json.dumps(config))
+        def llm_input(context: InputMappingContext) -> LLMRequest:
+            return LLMRequest(input=(LLMMessage(role='user', content=(TextContent(text='Hello'),)),))
+        workflow = Workflow('default-model', nodes=[Node('llm', LLM_CALL, input_mapping=llm_input)])
+        response = LLMResponse(model='tiny', finish_reason='stop', output=(LLMMessage(role='assistant', content=(TextContent(text='Done'),)),))
+        provider = AsyncMock(return_value=response)
+        with patch.object(CatalogProvider, 'ainvoke', provider):
+            async with self.host([workflow]) as host:
+                result = await host.join(await host.execute('default-model', {}))
+                self.assertEqual(result.status, 'completed', result.error)
+        self.assertEqual(provider.await_args.args[0].model, 'tiny')
+        self.assertEqual(provider.await_args.args[0].reasoning_effort, 'high')
 
-    async def test_environment_defaults_own_both_providers_on_the_runtime_loop(self):
-        """Host enters, uses and closes generation and embedding clients on one owned Runtime loop."""
-        from autoagent.agent import EmbeddingRequest
-        llm, embedding = DemoLLM(), DemoEmbedding()
-        loops = []
-        @asynccontextmanager
-        async def resource(provider):
-            loops.append(asyncio.get_running_loop())
-            try:
-                yield provider
-            finally:
-                loops.append(asyncio.get_running_loop())
-                await provider.aclose()
-        def factory(settings, *, embedding=False):
-            return resource(providers[embedding])
-        providers = {False: llm, True: embedding}
-        env = {"AUTOAGENT_LLM_MODEL": "test-model", "AUTOAGENT_EMBEDDING_MODEL": "embedding"}
-        workflows = [Workflow("llm", nodes=[Node("call", LLM_CALL)]), Workflow("embed", nodes=[Node("call", EMBEDDING)])]
-        with patch.object(AgentSettings, "create_provider", factory):
-            async with self.host(workflows=workflows, environment=env) as host:
-                generated = await host.join(await host.execute("llm", request()))
-                embedded = await host.join(await host.execute("embed", EmbeddingRequest(model="embedding", input="one")))
-                self.assertEqual(generated.status, "completed", generated.error)
-                self.assertEqual(embedded.status, "completed", embedded.error)
-                self.assertEqual(generated.output["model"], "test-model")
-                self.assertEqual(host._runtime.setup.capability_resolvers, {})
-        self.assertTrue(llm.closed)
-        self.assertTrue(embedding.closed)
-        self.assertEqual(len(set(loops)), 1)
-        self.assertIsNot(loops[0], asyncio.get_running_loop())
-
-    async def test_custom_registration_takes_precedence_and_unused_routes_stay_disabled(self):
-        """Custom Operators require no default key and the unconfigured embedding route creates no client."""
-        provider = DemoLLM()
+    async def test_embedding_has_only_explicit_code_registration(self):
+        """Embedding remains available through code even when legacy environment configuration is absent."""
+        provider = DemoEmbedding()
         @asynccontextmanager
         async def lifespan(setup):
-            setup.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id, default=True)
+            setup.register_operator(embedding_operator(provider), capability_id=EMBEDDING.id, default=True)
             yield
-        with patch.object(AgentSettings, "create_provider", side_effect=AssertionError("Default should not be constructed")):
-            async with self.host(workflows=[Workflow("llm", nodes=[Node("call", LLM_CALL)])], lifespan=lifespan,
-                environment={"AUTOAGENT_LLM_MODEL": "configured"}) as host:
-                result = await host.join(await host.execute("llm", request()))
-                self.assertEqual(result.status, "completed", result.error)
-        self.assertFalse(provider.closed)  # The custom lifespan owns its Provider.
-
-    async def test_partial_setup_failure_closes_resources_and_releases_store(self):
-        """If the second default fails, the first client closes and the database writer can reopen."""
-        provider = DemoLLM()
-        @asynccontextmanager
-        async def first():
-            try:
-                yield provider
-            finally:
-                await provider.aclose()
-        def factory(settings, *, embedding=False):
-            if embedding:
-                raise ValueError("embedding setup failed")
-            return first()
-        workflow = Workflow("llm", nodes=[Node("call", LLM_CALL)])
-        with patch.object(AgentSettings, "create_provider", factory):
-            with self.assertRaisesRegex(ValueError, "embedding setup failed"):
-                async with self.host(workflows=[workflow], environment={"AUTOAGENT_LLM_MODEL": "llm", "AUTOAGENT_EMBEDDING_MODEL": "embedding"}):
-                    self.fail("Startup should fail")
-        self.assertTrue(provider.closed)
-        async with self.host(workflows=[workflow], environment={}):
-            pass
+        def model_input(ctx: InputMappingContext) -> EmbeddingRequest:
+            return EmbeddingRequest(model='vectors', input='hello')
+        workflow = Workflow('vectors', nodes=[Node('embed', EMBEDDING, input_mapping=model_input)])
+        async with self.host([workflow], lifespan=lifespan) as host:
+            result = await host.join(await host.execute('vectors', {}))
+            self.assertEqual(result.status, 'completed', result.error)
 
 
-@unittest.skipUnless(POSTGRES_TEST_URL, "PostgreSQL URL is required")
-class PostgreSQLHostAgentDefaultsTests(HostAgentDefaultsTests):
-    async def asyncSetUp(self):
-        await super().asyncSetUp()
-        self.database = PostgreSQLDatabase()
-        self.url = await self.database.create()
+class SQLiteHostCatalogTests(HostCatalogContracts, unittest.IsolatedAsyncioTestCase):
+    pass
 
-    async def asyncTearDown(self):
-        try:
-            await self.database.close()
-        finally:
-            await super().asyncTearDown()
+
+@unittest.skipUnless(POSTGRES_TEST_URL, 'PostgreSQL URL not configured')
+class PostgreSQLHostCatalogTests(HostCatalogContracts, unittest.IsolatedAsyncioTestCase):
+    async def database_url(self):
+        database = PostgreSQLDatabase()
+        self.addAsyncCleanup(database.close)
+        return await database.create()

@@ -1,9 +1,12 @@
 """Agent App APIs wrap Host controls and User Events without Trace payloads."""
+
+from autoagent.agent import AgentResources, CommandTools
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from uuid import uuid4
 
@@ -33,6 +36,34 @@ def echo_note(text: str) -> str:
 
 
 class WorkspaceContracts:
+    async def test_session_lists_expose_running_then_completed_activity(self):
+        """Both directory lists expose the latest run and ordered state without loading execution bodies."""
+        entered, release = threading.Event(), threading.Event()
+        async def blocked(request):
+            entered.set()
+            await asyncio.to_thread(release.wait, 10)
+            return answer()
+        async with self.host(ScriptedProvider(blocked)) as host, self.client(host) as client:
+            sent = await client.post('/api/v2/agent/messages', json={'session_id': 'activity', 'message': 'Wait for release'})
+            self.assertEqual(sent.status_code, 202, sent.text)
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 10))
+                await host._persistence.flush()
+                running = (await client.get('/api/v2/agent/sessions')).json()['items'][0]
+                self.assertEqual(running['session_id'], 'activity')
+                self.assertEqual(running['status'], 'running')
+                self.assertEqual(running['invocation_id'], sent.json()['invocation_id'])
+            finally:
+                release.set()
+            await host.join(sent.json()['invocation_id'])
+            await host._persistence.flush()
+            recent = (await client.get('/api/v2/agent/sessions')).json()['items'][0]
+            scoped = (await client.get('/api/v2/agent/sessions', params={
+                'workspace_id': host.applications["agent"].context.project_workspace_id})).json()['items'][0]
+            self.assertEqual(recent['status'], 'completed')
+            self.assertEqual(recent['last_sequence'], scoped['last_sequence'])
+            self.assertGreater(recent['last_sequence'], running['last_sequence'])
+
     async def test_unbound_draft_preview_and_first_message_keep_workspace_choice(self):
         """A draft can select no Workspace, save its settings on first send, and then cannot rebind."""
         provider = ScriptedProvider(answer(), answer())
@@ -41,13 +72,13 @@ class WorkspaceContracts:
             self.assertEqual(preview.status_code, 200, preview.text)
             chosen = preview.json()['settings']
             self.assertIsNone(preview.json()['workspace'])
-            self.assertEqual((await host.agent_app.context.get_settings('loose')).version, 0)
+            self.assertEqual((await host.applications["agent"].context.get_settings('loose')).version, 0)
             catalog = (await client.get('/api/v2/agent/catalog')).json()
             resources = await client.get('/api/v2/agent/resources', params={
                 'session_id': 'loose', 'unbound': 'true', 'revision_id': catalog['agent']['revision_id']})
             self.assertEqual(resources.status_code, 200, resources.text)
             self.assertNotIn('read_file', {tool['name'] for tool in resources.json()['tools']})
-            self.assertNotIn('execute_command', {tool['name'] for tool in resources.json()['tools']})
+            self.assertIn('execute_command', {tool['name'] for tool in resources.json()['tools']})
             chosen['model'].update(model='draft-model')
             sent = await client.post('/api/v2/agent/queue', json={'session_id': 'loose', 'message': 'General question',
                 'request_id': uuid4().hex, 'workspace_id': None, 'initial_settings': chosen})
@@ -55,16 +86,16 @@ class WorkspaceContracts:
             result = await host.join(sent.json()['invocation_id'])
             self.assertEqual(result.status, 'completed', result.error)
             self.assertEqual(provider.requests[0].model, 'draft-model')
-            record = await host.agent_app.context.get_settings('loose')
+            record = await host.applications["agent"].context.get_settings('loose')
             self.assertIsNone(record.workspace)
             self.assertEqual(record.settings.model.model, 'draft-model')
             rebind = record.settings.model_dump(mode='json')
-            rebind['workspace'] = {'workspace_id': host.agent_context.project_workspace_id, 'working_directory': '.'}
+            rebind['workspace'] = {'workspace_id': host.applications["agent"].context.project_workspace_id, 'working_directory': '.'}
             denied = await client.put('/api/v2/agent/settings', json={
                 'session_id': 'loose', 'expected_version': record.version, 'settings': rebind})
             self.assertEqual(denied.status_code, 422, denied.text)
             denied = await client.get('/api/v2/agent/settings', params={
-                'session_id': 'loose', 'workspace_id': host.agent_context.project_workspace_id})
+                'session_id': 'loose', 'workspace_id': host.applications["agent"].context.project_workspace_id})
             self.assertEqual(denied.status_code, 409, denied.text)
 
     async def test_recent_lists_bound_and_unbound_chats_with_stable_workspace_metadata(self):
@@ -80,11 +111,16 @@ class WorkspaceContracts:
             await host._persistence.flush()
             recent = (await client.get('/api/v2/agent/sessions')).json()['items']
             self.assertEqual({row['session_id']: row['workspace_id'] for row in recent}, {
-                'loose': None, 'bound': host.agent_context.project_workspace_id})
+                'loose': None, 'bound': host.applications["agent"].context.project_workspace_id})
             self.assertEqual(recent[0]['session_id'], 'bound')
+            self.assertEqual(recent[0]['status'], 'completed')
+            self.assertGreater(recent[0]['last_sequence'], 0)
+            self.assertIn('control_state', recent[0])
             scoped = (await client.get('/api/v2/agent/sessions', params={
-                'workspace_id': host.agent_context.project_workspace_id})).json()['items']
+                'workspace_id': host.applications["agent"].context.project_workspace_id})).json()['items']
             self.assertEqual([row['session_id'] for row in scoped], ['bound'])
+            self.assertEqual(scoped[0]['last_sequence'], recent[0]['last_sequence'])
+            self.assertEqual(scoped[0]['status'], recent[0]['status'])
             unbound = (await client.get('/api/v2/agent/sessions', params={'unbound': 'true'})).json()['items']
             self.assertEqual([row['session_id'] for row in unbound], ['loose'])
 
@@ -97,10 +133,11 @@ class WorkspaceContracts:
     async def host(self, provider=None, workflows=None):
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider('offline', provider or ScriptedProvider(answer()))
-            setup.agent_context.set_defaults(settings(streaming=True))
-            setup.agent_context.resources.register_tool(Tool(echo_note), workflows=(BUILTIN_AGENT_WORKFLOW_ID,))
-            setup.agent_context.resources.register_skill(skill('workspace-skill'), workflows=(BUILTIN_AGENT_WORKFLOW_ID,))
+            setup.providers.register('offline', provider or ScriptedProvider(answer()))
+            setup.applications["agent"].context.set_defaults(settings(streaming=True))
+            setup.extensions["agent"].context.set_defaults(settings(streaming=True))
+            setup.applications["agent"].context.resources.register_tool(Tool(echo_note), workflows=(BUILTIN_AGENT_WORKFLOW_ID,))
+            setup.applications["agent"].context.resources.register_skill(skill('workspace-skill'), workflows=(BUILTIN_AGENT_WORKFLOW_ID,))
             yield
         async with AutoAgentHost(workflows=[builtin_agent_workflow(), *(workflows or [agent_workflow(user_events=True)])],
             lifespan=lifespan, settings=HostSettings(database_url=await self.database_url()), environment={}) as host:
@@ -111,17 +148,17 @@ class WorkspaceContracts:
 
     async def test_catalog_scopes_resources_and_settings_apply_at_next_start(self):
         """Safe catalogs expose explicit bindings and versioned Session settings control future stages."""
-        builds = [agent_workflow(user_events=True, tools=[Tool(echo_note)], skills=[skill('workspace-skill')]), agent_workflow(workflow_id='other')]
+        builds = [agent_workflow(user_events=True, resources=AgentResources(tools=[Tool(echo_note)], skills=[skill('workspace-skill')]),  ), agent_workflow(workflow_id='other')]
         async with self.host(ScriptedProvider(answer(), answer()), builds) as host, self.client(host) as client:
             catalog = (await client.get('/api/v2/agent/catalog')).json()
             self.assertNotIn('workflows', catalog)
             revision = catalog['agent']['revision_id']
-            self.assertIn('offline', catalog['providers'])
+            self.assertNotIn('offline', catalog['providers'])
             resources = await client.get('/api/v2/agent/resources', params={'revision_id': revision})
             self.assertEqual(resources.status_code, 200, resources.text)
             self.assertIn('echo_note', {tool['name'] for tool in resources.json()['tools']})
             self.assertEqual(resources.json()['skills'][0]['name'], 'workspace-skill')
-            self.assertEqual(resources.json()['skills'][0]['origin'], 'Host')
+            self.assertEqual(resources.json()['skills'][0]['origin'], 'Project')
             other_revision = host._runtime.workflow_ids['other']
             other = await client.get('/api/v2/agent/resources', params={'revision_id': other_revision})
             self.assertEqual(other.status_code, 404)
@@ -141,7 +178,7 @@ class WorkspaceContracts:
             self.assertEqual(execution.json()['snapshot']['settings']['model']['model'], 'chosen')
             desired['model']['model'] = 'later'
             await client.put('/api/v2/agent/settings', json=dict(body, expected_version=1))
-            self.assertEqual((await host.agent_app.context.get_snapshot(iid)).settings.model.model, 'chosen')
+            self.assertEqual((await host.applications["agent"].context.get_snapshot(iid)).settings.model.model, 'chosen')
             sessions = await client.get('/api/v2/agent/sessions')
             self.assertEqual(sessions.status_code, 200, sessions.text)
             self.assertEqual(sessions.json()['items'][0]['title'], 'Hello workspace')
@@ -150,7 +187,7 @@ class WorkspaceContracts:
             self.assertEqual(usage.json()['session'], (await host.token_usage(session_id=sid)).model_dump(mode='json'))
 
     async def test_turn_usage_sums_nested_agents_without_other_turns_or_siblings(self):
-        """Turn totals include cross-Session descendants once and preserve missing-price facts."""
+        """Turn totals include cross-Session descendants once and treat missing prices as zero."""
         steps = iter([response(call('run_agent', {'type': 'agent', 'task': 'child leaf', 'wait_timeout_seconds': 30})),
                       answer('worker done')])
         class Provider(RoutedProvider):
@@ -202,7 +239,7 @@ class WorkspaceContracts:
             await host._persistence.record_llm_call(completed(running(llm_call_id='unpriced', requested_model='unknown',
                 invocation_id=leaf['invocation_id'], session_id=leaf['session_id'])))
             partial = (await usage(root.invocation_id, root.session_id))['invocation']
-            self.assertEqual((partial['call_count'], partial['total_tokens'], partial['missing_cost_calls']), (6, 30, 1))
+            self.assertEqual((partial['call_count'], partial['total_tokens'], partial['missing_cost_calls']), (6, 30, 0))
             self.assertEqual(partial['cost_usd'], '0.000045')
             self.assertEqual((await client.get('/api/v2/agent/usage', params=dict(
                 invocation_id=worker['invocation_id'], session_id=root.session_id))).status_code, 400)

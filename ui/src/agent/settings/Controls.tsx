@@ -1,14 +1,14 @@
 import { useId, useState, type ReactNode } from 'react';
-import { BusyLabel, LoadingIndicator, SkeletonText } from '../../components/LoadingState';
-import { AgentIcon } from '../AgentIcon';
-import type { Decision } from './types';
-import { ApiError } from '../../http';
+import { BusyLabel, LoadingIndicator, SkeletonText } from '../../components/LoadingState.js';
+import { AgentIcon } from '../AgentIcon.js';
+import type { Decision } from './types.js';
+import { ApiError } from '../../http.js';
 
 export function Toggle({ label, checked, disabled, busy, onChange }: { label: string; checked: boolean; disabled?: boolean; busy?: boolean; onChange: (value: boolean) => void }) {
   return <span className="settings-toggle-wrap">{busy ? <LoadingIndicator small label={`Saving ${label}`} /> : null}<input className="settings-toggle" type="checkbox" role="switch" aria-label={label} aria-busy={busy || undefined} checked={checked} disabled={disabled || busy} onChange={event => onChange(event.target.checked)} /></span>;
 }
-export function DecisionSelect({ label, value, disabled, unknown = false, onChange }: { label: string; value: Decision; disabled?: boolean; unknown?: boolean; onChange: (value: Decision) => void }) {
-  return <select className={`settings-decision ${unknown ? 'code-policy' : ''}`} aria-label={label} value={unknown ? '' : value} disabled={disabled} onChange={event => onChange(event.target.value as Decision)}>{unknown ? <option value="" disabled>Code policy</option> : null}{(['allow', 'ask', 'deny'] as const).map(value => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</select>;
+export function DecisionSelect({ label, value, disabled, onChange }: { label: string; value: Decision; disabled?: boolean; onChange: (value: Decision) => void }) {
+  return <select className="settings-decision" aria-label={label} value={value} disabled={disabled} onChange={event => onChange(event.target.value as Decision)}>{(['allow', 'ask', 'deny'] as const).map(value => <option key={value} value={value}>{value[0].toUpperCase() + value.slice(1)}</option>)}</select>;
 }
 export function Fold({ title, count, actions, children, initial = true }: { title: string; count?: number; actions?: ReactNode; children: ReactNode; initial?: boolean }) {
   const [open, setOpen] = useState(initial), id = useId();

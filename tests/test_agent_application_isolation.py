@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from sqlalchemy import inspect, select
 
 from autoagent import Node, Operator, Workflow
-from autoagent.agent import AgentInput, Tool, agent_workflow
+from autoagent.agent import AgentInput, AgentResources, Tool, agent_workflow
 from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
 from autoagent.host import AutoAgentHost, HostSettings
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
@@ -40,20 +40,18 @@ class ApplicationIsolationContracts:
 
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider('offline', provider)
+            setup.providers.register('offline', provider)
             yield
 
-        custom = agent_workflow(workflow_id='custom', runtime=settings(model='explicit-model'), files=False, execution=False)
+        custom = agent_workflow(workflow_id='custom', runtime=settings(model='explicit-model'),  )
         ordinary = Workflow('ordinary', nodes=[Node('echo', Operator(echo))])
         async with AutoAgentHost(root=self.root, workflows=[custom, ordinary], lifespan=lifespan,
             settings=HostSettings(database_url=self.url), environment={}) as host:
-            with patch.object(host.agent_app.storage, 'context', new=AsyncMock(
-                side_effect=AssertionError('SDK accessed product storage'))) as product_storage:
-                result = await host.join(await host.execute('custom', AgentInput(message='Hello')))
-                self.assertEqual(result.status, 'completed', result.error)
-                self.assertEqual(provider.requests[0].model, 'explicit-model')
-                self.assertEqual((await host.join(await host.execute('ordinary', {'text':'Hello'}))).output, {'text':'Hello'})
-                product_storage.assert_not_awaited()
+            self.assertNotIn("agent", host.applications)
+            result = await host.join(await host.execute('custom', AgentInput(message='Hello')))
+            self.assertEqual(result.status, 'completed', result.error)
+            self.assertEqual(provider.requests[0].model, 'explicit-model')
+            self.assertEqual((await host.join(await host.execute('ordinary', {'text':'Hello'}))).output, {'text':'Hello'})
             self.assertEqual(await self.product_tables(host), [])
 
     async def test_product_preferences_and_controls_do_not_change_custom_workflow(self):
@@ -65,19 +63,19 @@ class ApplicationIsolationContracts:
 
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider('offline', provider)
-            setup.agent_context.set_defaults(settings(model='sdk-model'))
-            setup.agent_context.resources.register_tool(Tool(shared), workflows={'custom', BUILTIN_AGENT_WORKFLOW_ID})
+            setup.providers.register('offline', provider)
+            setup.extensions["agent"].context.set_defaults(settings(model='sdk-model'))
+            setup.applications["agent"].context.resources.register_tool(Tool(shared))
             yield
 
         workflows = [builtin_agent_workflow(execution=False),
-            agent_workflow(workflow_id='custom', runtime=settings(model='sdk-model'), files=False, execution=False)]
+            agent_workflow(workflow_id='custom', runtime=settings(model='sdk-model'), resources=AgentResources(tools=[shared]))]
         async with AutoAgentHost(root=self.root, workflows=workflows, lifespan=lifespan,
             settings=HostSettings(database_url=self.url), environment={}) as host:
             from autoagent.agent_app import ResourceControl
-            app = host.agent_app.context
+            app = host.applications["agent"].context
             await app.configure('chat', settings(model='product-model').session_defaults())
-            entry = host.agent_context.resources.get('tool', 'shared')
+            entry = app.resources.get('tool', 'shared')
             await app.shared_resources.save(ResourceControl(name='Hide shared', resource_id=entry.resource_id, enabled=False))
             custom = await host.join(await host.execute('custom', AgentInput(message='SDK'), session_id='custom-session'))
             product = await host.join(await app.start_conversation('chat', 'Product', unbound=True))
@@ -89,11 +87,10 @@ class ApplicationIsolationContracts:
             self.assertIsNone(await app.storage('snapshot', custom.invocation_id))
 
     async def test_disabled_product_does_not_validate_unused_product_configuration(self):
-        """Invalid product secrets and edit flags cannot break a custom-only Host."""
+        """Invalid product edit flags cannot break a custom-only Host."""
         workflow = Workflow('ordinary', nodes=[Node('echo', Operator(echo))])
         async with AutoAgentHost(root=self.root, workflows=[workflow],
             settings=HostSettings(database_url=self.url), environment={
-                'AUTOAGENT_APP_SECRETS_FILE': 'relative/unused.env',
                 'AUTOAGENT_AGENT_EDIT_CODE_PERMISSIONS': 'unused-invalid-value',
             }) as host:
             result = await host.join(await host.execute('ordinary', {'text': 'SDK only'}))

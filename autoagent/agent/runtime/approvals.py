@@ -1,4 +1,4 @@
-"""Reevaluate Agent approval views while preserving the original Core Wait."""
+"""Validate and project native approval Waits without a product monitoring service."""
 
 import asyncio
 from contextlib import asynccontextmanager
@@ -17,7 +17,7 @@ from autoagent.agent.workflow.tools import authorization_binding, binding_error
 from autoagent.agent.tools.execution import error_result
 from autoagent.agent.tools.context import tool_context
 
-from .models import HostRunConflict
+
 
 
 class AgentApprovals:
@@ -41,21 +41,24 @@ class AgentApprovals:
             self.locks.clear()
 
     async def changed(self, session_id=None):
-        """Reevaluate live Waits after committed Session or resource changes."""
+        """SDK reads at explicit execution/control boundaries; App schedules live updates."""
+
+    async def waiting(self, session_id=None):
+        """Resolve automatic decisions once a native Wait has been committed."""
         if self.loop is None:
             return
         async def schedule():
             async def update():
-                runtime = self.service.host._runtime
+                runtime = self.service.services.runtime
                 owners = {sid: sid for sid in tuple(runtime.resident)}
                 owners.update(runtime.owners)
                 refs = {root: runtime.resident[root] for sid, root in tuple(owners.items())
                     if (session_id is None or sid == session_id) and root in runtime.resident}
                 async def refresh(ref):
-                    await self.reconcile(ref, await runtime.app.astatus(ref), join=False)
+                    if self.service.for_workflow(ref.workflow_revision_id) is self.service:
+                        await self.reconcile(ref, await runtime.app.astatus(ref), join=False)
                 await asyncio.gather(*(refresh(ref) for ref in refs.values()))
-            # This Host-owned task can outlive the notifying Operator. Do not
-            # borrow its executor, Tool context, or LLM recording scope.
+            # Never inherit an expiring Operator executor or Tool/recording scope.
             task = asyncio.create_task(update(), context=Context())
             self.tasks.add(task)
             def finished(task):
@@ -103,6 +106,7 @@ class AgentApprovals:
             checked = None
             if result is None:
                 tools = service.toolset(snapshot, binding=authorization_binding(task), catalog=catalog)
+                tools.context = await service.tool_context(snapshot, task.call, context=tools.context, phase="approval")
                 with tool_context(tools.context):
                     checked = await tools.apreflight(task.call)
                 result = checked.result
@@ -122,7 +126,7 @@ class AgentApprovals:
         latest = await service._get_snapshot(batch.invocation_id, cache=False)
         if (revision != service.resource_revision(snapshot) or latest is None or latest.snapshot_id != snapshot.snapshot_id
                 or latest.settings.approval_mode != snapshot.settings.approval_mode):
-            raise HostRunConflict("approval_changed", "Agent resources or settings changed during approval evaluation; refresh.")
+            raise self.service.services.conflict("approval_changed", "Agent resources or settings changed during approval evaluation; refresh.")
         identity = [wait.id, snapshot.snapshot_id, revision,
             [value.model_dump(mode="json") for value in asks],
             [value.model_dump(mode="json") for value in automatic]]
@@ -134,17 +138,21 @@ class AgentApprovals:
     async def action_view(self, ref, wait_id):
         """Read one current external request without consuming or resuming it."""
         async def read():
-            status = await self.service.host._runtime.app.astatus(ref)
+            status = await self.service.services.runtime.app.astatus(ref)
             wait = next((value for value in status.waits if value.id == wait_id and value.kind == "external"), None)
             if wait is None:
-                raise HostRunConflict("wait_unavailable", "The external Wait is no longer pending.")
+                raise self.service.services.conflict("wait_unavailable", "The external Wait is no longer pending.")
             evaluated = await self._evaluate(wait)
             if evaluated is None:
-                return dict(request=plain(wait.request), response_example=None)
+                return dict(request=plain(wait.request), response_example=None,
+                    review=dict(reviewer="user", requires_user_input=True))
             view = evaluated[1]
             reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=False) for item in view.requests),
                 revision=view.revision)
-            return dict(request=view.model_dump(mode="json"), response_example=reply.model_dump(mode="json"))
+            reviewer = "user" if view.requests else "system" if any(
+                value.source == "system" for value in view.automatic) else "policy"
+            return dict(request=view.model_dump(mode="json"), response_example=reply.model_dump(mode="json"),
+                review=dict(reviewer=reviewer, requires_user_input=bool(view.requests)))
         return await self._run(read)
 
     async def project(self, result):
@@ -176,11 +184,11 @@ class AgentApprovals:
         async def respond():
             lock = self.locks.setdefault(ref.invocation_id, asyncio.Lock())
             async with lock:
-                app = self.service.host._runtime.app
+                app = self.service.services.runtime.app
                 status = await app.astatus(ref)
                 wait = next((value for value in status.waits if value.id == wait_id), None)
                 if wait is None:
-                    raise HostRunConflict("wait_unavailable", "The approval Wait is no longer pending; refresh the conversation.")
+                    raise self.service.services.conflict("wait_unavailable", "The approval Wait is no longer pending; refresh the conversation.")
                 evaluated = await self._evaluate(wait) if wait is not None else None
                 value = response
                 if wait is not None:
@@ -201,7 +209,7 @@ class AgentApprovals:
                     unchanged = (original.snapshot_id == view.snapshot_id and not view.automatic
                         and tuple(item.id for item in original.requests) == tuple(item.id for item in view.requests))
                     if reply.revision != view.revision and not (reply.revision is None and unchanged):
-                        raise HostRunConflict("approval_changed", "Approval view changed; fetch the current batch before replying.")
+                        raise self.service.services.conflict("approval_changed", "Approval view changed; fetch the current batch before replying.")
                     reply.validate_request(view)
                     value = self._resolved(original, view, reply.decisions)
                     value.validate_request(original)
@@ -220,7 +228,7 @@ class AgentApprovals:
         async def reconcile():
             lock = self.locks.setdefault(ref.invocation_id, asyncio.Lock())
             async with lock:
-                app = self.service.host._runtime.app
+                app = self.service.services.runtime.app
                 changed = False
                 current = await app.astatus(ref)
                 if current.control_state != "active":

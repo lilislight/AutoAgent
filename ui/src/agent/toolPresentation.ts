@@ -22,7 +22,7 @@ export function presentTool(tool: Pick<ToolSnapshot, 'name' | 'arguments' | 'sta
       return { title: `${text(request, 'operation') || 'Manage files'} ${text(request, 'path')}`.trim(), icon: 'folder', category: 'write' };
     }
     case 'execute_command': {
-      const command = object(args.command);
+      const command = typeof args.mode === 'string' ? args : object(args.command);
       const argv = Array.isArray(command.args) ? command.args.filter(arg => typeof arg === 'string').join(' ') : '';
       const display = text(command, 'mode') === 'shell' ? text(command, 'script') : [text(command, 'program'), argv].filter(Boolean).join(' ');
       return { title: `${done ? 'Ran' : tool.state === 'running' ? 'Running' : 'Run'} ${display.replace(/\s+/g, ' ').trim().slice(0, 180) || 'command'}`, icon: 'terminal', category: 'command' };

@@ -1,0 +1,47 @@
+{
+  "default_model": {
+    "provider": "deepseek",
+    "model": "deepseek/deepseek-flash"
+  },
+  "compaction_model": null,
+  "providers": {
+    "deepseek": {
+      "enabled": true,
+      "backend": "litellm",
+      "protocol": "openai.chat_completions",
+      "models": [
+        {
+          "id": "deepseek/deepseek-flash",
+          "name": "deepseek-flash",
+          "enabled": true
+        }
+      ],
+      "base_url": "https://api.deepseek.com",
+      "api_key": "${AGENT_DEMO_API_KEY}"
+    },
+    "openai": {
+      "enabled": true,
+      "backend": "openai",
+      "protocol": "openai.responses",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "demo-key-not-for-real-requests",
+      "models": [
+        {
+          "id": "gpt-6.1-sol",
+          "name": "GPT-6.1 Sol · Demo",
+          "enabled": true,
+          "reasoning_effort": {
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "default": "high"
+          }
+        }
+      ]
+    }
+  }
+}

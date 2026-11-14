@@ -1,10 +1,10 @@
 export type Decision = 'allow' | 'ask' | 'deny';
 export type Section = 'providers' | 'tools' | 'mcp' | 'skills';
-export type Operator = 'equals' | 'not_equals' | 'in' | 'not_in' | 'glob' | 'exists' | 'prefix' | 'contains' | 'lt' | 'lte' | 'gt' | 'gte' | 'regex';
-export interface Condition { source: 'arguments' | 'operation' | 'call'; path: string; operator: Operator; value: unknown }
-export interface Rule { conditions: Condition[]; match: 'all' | 'any'; decision: Decision; reason?: string | null }
+export type Operator = 'equals' | 'not_equals' | 'in' | 'not_in' | 'glob' | 'exists' | 'prefix' | 'suffix' | 'contains' | 'lt' | 'lte' | 'gt' | 'gte' | 'regex' | 'any_item' | 'all_items';
+export type Condition = { field: string; op: Operator; value: unknown; flags?: string } | { all: Condition[] } | { any: Condition[] } | { not: Condition };
+export interface Rule { id?: string | null; when: Condition; decision: Decision; reason?: string | null }
 export interface Policy { default: Decision; rules: Rule[] }
-export interface Credential { source: 'env' | 'file'; name: string }
+export interface Credential { source: 'env'; name: string }
 export interface ResourceConfig {
   kind: 'mcp' | 'skills' | 'resource' | 'group'; name: string; enabled: boolean; permissions?: Policy | null;
   resource_id?: string; group_id?: string; path?: string; interval_seconds?: number;
@@ -15,19 +15,20 @@ export interface ResourceConfig {
 export interface ConfigRecord { id: string; version: number; configuration: ResourceConfig; state: string; error: string | null }
 export interface Resource {
   management_id: string; group_id: string; group_name: string; resource_id: string; kind: 'tool' | 'skill'; name: string;
-  origin: 'builtin' | 'project' | 'mcp' | 'manual' | 'workspace'; source_id?: string; workspace_id?: string; remote_name?: string;
-  description: string; location?: string; input_schema?: Record<string, unknown>;
-  available: boolean; enabled: boolean; permissions: Policy | null; default_decision: Decision; parameter_policy: boolean;
+  origin: 'builtin' | 'project' | 'mcp' | 'manual' | 'workspace' | 'shared'; source_id?: string; workspace_id?: string; remote_name?: string;
+  description: string; location?: string; input_schema?: Record<string, unknown>; operation_schema?: Record<string, unknown> | null;
+  available: boolean; enabled: boolean; enabled_editable?: boolean; permissions: Policy | null; default_decision: Decision; parameter_policy: boolean;
   permission_source: string; permissions_editable: boolean; approval_exempt?: boolean;
 }
 export interface Group { id: string; name: string; origin: Resource['origin']; resources: Resource[]; enabled: boolean; permissions: Policy | null; permissions_editable: boolean }
 export interface Inventory { items: ConfigRecord[]; resources: Resource[]; groups: Group[]; workspace_id: string; revision: number; edit_code_permissions: boolean; policy_schema: Record<string, unknown> }
-export interface ProviderConfig {
-  name: string; backend: 'openai' | 'litellm'; provider_id: string; protocol: 'openai.chat_completions' | 'openai.responses';
-  base_url: string | null; model_prefix: string | null; api_key: Credential | null; headers: Record<string, Credential>;
-  timeout_seconds: number; models: string[]; enabled: boolean;
+export interface ConfiguredModel {
+  id: string; name: string; enabled: boolean; url: string | null;
+  reasoning_effort: { values: string[]; default: string } | null;
+  model_info: { max_input_tokens?: number; max_output_tokens?: number; input_cost_per_token: string; output_cost_per_token: string; cache_read_input_token_cost: string };
 }
-export interface ProviderRecord { id: string; alias: string; version: number | string; configuration: Partial<ProviderConfig> & { name: string; enabled: boolean }; editable: boolean }
+export interface ProviderRecord { id: string; enabled: boolean; backend: 'openai' | 'litellm'; protocol: string; base_url: string | null; models: ConfiguredModel[] }
+export interface ProviderInventory { items: ProviderRecord[]; path: string; version: string; default_model?: { provider: string; model: string | null } | null; compaction_model?: { provider: string; model: string | null } | null }
 export interface RemoteTool { name: string; description: string | null; input_schema: Record<string, unknown> }
 export interface ConnectionTest { connected: boolean; tools: RemoteTool[]; error?: string }
 

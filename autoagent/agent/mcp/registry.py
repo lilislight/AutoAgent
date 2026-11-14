@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import AsyncExitStack, aclosing
+import math
 from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING
 
@@ -121,44 +123,74 @@ class MCPToolRegistry:
         await self.aprepare()
         return await self.snapshot.ainvoke(call)
 
-    async def watch(self, *, policy=None):
-        """Refresh on subscribed changes and expose resync boundaries to the caller."""
+    async def watch(self, *, policy=None, poll_interval_seconds=30.0):
+        """Use supported notifications, with catalog polling when unavailable."""
+        if (isinstance(poll_interval_seconds, bool) or not isinstance(poll_interval_seconds, (int, float))
+                or not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0):
+            raise ValueError("MCP catalog poll interval must be finite and positive.")
         await self.aprepare()
-        if self._client.protocol_version < "2026-07-28":
-            from .recovery import MCPChangeEvent, MCPSubscriptionUpdate
-            changed = asyncio.Event()
-            def notice(message):
-                if getattr(message, "method", None) == "notifications/tools/list_changed" or (
-                    isinstance(message, Exception) and self._client._is_connection_error(message)
-                ):
-                    changed.set()
-            unsubscribe = self._client.observe_messages(notice)
-            try:
-                # Subscribe before the first refetch so a change during initial
-                # discovery cannot disappear between discovery and listening.
-                await self.refresh()
-                yield MCPSubscriptionUpdate(type="connected", generation=self._client.generation, resync_required=True,
-                    honored={})
-                while True:
-                    await changed.wait()
-                    changed.clear()
-                    previous = self._client.generation
-                    if not self._client.is_connected:
-                        await self._client.areconnect(policy=policy, expected_generation=previous)
-                    await self.refresh()
-                    if self._client.generation != previous:
-                        yield MCPSubscriptionUpdate(type="connected", generation=self._client.generation, resync_required=True,
-                            honored={})
+        notifications = bool(self._client.server_capabilities.get("tools", {}).get("listChanged"))
+        if self._client.protocol_version >= "2026-07-28" and notifications:
+            from mcp.shared.exceptions import MCPError
+            async with AsyncExitStack() as stack:
+                try:
+                    subscription = await stack.enter_async_context(
+                        self._client.listen_resilient(tools_list_changed=True, policy=policy))
+                except MCPError as error:
+                    # Some peers advertise changes but omit the subscription
+                    # method. Do not hide authentication or discovery failures.
+                    if error.code != -32601:
+                        raise
+                else:
+                    async for update in subscription:
+                        if update.type == "connected" and not update.honored.get("toolsListChanged"):
+                            break
+                        await self.refresh()
+                        yield update
                     else:
-                        yield MCPSubscriptionUpdate(type="notification", generation=self._client.generation,
-                            event=MCPChangeEvent(type="tools_list_changed"))
-            finally:
-                unsubscribe()
-            return
-        async with self._client.listen_resilient(tools_list_changed=True, policy=policy) as subscription:
-            async for update in subscription:
-                await self.refresh()
+                        return
+            notifications = False
+        async with aclosing(self._watch_messages(policy=policy,
+                poll_interval_seconds=None if notifications else poll_interval_seconds)) as updates:
+            async for update in updates:
                 yield update
+
+    async def _watch_messages(self, *, policy, poll_interval_seconds):
+        from .recovery import MCPChangeEvent, MCPSubscriptionUpdate
+        changed = asyncio.Event()
+        def notice(message):
+            if getattr(message, "method", None) == "notifications/tools/list_changed" or (
+                isinstance(message, Exception) and self._client._is_connection_error(message)
+            ):
+                changed.set()
+        unsubscribe = self._client.observe_messages(notice)
+        try:
+            # Observe before rediscovery so an initial change cannot be lost.
+            await self.refresh()
+            yield MCPSubscriptionUpdate(type="connected", generation=self._client.generation,
+                resync_required=True, honored={})
+            while True:
+                try:
+                    await asyncio.wait_for(changed.wait(), timeout=poll_interval_seconds)
+                except TimeoutError:
+                    pass
+                changed.clear()
+                previous, metadata = self._generation, self.metadata
+                try:
+                    await self.refresh()
+                except Exception as error:
+                    if not self._client._is_connection_error(error):
+                        raise
+                    await self._client.areconnect(policy=policy, expected_generation=previous)
+                    await self.refresh()
+                if self._client.generation != previous:
+                    yield MCPSubscriptionUpdate(type="connected", generation=self._client.generation,
+                        resync_required=True, honored={})
+                elif self.metadata != metadata:
+                    yield MCPSubscriptionUpdate(type="notification", generation=self._client.generation,
+                        event=MCPChangeEvent(type="tools_list_changed"))
+        finally:
+            unsubscribe()
 
     def as_operator(self, *, id: str = "mcp_tools") -> Operator:
         from autoagent.core import Operator

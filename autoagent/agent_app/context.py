@@ -1,11 +1,10 @@
 """Product preferences and runtime services injected into the Agent SDK."""
 
+import asyncio
 from contextlib import asynccontextmanager
 import json
-from types import SimpleNamespace
-
-from autoagent.agent.context import (AgentExecutionSnapshot, AgentModelSelection, AgentHostSettings, AgentSessionSettings, restore, plain)
-from autoagent.host.agent_context import HostAgentContext, _UNSET
+from autoagent.agent.context import AgentModelSelection, restore, plain
+from autoagent.agent.runtime.context import AgentRuntime
 from .queue import AgentMessageQueue
 from .resources import ManagedAgentResources
 from .workspaces import ApplicationWorkspaces
@@ -13,14 +12,18 @@ from .models import ApplicationSessionSettings
 from autoagent.host.models import HostNotFoundError
 
 
-class ApplicationContext(HostAgentContext):
+class ApplicationContext(AgentRuntime):
     """Persistent preferences are owned exclusively by the built-in product."""
 
+    session_settings_type = ApplicationSessionSettings
+
     def __init__(self, host):
-        super().__init__(host)
+        super().__init__(host.runtime_services)
+        self.host = host
         self._defaults_explicit = False
-        self._agent_parents = host.agent_context._agent_parents
-        self.approvals = host.agent_context.approvals
+        self._live_invocations = set()
+        from .approvals import AgentApprovals
+        self.approvals = AgentApprovals(self)
         self.messages = AgentMessageQueue(self)
         self.shared_resources = ManagedAgentResources(self)
         self._workspaces = ApplicationWorkspaces(self)
@@ -31,20 +34,56 @@ class ApplicationContext(HostAgentContext):
         super().set_defaults(settings)
 
     def initialize_defaults(self, sdk):
+        self._agent_parents = sdk._agent_parents
         if not self._defaults_explicit:
-            self.defaults = sdk.defaults.model_copy(deep=True)
-        for workspace in sdk.workspaces.entries():
-            if not any(entry.info.id == workspace.info.id for entry in self.workspaces.entries()):
-                self.workspaces.register(workspace)
-        for entry in sdk.resources.entries("provider"):
-            if not self.resources.has("provider", entry.name):
-                self.resources.register_provider(entry.name, entry.value, version=entry.version)
-        for entry in sdk.resources.entries("policy"):
-            if not self.resources.has("policy", entry.name):
-                self.resources.register_policy(entry.name, entry.value, version=entry.version)
+            self.defaults = self.defaults.model_copy(update={"model": self.defaults.model.model_copy(update={"streaming": True})})
+
+    async def _watch_resources(self):
+        """Reevaluate product approval waits after application resources change."""
+        previous = self.resources.revision
+        while True:
+            revision = self.resources.revision
+            if revision != previous:
+                previous = revision
+                await self.approvals.changed()
+            await asyncio.sleep(.1)
+
+    async def reconcile_history(self, conversation, invocation_id):
+        """Preserve committed Map results even when their Node never reached Output Binding."""
+        from autoagent.core import OperatorCallContext
+        from autoagent.agent import LLMToolCall, LLMToolResult
+        pending = conversation.pending
+        expected = {item.call_id for item in conversation.items[pending.start:] if isinstance(item, LLMToolCall)}
+        rows = await self.storage("completed_tool_results", OperatorCallContext.current().session_id, invocation_id)
+        results = dict(pending.results)
+        for row in rows:
+            if row.get("type") == "tool_result" and row.get("call_id") in expected:
+                result = restore(LLMToolResult, row)
+                results.setdefault(result.call_id, result)
+        return conversation.model_copy(update={"pending": pending.model_copy(update={"results": results})})
+
+    def allows_recovery(self, status, *, interrupted=False, automatic=False):
+        if status.status in {"completed", "failed", "cancelled"}:
+            return False
+        if automatic:
+            # Rehydrating a clean wait created in this Host is residency management,
+            # not reopening a stopped task. Startup cancels all older product tasks.
+            return status.invocation_id in self._live_invocations and bool(status.waits)
+        return status.control_state == "paused"
+
+    async def remember_model(self, session_id, model):
+        """Save the newest submission without replay activation overwriting user choices."""
+        record = await self.storage("remember_model", session_id, model)
+        return self._remember(record)
 
     def default_preferences(self):
-        return ApplicationSessionSettings.from_runtime(self.defaults)
+        result = ApplicationSessionSettings.from_runtime(self.defaults)
+        selected = self.host.providers.default_model
+        if selected is None:
+            selected = next((AgentModelSelection(provider=name, model=model.id)
+                for name, provider in self.host.providers.records.items() if provider.config.enabled
+                for model, info in provider.models.values() if model.enabled), None)
+        return result.model_copy(update={"model": selected}) if selected is not None else result
 
     def _remember(self, record):
         with self._lock:
@@ -59,38 +98,48 @@ class ApplicationContext(HostAgentContext):
     async def export_binding(self, iid):
         return None
 
-    @asynccontextmanager
-    async def borrow_tool(self, resource_id):
-        async with self.shared_resources.borrow(resource_id):
-            yield
-
     async def register_workspace_record(self, configuration):
         return await self.storage("register_workspace", configuration)
 
     async def storage(self, method, *args, **kwargs):
-        return await self.host.agent_app.storage.context(method, *args, **kwargs)
+        return await self.host.applications["agent"].storage.context(method, *args, **kwargs)
 
-    async def restore_state(self):
-        await self.storage("prepare")
-        await self._workspaces.restore()
+    @asynccontextmanager
+    async def resource_scope(self):
+        async with super().resource_scope():
+            try:
+                await self.storage("prepare")
+                await self._workspaces.restore()
+                yield
+            finally:
+                await self._workspaces.close_execution()
+                self._workspaces.clear()
+
+    @property
+    def project_workspace_id(self):
+        return self._workspaces.project_id
+
+    async def register_workspace(self, workspace, *, replace=False):
+        return await self.host._perform(lambda: self._workspaces.register(workspace, replace=replace), control=True)
+
+    async def list_workspaces(self):
+        return await self.host._perform(self._workspaces.describe)
+
+    async def prepare_workspace(self, snapshot):
+        return await self._workspaces.prepare(snapshot)
+
+    def process_managers(self):
+        managers = super().process_managers()
+        if self._workspaces.process_manager is not None:
+            managers.add(self._workspaces.process_manager)
+        return managers
 
     def resource_revision(self, snapshot):
-        return (*super().resource_revision(snapshot), self.host.agent_context.resources.revision,
+        return (*super().resource_revision(snapshot), self._workspaces.revision(snapshot),
             self.shared_resources.identity)
 
-    def additional_resources(self, snapshot, tools, skills):
-        workflow_id = self.host._runtime.workflow_irs[snapshot.bindings["workflow_revision"]].workflow_id
-        project_tools, project_skills = self.host.agent_context.resources.catalog(workflow_id)
-        tools, skills = (*tools, *project_tools), (*skills, *project_skills)
-        managed_tools, managed_skills = self.shared_resources.catalog((tools, skills))
-        return ((*tools, *managed_tools),
-                self.shared_resources.filter((*skills, *managed_skills)))
-
-    def finalize_catalog(self, snapshot, catalog, skills):
-        return {entry.name: entry for entry in self.shared_resources.filter(catalog.values())}, skills
-
     def toolset(self, snapshot, *, binding=None, catalog=None, observations=None):
-        from autoagent.agent import ToolContext, ToolDecision
+        from autoagent.agent import ToolDecision
         from autoagent.agent.tools.operations import combine_decisions
         tools = super().toolset(snapshot, binding=binding, catalog=catalog, observations=observations)
         catalog = catalog if catalog is not None else self.catalog(snapshot)[0]
@@ -167,7 +216,7 @@ class ApplicationContext(HostAgentContext):
 
 
     async def workspace_catalog(self):
-        """Describe only the SDK Agent; user Agent builds are execution Workflows."""
+        """Describe the product Workflow and its application defaults."""
         async def read():
             from autoagent.agent_app.workflow import BUILTIN_AGENT_WORKFLOW_ID, is_builtin_agent
             runtime = self.host._runtime
@@ -182,9 +231,8 @@ class ApplicationContext(HostAgentContext):
                     include_ask_user=options.include_ask_user, subagents=options.subagents.enabled,
                     context_policy={key: getattr(policy, key, None) for key in
                         ("context_window", "compact_at_ratio", "compact_at_tokens", "target_ratio", "target_tokens")})
-            providers = sorted({entry.name for entry in self.resources.entries("provider")} | {self.defaults.model.provider})
             return dict(agent=agent, standalone=bool(agent is not None and len(runtime.workflow_ids) == 1),
-                providers=providers, defaults=self.default_preferences().model_dump(mode="json"),
+                defaults=self.default_preferences().model_dump(mode="json"),
                 generation_defaults=self.defaults.model.model_dump(mode="json", exclude={"provider", "model"}),
                 project_workspace_id=self.project_workspace_id)
         return await self.host._perform(read)
@@ -203,12 +251,12 @@ class ApplicationContext(HostAgentContext):
             if info["workflow_count"]:
                 workflows = await self.host._persistence.session_workflows(session_id, limit=1)
                 if info["workflow_count"] != 1 or not workflows.items or workflows.items[0]["workflow_id"] != BUILTIN_AGENT_WORKFLOW_ID:
-                    raise HostNotFoundError("This Session is not an SDK Agent conversation.")
+                    raise HostNotFoundError("This Session is not an Agent application conversation.")
             return info
         return await self.host._perform(read)
 
 
-    async def start_conversation(self, session_id, message, workspace_id=None, *, request_id=None, unbound=False, model=None):
+    async def start_conversation(self, session_id, message, workspace_id=None, *, request_id=None, unbound=False, model=None, remember_model=True):
         from autoagent.agent_app.workflow import BUILTIN_AGENT_WORKFLOW_ID
         from autoagent.agent.workflow.models import AgentInput
         from autoagent.host.models import HostNotFoundError
@@ -216,35 +264,20 @@ class ApplicationContext(HostAgentContext):
             model=restore(AgentModelSelection, model) if model is not None else None)
         catalog = await self.workspace_catalog()
         if catalog["agent"] is None:
-            raise HostNotFoundError("The SDK Agent is disabled for this project.")
+            raise HostNotFoundError("The Agent application is disabled for this project.")
         existing = await self.workspace_session(session_id, allow_new=True)
         record = await self.conversation_settings(session_id, workspace_id, unbound=unbound)
         await self.approvals._run(lambda: self._workspaces.validate(record.workspace))
         async def initialize():
             return await self.storage("initialize_settings", session_id, record.settings, record.workspace, message)
         await self.host._perform(initialize, control=True)
-        input_value = input_value.model_copy(update={"model": input_value.model or record.settings.model})
+        selected = self.bind_model(input_value.model or record.settings.model)
+        if remember_model:
+            await self.remember_model(session_id, selected.model_dump(mode="json"))
+        input_value = input_value.model_copy(update={"model": selected})
         return await self.host.execute_json(BUILTIN_AGENT_WORKFLOW_ID, input_value.model_dump(mode="json"),
             revision_id=catalog["agent"]["revision_id"], entry_node_id="start", session_id=session_id,
             require_existing_session=existing is not None, require_new_session=existing is None)
-
-
-    async def configure(self, session_id, settings, *, expected_version=None, workspace=_UNSET):
-        settings = restore(ApplicationSessionSettings, settings)
-        if not isinstance(session_id, str) or not session_id.strip():
-            raise ValueError("Session ID must be nonempty.")
-        if expected_version is not None and (type(expected_version) is not int or expected_version < 0):
-            raise ValueError("expected_version must be a nonnegative integer.")
-        async def update():
-            previous = await self.get_settings(session_id)
-            from autoagent.agent import WorkspaceBinding
-            binding = previous.workspace if workspace is _UNSET else restore(WorkspaceBinding, workspace) if workspace is not None else None
-            await self.approvals._run(lambda: self._workspaces.validate(binding))
-            record = await self.storage("configure", session_id, settings, expected_version, binding)
-            self._remember(record)
-            await self.approvals.changed(session_id)
-            return record
-        return await self.host._perform(update, payload=settings.model_dump(mode="json"), control=True)
 
 
     async def rename_conversation(self, session_id, title, *, expected_version):
@@ -259,65 +292,22 @@ class ApplicationContext(HostAgentContext):
 
 
     async def _read_settings(self, session_id):
-        return self._remember(await self.storage("settings", session_id, self.defaults))
-
-
-    async def _get_snapshot(self, iid, *, cache=True):
-        with self._lock:
-            found = self._snapshots.get(iid) if cache else None
-        if found is None:
-            found = await self.storage("snapshot", iid)
-            if found is not None and cache:
-                with self._lock:
-                    self._snapshots[iid] = found
-        if found is None:
-            return None
-        record = self._session_records.get(found["session_id"]) if cache else None
-        record = record or await self._read_settings(found["session_id"])
-        from autoagent.agent import WorkspaceBinding
-        selected = restore(AgentModelSelection, found["model"])
-        effective = self.effective_settings(record, selected)
-        effective = effective.model_copy(update={"workspace": restore(WorkspaceBinding, found["workspace"]) if found["workspace"] else None})
-        bindings = {**found["bindings"], **self._bindings(effective)}
-        return AgentExecutionSnapshot(snapshot_id=found["binding_id"], session_id=found["session_id"], invocation_id=iid,
-            epoch=1, reason="start", created_at_us=found["created_at_us"], settings_version=record.version,
-            settings=effective, bindings=bindings)
-
-
-    async def activate(self, sid, iid, *, reason, activation_id, workflow_revision=None, model=None, message=None):
-        record = await self._read_settings(sid)
-        selected = restore(AgentModelSelection, model) if model is not None else record.settings.model
-        workspace = record.workspace
-        parent_id = self._agent_parents.get(iid)
-        if parent_id is not None and not record.version:
-            parent = await self._get_snapshot(parent_id) if await self.for_invocation(parent_id) is self else None
-            if parent is not None:
-                if model is None:
-                    selected = AgentModelSelection(provider=parent.settings.model.provider, model=parent.settings.model.model)
-                workspace = parent.settings.workspace
-                record = record.model_copy(update={"settings": record.settings.model_copy(
-                    update={"approval_mode": parent.settings.approval_mode})})
+        record = await self.storage("settings", session_id, self.defaults)
         if not record.version:
-            preferences = record.settings.model_copy(update={"model": selected})
-            record = self._remember(await self.storage(
-                "initialize_settings", sid, preferences, workspace, message))
-        settings = self.effective_settings(record, selected).model_copy(update={"workspace": workspace})
-        bindings = {"workflow_revision": workflow_revision}
-        self._bindings(settings)  # Validate the selected Provider before admission.
-        ir = self.host._runtime.workflow_irs.get(workflow_revision)
-        options = self.options_for_workflow(ir) if ir is not None else None
-        if options is not None and options.subagents.enabled:
-            for alias, target in options.subagents.targets.items():
-                revision = target.workflow_revision_id or self.host._runtime.workflow_ids.get(target.workflow_id)
-                if revision not in self.host._runtime.workflow_irs:
-                    raise ValueError(f"Agent target {alias!r} is not registered.")
-                current = self.host._runtime.workflow_irs[revision]
-                if current.workflow_id != target.workflow_id or target.entry_node_id not in current.entry_node_ids:
-                    raise ValueError(f"Agent target {alias!r} has an invalid Workflow or entry Node.")
-                bindings["target:" + alias] = revision
-        return await self.storage("activate", sid, iid, selected, workspace, bindings, activation_id)
+            record = record.model_copy(update={"settings": self.default_preferences()})
+        return self._remember(record)
+
+    def _runtime_defaults(self, revision):
+        defaults = super()._runtime_defaults(revision)
+        selected = self.default_preferences().model
+        return defaults.model_copy(update={"model": defaults.model.model_copy(update={
+            "provider": selected.provider, "model": selected.model, "reasoning_effort": selected.reasoning_effort})})
 
 
+    async def activate(self, sid, iid, **options):
+        binding = await super().activate(sid, iid, **options)
+        self._live_invocations.add(iid)
+        return binding
 
 
     async def workspace_invocation(self, invocation_id):
@@ -327,45 +317,38 @@ class ApplicationContext(HostAgentContext):
             family = await self.host._persistence.execution_family(invocation_id)
             if family is None or any(row["workflow_id"] != BUILTIN_AGENT_WORKFLOW_ID
                     for row in [family["current"], *(family["ancestors"] or []), *([family["root"]] if family["root"] else [])]):
-                raise HostNotFoundError("This execution is not an SDK Agent conversation.")
+                raise HostNotFoundError("This execution is not an Agent application conversation.")
             return family
         family = await self.host._perform(read)
         await self.workspace_session(family["current"]["session_id"])
         return family
 
 
-    async def workspace_resources(self, revision, *, builtin=False, session_id=None, workspace_id=None, unbound=False):
-        """List only the selected Workflow's Build bindings and explicit Host grants."""
+    async def workspace_resources(self, revision, *, session_id=None, workspace_id=None, unbound=False):
+        """List application resources for one selected product Workspace."""
         async def read():
             from types import SimpleNamespace
             from autoagent.agent.workflow.builtins import workflow_catalog
             ir = self.host._runtime.workflow_irs.get(revision) if self.host._runtime else None
-            if builtin:
-                from autoagent.agent_app.workflow import is_builtin_agent
-                from autoagent.host.models import HostNotFoundError
-                if ir is None or not is_builtin_agent(ir):
-                    raise HostNotFoundError("SDK Agent resources are unavailable.")
-            if ir is None or self.options_for_workflow(ir) is None:
-                raise ValueError("Choose a registered Agent Workflow Revision.")
+            from .workflow import is_builtin_agent
+            if ir is None or not is_builtin_agent(ir):
+                raise HostNotFoundError("Agent application resources are unavailable.")
             if session_id is not None:
-                if builtin:
-                    await self.workspace_session(session_id, allow_new=True)
-                record = await self.conversation_settings(session_id, workspace_id, unbound=unbound) if builtin else await self.get_settings(session_id)
+                await self.workspace_session(session_id, allow_new=True)
+                record = await self.conversation_settings(session_id, workspace_id, unbound=unbound)
                 selected_settings = self.effective_settings(record)
             else:
                 selected_settings = self.defaults
             snapshot = SimpleNamespace(bindings={"workflow_revision": revision}, settings=selected_settings)
-            if selected_settings.workspace is not None:
-                await self.approvals._run(lambda: self.prepare_workspace(snapshot))
+            await self.approvals._run(lambda: self.prepare_workspace(snapshot))
             tools, skills = workflow_catalog(self, snapshot, self.options_for_workflow(ir))
-            registry = self._build_resources.get(revision)
-            local_skills = {entry.name for entry in registry.catalog(ir.workflow_id)[1]} if registry else set()
+            workspace_skills = {entry.name for entry in self._workspaces.catalog(snapshot, ir.workflow_id)[1]}
             return dict(user_signal_endpoint=self.options_for_workflow(ir).user_signal_endpoint,
                 tools=[dict(name=name, description=entry.value.definition.description,
                 origin="Built-in" if entry.resource_id.startswith("builtin:") else
-                    "Skill" if entry.resource_id.startswith("skills:") else "Build" if entry.resource_id.startswith("build:") else "Host",
+                    "Skill" if entry.resource_id.startswith("skills:") else "Project",
                 version=entry.version, resource_id=entry.resource_id) for name, entry in tools.items()],
                 skills=[dict(name=skill.metadata.name, description=skill.metadata.description,
-                    origin="Workspace" if skill.metadata.name in self._workspaces_skill_names(snapshot, ir.workflow_id)
-                        else "Build" if skill.metadata.name in local_skills else "Host") for skill in skills])
+                    origin="Workspace" if skill.metadata.name in workspace_skills
+                        else "Project") for skill in skills])
         return await self.host._perform(read)

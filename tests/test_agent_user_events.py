@@ -1,5 +1,7 @@
 """Agent presentation contracts, live progress and committed history snapshots."""
 
+from autoagent.agent import AgentResources, CommandTools
+
 import asyncio
 from contextlib import asynccontextmanager
 import json
@@ -60,10 +62,10 @@ class AgentEventContracts:
         options.setdefault("user_events", True)
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider("offline", provider)
-            setup.agent_context.set_defaults(defaults or settings())
+            setup.providers.register("offline", provider)
+            setup.extensions["agent"].context.set_defaults(defaults or settings())
             yield
-        async with AutoAgentHost(workflows=[agent_workflow(tools=tools, **options)], lifespan=lifespan,
+        async with AutoAgentHost(workflows=[agent_workflow(resources=AgentResources(tools=tools),  **options)], lifespan=lifespan,
             settings=HostSettings(database_url=await self.database_url()), environment={}) as host:
             yield host
 
@@ -241,8 +243,8 @@ class AgentEventContracts:
         provider = ScriptedProvider(tool_response(ask_call()), answer())
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider("offline", provider)
-            setup.agent_context.set_defaults(settings())
+            setup.providers.register("offline", provider)
+            setup.extensions["agent"].context.set_defaults(settings())
             yield
         options = dict(workflows=[workflow], lifespan=lifespan, settings=HostSettings(database_url=url), environment={})
         async with AutoAgentHost(**options) as host:
@@ -367,8 +369,8 @@ class AgentEventContracts:
         config = SubagentsConfig(enabled=True, targets={"worker": SubagentTarget(workflow_id="worker")})
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider("offline", provider)
-            setup.agent_context.set_defaults(settings())
+            setup.providers.register("offline", provider)
+            setup.extensions["agent"].context.set_defaults(settings())
             yield
         async with AutoAgentHost(workflows=[agent_workflow(user_events=True, subagents=config),
             agent_workflow(workflow_id="worker", user_events=True)], lifespan=lifespan,

@@ -15,9 +15,9 @@ import { conversationLandmarks, type ConversationLandmark } from './conversation
 export { formatTokens } from './ConversationTurn.js';
 
 const noInvocations: AgentInvocation[] = [];
-export const Conversation = memo(function Conversation({ state, loading, error, onRetry, onSuggest, invocations = noInvocations, execution, active = true, session = '', loadUsage, before, after, footer, running = false }: {
+export const Conversation = memo(function Conversation({ state, loading, error, onRetry, invocations = noInvocations, execution, active = true, session = '', loadUsage, before, after, footer, running = false }: {
   session?: string; loadUsage?: UsageLoader;
-  state: ConversationState; loading: boolean; error?: Error | null; onRetry: () => void; onSuggest?: (text: string) => void;
+  state: ConversationState; loading: boolean; error?: Error | null; onRetry: () => void;
   invocations?: AgentInvocation[]; execution?: AgentExecution; active?: boolean;
   before?: ReactNode; after?: ReactNode; footer?: ReactNode; running?: boolean;
 }) {
@@ -92,7 +92,7 @@ export const Conversation = memo(function Conversation({ state, loading, error, 
     {before}<div ref={content} className={`agent-feed ${!loading && !error && !entries.length ? 'is-empty' : ''}`} role="log" aria-label="Conversation" aria-live="off" aria-busy={loading}>
     {loading ? <ConversationSkeleton /> : null}
     {error ? <div className="agent-error-card" role="alert">Could not load saved messages: {error.message}<button onClick={onRetry}>Retry</button></div> : null}
-    {!loading && !error && !entries.length ? <div className="agent-welcome"><span className="agent-welcome-symbol"><AgentIcon name="sparkles" /></span><h2>What would you like to work on?</h2><p>Research a question, work through a plan, or create something together.</p>{onSuggest ? <div className="agent-suggestions">{[['Research a topic', 'Help me research '], ['Make a plan', 'Help me make a plan for '], ['Create something', 'Help me create ']].map(([label, text]) => <button key={label} onClick={() => onSuggest(text)}>{label}</button>)}</div> : null}</div> : null}
+    {!loading && !error && !entries.length ? <div className="agent-welcome"><h2>What would you like to work on?</h2></div> : null}
     {!loading ? entries.map(entry => {
       if (entry.type === 'message') return <ConversationMessage key={entry.id} row={entry.row} />;
       const item = metadata.get(entry.invocation);

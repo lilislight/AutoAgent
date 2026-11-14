@@ -34,7 +34,7 @@ class AgentResourceRegistry:
     Unregistering prevents new resolutions; already borrowed calls may finish.
     """
 
-    def __init__(self, *, namespace="host"):
+    def __init__(self, *, namespace="agent"):
         self.namespace = namespace
         self._lock = RLock()
         self._current = {}
@@ -164,11 +164,6 @@ class AgentResourceRegistry:
         for identity in tuple(self._versions):
             if identity[:2] == key:
                 del self._versions[identity]
-
-    def register_provider(self, name, provider, *, version="1", replace=False):
-        if any(not callable(getattr(provider, method, None)) for method in ("ainvoke", "astream")):
-            raise TypeError("Provider must implement ainvoke and astream.")
-        return self._register("provider", name, provider, version, replace)
 
     def register_tool(self, tool, *, version="1", replace=False, workflows=(), policy=None):
         from .tools import ExecutableTool, Tool

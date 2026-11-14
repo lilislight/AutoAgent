@@ -25,3 +25,13 @@ test('narrow viewports constrain tooltip width to the available horizontal space
   assert.ok(position.left + position.maxWidth <= 392);
   assert.equal(position.top, 8);
 });
+
+test('composer context hints open above their trigger and stay inside a narrow viewport', () => {
+  const position = placeTooltip({ left: 340, right: 372, top: 700, height: 32 }, { width: 250, height: 110 }, { width: 390, height: 844 }, 'top');
+  assert.equal(position.side, 'top');
+  assert.equal(position.top, 582);
+  assert.equal(position.left + 250, 382);
+  const nearTop = placeTooltip({ left: 100, right: 132, top: 12, height: 32 }, { width: 250, height: 110 }, { width: 390, height: 844 }, 'top');
+  assert.equal(nearTop.side, 'bottom');
+  assert.equal(nearTop.top, 52);
+});

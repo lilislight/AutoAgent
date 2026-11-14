@@ -104,22 +104,32 @@ def llm_call_operator(
                 raise ValueError("LLM resolver cannot replace an explicit model.")
             selected_provider = selection.provider
             request = LLMRequest.model_validate({**request.model_dump(mode="python"), "model": selection.model})
-        if request.model is None:
-            raise ValueError("Set a model on LLMRequest or supply an LLM resolver.")
-        if not request.streaming:
-            response = LLMResponse.model_validate(await selected_provider.ainvoke(request))
-            yield LLMStreamChunk(type="completed", response=response)
-            return
-        source = selected_provider.astream(request)
+        source = _invoke_provider(selected_provider, request)
         try:
             async for chunk in source:
                 yield chunk
         finally:
-            close = getattr(source, "aclose", None)
-            if close is not None:
-                await close()
+            await source.aclose()
 
     return Operator(invoke, id=id)
+
+
+async def _invoke_provider(selected_provider, request):
+    """Run one resolved Provider without re-resolving it during stream consumption."""
+    if request.model is None:
+        raise ValueError("Set a model on LLMRequest or supply an LLM resolver.")
+    if not request.streaming:
+        response = LLMResponse.model_validate(await selected_provider.ainvoke(request))
+        yield LLMStreamChunk(type="completed", response=response)
+        return
+    source = selected_provider.astream(request)
+    try:
+        async for chunk in source:
+            yield chunk
+    finally:
+        close = getattr(source, "aclose", None)
+        if close is not None:
+            await close()
 
 
 def embedding_operator(

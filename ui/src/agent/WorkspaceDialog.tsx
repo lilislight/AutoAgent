@@ -35,13 +35,12 @@ export function WorkspaceDialog({ onClose, onCreated }: { onClose: () => void; o
       }
     } finally { setBusy(false); }
   };
-  return <dialog ref={dialog} className="agent-workspace-dialog" aria-labelledby={`${id}-title`} aria-describedby={`${id}-description`} onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
+  return <dialog ref={dialog} className="agent-workspace-dialog" aria-labelledby={`${id}-title`} onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
     <header><div className="agent-workspace-dialog-title"><AgentIcon name="folder-add" /><h2 id={`${id}-title`}>Add workspace</h2></div><button type="button" className="agent-workspace-dialog-close" aria-label="Close workspace dialog" disabled={busy} onClick={onClose}><AgentIcon name="close" /></button></header>
-    <p id={`${id}-description`} className="agent-workspace-dialog-description">Choose a directory for your files, instructions, and skills.</p>
     <form onSubmit={event => void submit(event)}>
       <fieldset className="agent-workspace-dialog-fields" disabled={busy}>
         <label className="agent-field">Directory path<input ref={pathInput} required maxLength={4096} aria-describedby={`${id}-path-help`} value={path} onChange={event => changePath(event.target.value)} placeholder="/path/to/project" autoComplete="off" spellCheck={false} /></label>
-        <p id={`${id}-path-help`} className="agent-workspace-field-help">On the machine running AutoAgent. Use an absolute path, or a path relative to the current project. Missing directories are created automatically.</p>
+        <p id={`${id}-path-help`} className="agent-workspace-field-help">Server directory. Created if missing.</p>
         <label className="agent-field">Workspace name<input required maxLength={128} value={name} onChange={event => { nameEdited.current = true; setName(event.target.value); }} placeholder="My project" autoComplete="off" /></label>
       </fieldset>
       {error ? <p className="agent-error-text" role="alert">{error}</p> : null}

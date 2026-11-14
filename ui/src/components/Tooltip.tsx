@@ -2,7 +2,7 @@ import { Children, cloneElement, createContext, useCallback, useContext, useEffe
 import { createPortal } from 'react-dom';
 import { placeTooltip } from '../tooltipPlacement.js';
 
-type Tip = { id: string; anchor: HTMLElement; content: ReactNode };
+type Tip = { id: string; anchor: HTMLElement; content: ReactNode; placement?: 'side' | 'top' };
 const Context = createContext<{
   current: string | null;
   show: (tip: Tip, immediate: boolean) => void;
@@ -36,7 +36,7 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
     const update = () => {
       if (!tip.anchor.isConnected || tip.anchor.closest('[inert]')) { hide(); return; }
       const anchor = tip.anchor.getBoundingClientRect(), box = element.getBoundingClientRect();
-      setPosition({ ...placeTooltip(anchor, box, { width: innerWidth, height: innerHeight }), id: tip.id });
+      setPosition({ ...placeTooltip(anchor, box, { width: innerWidth, height: innerHeight }, tip.placement), id: tip.id });
     };
     update();
     const observer = new ResizeObserver(update); observer.observe(element); observer.observe(tip.anchor);
@@ -57,13 +57,13 @@ export function TooltipProvider({ children }: { children: ReactNode }) {
   ) : null}</Context.Provider>;
 }
 
-export function Tooltip({ children, content, disabled = false }: { children: ReactElement<HTMLAttributes<HTMLElement>>; content: ReactNode; disabled?: boolean }) {
+export function Tooltip({ children, content, disabled = false, placement }: { children: ReactElement<HTMLAttributes<HTMLElement>>; content: ReactNode; disabled?: boolean; placement?: 'side' | 'top' }) {
   const context = useContext(Context), id = useId();
   const child = Children.only(children), props = child.props;
   useEffect(() => () => context?.hide(id), [context?.hide, id]);
   useEffect(() => { if (disabled) context?.hide(id); }, [disabled, context?.hide, id]);
   if (!context) return child;
-  const show = (anchor: HTMLElement, immediate: boolean) => { if (!disabled && content) context.show({ id, anchor, content }, immediate); };
+  const show = (anchor: HTMLElement, immediate: boolean) => { if (!disabled && content) context.show({ id, anchor, content, placement }, immediate); };
   return cloneElement(child, {
     title: undefined,
     'aria-describedby': [props['aria-describedby'], context.current === id ? id : null].filter(Boolean).join(' ') || undefined,

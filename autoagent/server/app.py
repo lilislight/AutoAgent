@@ -132,10 +132,18 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
     from .user_events import user_event_routes
     user_events = user_event_routes(host, settings, _query)
     router.include_router(user_events.router)
-    application = getattr(host, 'agent_app', None)
+    application = host.applications.get('agent')
     if application is not None:
         from autoagent.agent_app.api import agent_router
         router.include_router(agent_router(application, settings, _query, user_events=user_events))
+
+    @router.get('/providers')
+    async def providers():
+        return await _query(host.providers.describe(), settings)
+
+    @router.post('/providers/reload')
+    async def reload_providers():
+        return await _query(host.providers.reload(), settings)
 
     @router.get('/query-projections')
     async def query_projections():
@@ -630,7 +638,9 @@ def create_app(
     With `host`, the caller owns its lifecycle, just as for create_router.
     """
     owns_host = host is None
-    host = host if host is not None else AutoAgentHost.from_project(project, env_file=env_file, use_env_file=use_env_file)
+    if host is None:
+        from autoagent.agent_app import AgentApplication
+        host = AutoAgentHost.from_project(project, env_file=env_file, use_env_file=use_env_file, applications=(AgentApplication,))
     settings = settings or ServerSettings.from_environment(host.environment, root=host.root)
 
     @asynccontextmanager

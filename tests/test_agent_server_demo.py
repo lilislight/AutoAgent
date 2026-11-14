@@ -13,7 +13,7 @@ from uuid import uuid4
 
 import httpx
 
-from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID
+from autoagent.agent_app import AgentApplication
 from autoagent.agent import (
     AgentApprovalRequest, AgentApprovalResponse, LLM_CALL, LLMMessage, LLMToolResult, llm_call_operator,
 )
@@ -45,19 +45,24 @@ class ServerDemoContracts:
     @asynccontextmanager
     async def client(self, provider):
         with tempfile.TemporaryDirectory() as directory:
+            providers = Path(directory) / "providers.json"
+            providers.write_text("{}")
             @asynccontextmanager
             async def lifespan(setup):
                 tools = importlib.import_module("agent_demo.tools")
                 with patch.object(tools, "NOTES_DIRECTORY", Path(directory) / "notes"):
-                    setup.agent_context.resources.register_provider("default", provider)
+                    setup.providers.register("default", provider)
+                    from autoagent.agent import AgentHostSettings, AgentModelSettings
+                    setup.extensions["agent"].context.set_defaults(AgentHostSettings(model=AgentModelSettings(model='offline')))
+                    setup.applications["agent"].context.set_defaults(AgentHostSettings(model=AgentModelSettings(model='offline')))
                     setup.register_operator(llm_call_operator(provider, id="demo.test.llm"),
                         capability_id=LLM_CALL.id, default=True)
                     project = importlib.import_module("agent_demo.project")
                     async with project.lifespan(setup):
                         yield
 
-            async with AutoAgentHost.from_project(PROJECT, use_env_file=False,
-                environment={"AUTOAGENT_LLM_MODEL": "offline"}, lifespan=lifespan,
+            async with AutoAgentHost.from_project(PROJECT, use_env_file=False, applications=(AgentApplication,),
+                environment={"AUTOAGENT_PROVIDERS_FILE": str(providers)}, lifespan=lifespan,
                 settings=HostSettings(database_url=await self.database_url(directory))) as host:
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(host, ui=False)),
                     base_url="http://demo") as client:
@@ -102,12 +107,11 @@ class ServerDemoContracts:
             self.assertEqual(waiting.status, "waiting", waiting.error)
             self.assertEqual({wait.request["kind"] for wait in waiting.waits}, {"agent.ask_user", "agent.tool_approval"})
             self.assertFalse((directory / "notes").exists())
-            snapshot = await host.agent_context.get_snapshot(invocation_id)
-            _, skills = host.agent_context.catalog(snapshot)
+            snapshot = await host.extensions["agent"].context.get_snapshot(invocation_id)
+            _, skills = host.extensions["agent"].context.catalog(snapshot)
             self.assertIn("demo-guide", [skill.metadata.name for skill in skills])
-            self.assertEqual(host.agent_context.resources.catalog("agent"), ((), ()))
-            self.assertTrue(all(entry.workflows == frozenset({BUILTIN_AGENT_WORKFLOW_ID})
-                for kind in ("tool", "skill") for entry in host.agent_context.resources.entries(kind)))
+            registry = host.extensions["agent"].context.resources_for(snapshot.bindings["workflow_revision"])
+            self.assertIsNot(registry, host.applications["agent"].context.resources)
             for wait in waiting.waits:
                 if wait.request["kind"] == "agent.ask_user":
                     payload = {"answers": [{"question_id": "city", "text": "北京"}]}
@@ -148,8 +152,8 @@ class ServerDemoContracts:
         """The actual /agent chat receives scoped demo resources and the SDK Context default."""
         prefix = ["-u", "-m", "agent_demo.cli_probe"]
         provider = ScriptedProvider(response(
-            call("execute_command", {"command": {"mode": "exec", "program": sys.executable,
-                "args": [*prefix, "info"]}}, "info"),
+            call("execute_command", {"mode": "exec", "program": sys.executable,
+                "args": [*prefix, "info"]}, "info"),
             call("skill_list_resources", {"name": "demo-guide"}, "resources")),
             response(call("skill_read_resource", {"name": "demo-guide", "path": "references/tool-checklist.md"}, "read")), answer())
         async with self.client(provider) as (host, client, _):
@@ -171,16 +175,16 @@ class ServerDemoContracts:
         """The chat demo asks for its harmless approval probe and blocks its deny probe."""
         prefix = ["-u", "-m", "agent_demo.cli_probe"]
         provider = ScriptedProvider(response(*[
-            call("execute_command", {"command": {"mode": "exec", "program": sys.executable,
-                "args": [*prefix, action]}}, action) for action in ("approval", "deny")]), answer())
+            call("execute_command", {"mode": "exec", "program": sys.executable,
+                "args": [*prefix, action]}, action) for action in ("approval", "deny")]), answer())
         async with self.client(provider) as (host, client, _):
             run = await client.post("/api/v2/agent/messages", json={"session_id": uuid4().hex, "message": "Test command permissions"})
             self.assertEqual(run.status_code, 202, run.text)
             waiting = await host.join(run.json()["invocation_id"])
             self.assertEqual(waiting.status, "waiting", waiting.error)
-            batch = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
+            batch = await host.extensions["agent"].context.get_approval(waiting.invocation_id, waiting.waits[0].id)
             self.assertEqual(len(batch.requests), 1)
-            self.assertFalse(host.agent_app.context._workspaces.process_manager.records())
+            self.assertFalse(host.applications["agent"].context._workspaces.process_manager.records())
             reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in batch.requests),
                 revision=batch.revision)
             await self.action(client, waiting.invocation_id, waiting.waits[0], reply.model_dump(mode="json"))

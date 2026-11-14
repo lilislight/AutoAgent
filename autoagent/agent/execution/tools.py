@@ -1,12 +1,14 @@
 """Two ordinary Tools with the existing ToolSet authorization boundary."""
 
-from typing import Annotated
-from pydantic import Field
+import json
+import os
+from typing import Annotated, Literal
+from pydantic import Field, ValidationError
 
-from ..models import ToolOutput
+from ..models import LLMToolResult, ToolOutput
 from ..tools import Tool, ToolContext, ToolSet
 from ..tools.operations import ToolOperationPolicy
-from .models import ExecutionCommand, ProcessRequest
+from .models import ExecCommand, ShellCommand, ProcessRequest
 from .service import ExecutionService
 
 
@@ -15,12 +17,59 @@ class _ExecutionTool(Tool):
         super().__init__(handler, **kwargs)
         self.service = service
 
+    def _invalid_arguments(self, call, message, *, details=()):
+        result = super()._invalid_arguments(call, message, details=details)
+        if self.metadata.name == "execute_command":
+            try:
+                decoded = json.loads(call.arguments)
+                nested = decoded.get("command")
+                shell = decoded.get("mode") == "shell" or "script" in decoded or (
+                    isinstance(nested, dict) and nested.get("mode") == "shell")
+            except (ValueError, AttributeError):
+                shell = False
+            result.structured_content["error"].update(
+                hint="Put mode, program/args or script/shell, cwd and output limits at the top level. Do not wrap them in command or add undeclared fields.",
+                expected_shape={"mode": "shell", "script": "echo hi"} if shell else
+                    {"mode": "exec", "program": "git", "args": ["status", "--short"]})
+        else:
+            result.structured_content["error"].update(
+                hint="Put the process operation inside request. Use a returned process_id and next_cursor when reading output.",
+                expected_shape={"request": {"action": "list"}})
+        return result
+
+    def _prepare(self, call):
+        prepared = super()._prepare(call)
+        if isinstance(prepared, LLMToolResult) or self.metadata.name != "execute_command":
+            return prepared
+        arguments, record = prepared
+        try:
+            if record["mode"] == "exec":
+                if record.get("script") is not None or record.get("shell") is not None:
+                    raise ValueError("Exec mode accepts program and args; omit script and shell.")
+                command = ExecCommand.model_validate({key: record[key] for key in ("mode", "program", "args")
+                    if record.get(key) is not None}, strict=True)
+            else:
+                if record.get("program") is not None or record.get("args") is not None:
+                    raise ValueError("Shell mode accepts script and optional shell; omit program and args.")
+                command = ShellCommand.model_validate({"mode": "shell", "script": record.get("script"),
+                    "shell": record.get("shell") or ("pwsh" if os.name == "nt" else "bash")}, strict=True)
+        except ValidationError as error:
+            details = error.errors(include_url=False, include_input=False, include_context=False)
+            return self._invalid_arguments(call, "; ".join(
+                f"{'.'.join(map(str, item['loc']))}: {item['msg']}" for item in details), details=details)
+        except ValueError as error:
+            return self._invalid_arguments(call, str(error))
+        return arguments, {**record, **command.model_dump(mode="json")}
+
     @property
     def definition(self):
         value = super().definition
         config = self.service.config
         if value.name == "execute_command":
             props = value.parameters["properties"]
+            props["args"]["description"] = "Literal argument array for exec mode. Do not repeat program; no shell expansion or splitting."
+            props["program"]["description"] = "Executable name or path for exec mode, not an entire command line."
+            props["shell"]["description"] = "Shell interpreter for shell mode. Omit to use bash on POSIX or pwsh on Windows."
             for name, description in {
                 "cwd": "Working directory relative to this Workspace's working directory, or an absolute directory subject to policy. Omitted '.' does not mean the repository root; the result reports resolved cwd.",
                 "yield_seconds": "Maximum initial wait, returning sooner on exit. 0 immediately returns a process handle. A running result is not a failure: continue with manage_process rather than starting the command again.",
@@ -47,6 +96,8 @@ class _ExecutionTool(Tool):
                 if name == "ProcessWait":
                     prop["default"] = config.default_wait_seconds
                 value.parameters["$defs"][name]["properties"]["max_output_bytes"]["anyOf"][0]["maximum"] = config.max_output_bytes
+                value.parameters["$defs"][name]["properties"]["max_line_bytes"]["description"] = (
+                    f"Per-line preview cap, default {config.max_line_bytes or 'unlimited'} bytes. Set 0 for raw lines; byte cursors and log files are unchanged.")
             value.parameters["$defs"]["ProcessWrite"]["properties"]["text"]["maxLength"] = config.max_input_bytes
             description = (f" Waits are capped at {config.max_wait_seconds:g}s; wait defaults to {config.default_wait_seconds:g}s."
                            f" Each stdin write is capped at {config.max_input_bytes} UTF-8 bytes; split larger input into multiple writes."
@@ -57,19 +108,22 @@ class _ExecutionTool(Tool):
 def execution_tools(service, *, context=None):
     if not isinstance(service, ExecutionService):
         raise TypeError("Execution Tools require an ExecutionService.")
-    async def execute_command(command: ExecutionCommand, cwd: str = ".", stdin: str | None = None,
+    async def execute_command(mode: Literal["exec", "shell"], program: str | None = None,
+            args: Annotated[list[str] | None, Field(max_length=1024)] = None,
+            script: str | None = None, shell: Literal["bash", "pwsh"] | None = None,
+            cwd: str = ".", stdin: str | None = None,
             keep_stdin_open: bool = False,
             yield_seconds: Annotated[float | None, Field(ge=0)] = None,
             timeout_seconds: Annotated[float | None, Field(gt=0)] = None,
             log_path: str | None = None, cache_directory: str | None = None,
             temp_directory: str | None = None,
             max_output_bytes: Annotated[int | None, Field(ge=4)] = None) -> ToolOutput:
-        """Run in the Workspace. Prefer exec with program/args and cwd; use the interpreter required by the project, not an assumed python/python3. Shell is for scripts/pipes; its exit_code is the Shell's final status. yield_seconds limits the initial wait; timeout_seconds stops the process. Running results retain a process_id and next_cursor: continue that handle instead of restarting. has_more describes output buffered now, not future output. Check both state and exit_code. log_path saves combined output to a new bounded Workspace file without overwriting; stdout/stderr remain bounded previews. cache_directory/temp_directory redirect conventional library caches/temp into Workspace directories (not a sandbox). stdin closes unless keep_stdin_open=true."""
+        """Run a program or shell script in the Workspace. Exec example: {"mode":"exec","program":"git","args":["status","--short"]}. Shell example: {"mode":"shell","script":"echo hi"}. All options are top-level. Use cwd instead of cd and the project's interpreter when running code. yield_seconds returns a running handle; timeout_seconds kills on deadline. Continue running processes with manage_process, never restart to read output. log_path saves longer output; previews shorten long lines automatically. cache_directory/temp_directory redirect conventional caches/temp (not a sandbox). stdin closes unless keep_stdin_open=true."""
         current = ToolContext.current()
         return await service.execute("execute_command", current.arguments, current)
 
     async def manage_process(request: ProcessRequest) -> ToolOutput:
-        """Manage this Session's processes. wait awaits exit or wait_seconds even when new logs arrive; expiry returns running without stopping the process. read(cursor=previous next_cursor, wait_seconds=30) returns buffered new output immediately or waits for output/exit/expiry; omitted cursor repeats a latest-output preview. Cursors are non-consuming UTF-8 byte offsets, not line numbers. has_more=false means no more buffered output now, not that the process has exited. Check state and exit_code. write can close stdin; terminate stops the owned process tree where supported; list enumerates handles. Neither read nor wait restarts commands. Handles do not survive Host restart. max_output_bytes sets the returned preview size up to the configured cap. Logs/previews are bounded."""
+        """Manage this Session's processes. Example: {"request":{"action":"list"}}. wait awaits exit or wait_seconds; expiry leaves the process running. read with cursor=previous next_cursor waits for output/exit/expiry; omitted cursor repeats a latest preview. Cursors are raw non-consuming UTF-8 byte offsets. has_more describes buffered output after next_cursor, not process completion. Check state and exit_code. max_line_bytes=0 retrieves raw lines. write sends stdin; terminate stops the owned process tree where supported. Never restart a process to read its output. Handles do not survive Host restart."""
         current = ToolContext.current()
         return await service.execute("manage_process", current.arguments, current)
 

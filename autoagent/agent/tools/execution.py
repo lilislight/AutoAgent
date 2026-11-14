@@ -99,6 +99,7 @@ class Tool:
         self, handler: Callable[..., object], *, name: str | None = None,
         description: str | None = None, strict: bool | None = None,
         operations: Callable | None = None,
+        operation_schema: dict | None = None,
     ) -> None:
         if hasattr(handler, TOOL_DEFINITION_ATTRIBUTE):
             if name is not None or description is not None or strict is not None:
@@ -112,6 +113,9 @@ class Tool:
         if operations is not None and not callable(operations):
             raise TypeError("Tool operations must be a synchronous resolver.")
         self.operation_resolver = operations
+        if operation_schema is not None and (operations is None or not isinstance(operation_schema, dict)):
+            raise ValueError("operation_schema requires an operation resolver and a JSON object schema.")
+        self.operation_schema = json.loads(json.dumps(operation_schema, allow_nan=False)) if operation_schema is not None else None
 
     @property
     def definition(self) -> LLMToolDefinition:
@@ -120,6 +124,13 @@ class Tool:
     @property
     def is_async(self) -> bool:
         return self.metadata.is_async
+
+    def _invalid_arguments(self, call, message, *, details=()):
+        result = error_result(call, "invalid_arguments", message)
+        if details:
+            result.structured_content["error"]["issues"] = [
+                {"path": list(item["loc"]), "code": item["type"]} for item in details[:8]]
+        return result
 
     def _prepare(self, call: LLMToolCall) -> tuple[dict, dict] | LLMToolResult:
         if call.name != self.metadata.name:
@@ -136,9 +147,9 @@ class Tool:
                 f"{'.'.join(str(part) for part in item['loc']) or 'arguments'}: {item['msg']}"
                 for item in details
             )
-            return error_result(call, "invalid_arguments", message)
+            return self._invalid_arguments(call, message, details=details)
         except (TypeError, ValueError) as error:
-            return error_result(call, "invalid_arguments", str(error))
+            return self._invalid_arguments(call, str(error))
         arguments = {
             parameter: getattr(value, internal)
             for internal, parameter in self.metadata._bindings

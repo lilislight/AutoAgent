@@ -89,7 +89,7 @@ export function ForkDialog({trace,target,onClose,onAccepted}:{trace:ExecutionTra
     onCancel={event=>{if(mutation.isPending)event.preventDefault();else onClose();}}
     onClick={event=>{const box=dialog.current?.getBoundingClientRect();if(event.target===dialog.current&&box&&!mutation.isPending&&(event.clientX<box.left||event.clientX>box.right||event.clientY<box.top||event.clientY>box.bottom))onClose();}}>
     <header><strong id={title}>Fork after Event #{sequence}</strong><button type="button" aria-label="Close Fork" disabled={mutation.isPending} onClick={onClose}>×</button></header>
-    <p>The Root and its related children become an independent branch. The source keeps running.</p>
+    <p>Includes child executions. Source keeps running.</p>
     {plan.isPending ? <FactsSkeleton label="Loading Fork plan" className="fork-plan" labels={["Related Sessions", "Calls to replay", "Timers"]} /> : null}
     {plan.error ? <p role="alert">{plan.error.message}</p> : null}
     {plan.data?.available ? <><dl className="fork-plan"><dt>Related Sessions</dt><dd>{plan.data.members?.length}</dd>
@@ -118,5 +118,5 @@ export function ForkHistory({trace,onOpen}:{trace:ExecutionTrace;onOpen:(iid:str
     {expanded?<div className="fork-source-events">{rows.map(e=><div key={String(e.event_id)}><code>Source #{e.sequence}</code><span>{String(e.event_name)}</span></div>)}
       {events.isLoading?<RecordsSkeleton label="Loading source Event headers" />:null}{events.error?<p role="alert">{events.error.message}</p>:null}
       {events.hasNextPage?<button disabled={events.isFetchingNextPage} onClick={()=>void events.fetchNextPage()}>More source Events</button>:null}
-      <p className="fork-boundary">Fork boundary · New execution time starts here. Earlier User Events are not inherited.</p></div>:null}</div>;
+      <p className="fork-boundary">Fork starts here.</p></div>:null}</div>;
 }

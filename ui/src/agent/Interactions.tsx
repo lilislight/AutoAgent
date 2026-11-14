@@ -8,6 +8,7 @@ import { useEffect, useId, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentClient, performAction } from './client';
 import { requestSignature } from './replies';
+import { requiresHumanResponse } from './approvalPresentation.js';
 import type { ActionSpec, Json, PendingWait } from './types';
 
 interface ApprovalRequest { id: string; call: { name: string; call_id: string }; arguments: Json; reason: string | null }
@@ -55,7 +56,6 @@ function RequestForm({ spec, rootId, wait, onStage, onResult }: { spec: ActionSp
   };
   return <section className="agent-interaction" aria-busy={busy} aria-label={question ? 'Agent question' : 'Tool approval'}><div className="agent-interaction-heading"><strong>{question ? 'Your input is needed' : 'Permission requested'}</strong><span className="agent-pill">{wait.invocation_id === rootId ? 'Main Agent' : `Agent ${wait.invocation_id.slice(0, 8)}`}</span></div>
     {question ? <QuestionFields questions={request.questions as unknown as Question[]} drafts={drafts} onChange={(id, value) => setDrafts(current => ({ ...current, [id]: value }))} disabled={busy} /> : <>
-      <p>{(request.requests as Json[]).length ? 'Review these tool calls. Your choices apply to this batch only.' : 'Policy has already resolved this batch. Continue to apply the current decisions.'}</p>{Array.isArray(request.automatic) && request.automatic.length ? <p className="agent-muted">{request.automatic.length} calls resolved by policy.</p> : null}
       {(request.requests as unknown as ApprovalRequest[]).map(item => <div className="agent-approval-item" key={item.id}><div><strong>{item.call.name}</strong><p className="agent-muted">{item.reason}</p><AgentDisclosure className="agent-approval-arguments" label="Review arguments"><ToolArgumentsPreview arguments={JSON.stringify(item.arguments)} name={item.call.name} /></AgentDisclosure><AnimatedRegion id={`reason-${wait.wait_id}-${item.id}`} open={decisions[item.id] === false}><label className="agent-field">Reason if denied (optional)<textarea rows={2} maxLength={2000} disabled={busy} value={reasons[item.id] ?? ''} onChange={event => setReasons(current => ({ ...current, [item.id]: event.target.value }))} /></label></AnimatedRegion></div><div className="agent-approval-options">{[true, false].map(approved => <label key={String(approved)}><input type="radio" name={`approval-${wait.wait_id}-${item.id}`} disabled={busy} checked={decisions[item.id] === approved} onChange={() => setDecisions(current => ({ ...current, [item.id]: approved }))} />{approved ? 'Allow once' : 'Deny'}</label>)}</div></div>)}
     </>}
     {error ? <p role="alert" className="agent-error-text">{error}</p> : null}
@@ -70,13 +70,17 @@ function PendingInteraction({ rootId, wait, active, onResolved }: { rootId: stri
   const query = useQuery({ queryKey: key, queryFn: ({ signal }) => agentClient.spec(rootId, 'respond', { target_invocation_id: wait.invocation_id, wait_id: wait.wait_id }, signal), enabled: active && !held && !settled, refetchInterval: active && !held && !settled ? 3000 : false, retry: retryAgentRead, retryDelay: agentReadRetryDelay });
   const refresh = () => { void query.refetch(); onResolved(); };
   const shown = held ?? query.data, request = shown?.request;
+  const human = !!shown && requiresHumanResponse(shown);
+  const wasHuman = useRef(false);
+  useEffect(() => { if (human) wasHuman.current = true; }, [human]);
   const unavailable = !held && requestUnavailable(query.error);
   const changing = !held && requestChanged(query.error);
   useEffect(() => { if (!held && (query.data && !query.data.request || unavailable)) onResolved(); }, [query.data, held, unavailable, onResolved]);
-  if (settled || shown && !request || unavailable) return <div className="agent-interaction-receipt" role="status"><AgentIcon name="check" /><span>{settled === 'accepted' ? 'Response submitted' : 'Request resolved'}<small>The Agent can continue.</small></span></div>;
+  if (settled || shown && !request || unavailable) return wasHuman.current ? <div className="agent-interaction-receipt" role="status"><AgentIcon name="check" /><span>{settled === 'accepted' ? 'Response submitted' : 'Request resolved'}</span></div> : null;
+  if (shown && !human) return null;
   if (changing && !shown) return <p className="agent-interaction-notice" role="status">Permissions are updating.<button type="button" onClick={refresh}>Refresh request</button></p>;
   if (query.error && !shown) return <div className="agent-error-card" role="alert">Could not load this request: {query.error.message}<button onClick={refresh}>Retry</button></div>;
-  if (!shown || !request) return query.isLoading ? <CardsSkeleton label="Loading pending request" count={1} /> : null;
+  if (!shown || !request) return query.isLoading && wait.node_id !== 'wait_approval' ? <CardsSkeleton label="Loading pending request" count={1} /> : null;
   if (request.kind !== 'agent.ask_user' && request.kind !== 'agent.tool_approval') return <div className="agent-error-card">This request uses a custom form. Open its execution to respond.</div>;
   const result = (value: SubmissionResult) => {
     if (value.state === 'changed') { client.setQueryData(key, value.spec); setNotice('Permissions or questions changed. Review the updated request.'); }

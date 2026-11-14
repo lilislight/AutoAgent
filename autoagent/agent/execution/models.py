@@ -5,6 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 
 from ..models._base import Model, NonEmpty
+from ..files.models import FileToolsConfig
 
 Decision = Literal["allow", "ask", "deny"]
 
@@ -44,7 +45,9 @@ class CommandRule(Model):
 
 
 class ExecutionToolsConfig(Model):
-    default_decision: Decision = "ask"
+    default_decision: Decision = "allow"
+    process_write_decision: Decision = "allow"
+    file_policy: FileToolsConfig = Field(default_factory=FileToolsConfig)
     rules: tuple[CommandRule, ...] = ()
     default_timeout_seconds: float = Field(default=120, gt=0)
     max_timeout_seconds: float = Field(default=600, gt=0)
@@ -53,6 +56,7 @@ class ExecutionToolsConfig(Model):
     max_wait_seconds: float = Field(default=600, gt=0, le=3600)
     max_output_bytes: int = Field(default=64 * 1024, ge=4, le=1024 * 1024)
     max_retained_bytes: int = Field(default=1024 * 1024, ge=4, le=16 * 1024 * 1024)
+    max_line_bytes: int | None = Field(default=2048, ge=4, le=1024 * 1024)
     max_input_bytes: int = Field(default=64 * 1024, gt=0)
     max_command_bytes: int = Field(default=64 * 1024, gt=0)
     max_log_bytes: int = Field(default=16 * 1024 * 1024, ge=4)
@@ -98,6 +102,7 @@ class ProcessRead(Model):
     cursor: int | None = Field(default=None, ge=0, description="Pass the previous next_cursor for new output only. 0 reads earliest retained output; omitted/null previews the latest output again. Reading never consumes output.")
     wait_seconds: float = Field(default=0, ge=0, description="If no unread output exists at cursor, wait for output, exit, or this many seconds. Expiry leaves the process running; do not restart it.")
     max_output_bytes: int | None = Field(default=None, ge=4)
+    max_line_bytes: int | None = Field(default=None, ge=0, description="Optional per-line preview cap. Omit for the configured default; 0 returns raw lines. Raw byte cursors and saved logs are unchanged.")
 
 
 class ProcessWait(Model):
@@ -106,6 +111,7 @@ class ProcessWait(Model):
     cursor: int | None = Field(default=None, ge=0, description="Pass the previous next_cursor to avoid repeating output. Omitted/null returns a latest-output preview; reading never consumes output.")
     wait_seconds: float | None = Field(default=None, gt=0, description="Wait for exit or this duration, ignoring intermediate output. Expiry returns running without killing the process. Use read with cursor and wait_seconds to wake on output.")
     max_output_bytes: int | None = Field(default=None, ge=4)
+    max_line_bytes: int | None = Field(default=None, ge=0, description="Optional per-line preview cap; 0 returns raw lines. Defaults to the configured limit.")
 
 
 class ProcessWrite(Model):

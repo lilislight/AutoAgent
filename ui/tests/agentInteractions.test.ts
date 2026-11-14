@@ -5,7 +5,7 @@ import { retryAgentRead } from '../src/agent/readFeedback.js';
 import { eventRefresh } from '../src/agent/eventRefresh.js';
 import type { ActionSpec, AgentEvent } from '../src/agent/types.js';
 
-const spec = { request: { kind: 'agent.tool_approval', requests: [{ id: 'one' }, { id: 'two' }], revision: 'v1' } } as unknown as ActionSpec;
+const spec = { review: { reviewer: 'user', requires_user_input: true }, request: { kind: 'agent.tool_approval', requests: [{ id: 'one' }, { id: 'two' }], revision: 'v1' } } as unknown as ActionSpec;
 test('approval validates locally and applies the selected batch action to every request', () => {
   assert.throws(() => interactionReply(spec.request!, {}, {}, {}, 'submit'), /every tool/);
   const denied = interactionReply(spec.request!, {}, {}, { one: 'Keep private' }, 'deny') as { decisions: unknown[] };
@@ -35,6 +35,15 @@ test('submission preserves exact payload and reports acceptance only after the a
   });
   assert.deepEqual(events, ['checked', 'submitting', 'responded']);
   assert.equal(result.state, 'accepted');
+});
+test('a switch to system or Agent review withdraws a stale human form without submitting', async () => {
+  for (const reviewer of ['system', 'agent'] as const) {
+    const fresh: ActionSpec = { ...spec, review: { reviewer, requires_user_input: false } };
+    const result = await submitInteraction(spec, {}, { current: async () => fresh,
+      respond: async () => assert.fail('Non-human reviews must not be submitted by the UI'),
+      onSubmit: () => assert.fail('Must not enter submission state') });
+    assert.deepEqual(result, { state: 'changed', spec: fresh });
+  }
 });
 test('a conflict re-reads the batch without automatically retrying a decision', async () => {
   let reads = 0, writes = 0;

@@ -218,12 +218,6 @@ class Project:
                 if any(existing.id == built.id for existing in workflows):
                     raise ProjectError(f"Duplicate Workflow id: {built.id}")
                 workflows.append(built)
-            from autoagent.agent_app import AgentApplication
-            env = os.environ if environment is None else environment
-            try:
-                workflows = AgentApplication.project_workflows(workflows, env)
-            except ValueError as error:
-                raise ProjectError(str(error)) from error
             lifespan = (
                 resolve_entrypoint(self.lifespan_entrypoint, self.root)
                 if self.lifespan_entrypoint

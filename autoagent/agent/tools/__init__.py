@@ -8,13 +8,19 @@ from .execution import (
 )
 from .toolset import ToolSet
 from .context import ToolContext, ToolHooks
+from .context_provider import ToolContextRequest, ToolContextProvider, provide_tool_context
 from .permissions import ToolDecision, ToolApproval, ToolApprovalRequest, ToolApprovalRequired, ToolPreflight
-from .operations import ToolOperation, ToolOperationRule, ToolOperationPolicy, combine_decisions
-from .policy import PolicyCondition, PolicyRule, DeclarativeToolPolicy
+from .operations import ToolOperation, ToolOperationPolicy, combine_decisions
+from .tool_policy import (
+    ToolPolicy, ToolPolicyRule, FieldCondition, AllCondition, AnyCondition,
+    NotCondition, ItemCondition, Condition,
+)
 
 __all__ = [
-    "PolicyCondition", "PolicyRule", "DeclarativeToolPolicy",
-    "ToolOperation", "ToolOperationRule", "ToolOperationPolicy", "combine_decisions",
+    "ToolPolicy", "ToolPolicyRule", "FieldCondition", "AllCondition", "AnyCondition",
+    "NotCondition", "ItemCondition", "Condition",
+    "ToolContextRequest", "ToolContextProvider", "provide_tool_context",
+    "ToolOperation", "ToolOperationPolicy", "combine_decisions",
     "ToolContext", "ToolHooks", "ToolDecision", "ToolApproval", "ToolApprovalRequest", "ToolApprovalRequired",
     "ToolPreflight",
     "ExecutableTool", "Tool", "ToolBusinessError", "ToolDefinition", "ToolError",

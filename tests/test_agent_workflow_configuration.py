@@ -30,6 +30,17 @@ def trigger(value):
 
 
 class AgentConfigurationTests(unittest.TestCase):
+    def test_sdk_round_default_is_large_and_product_has_no_round_limit(self):
+        """SDK builds retain an overridable bound while the Agent product is unbounded by rounds."""
+        from autoagent.agent_app import builtin_agent_workflow
+        compiler = WorkflowCompiler()
+        sdk = compiler.compile_or_raise(agent_workflow())
+        product = compiler.compile_or_raise(builtin_agent_workflow())
+        self.assertEqual(sdk.node("llm_call").resource.max_executions_per_invocation, 10_000)
+        self.assertIsNone(product.node("llm_call").resource.max_executions_per_invocation)
+        bounded = compiler.compile_or_raise(agent_workflow(max_rounds=3))
+        self.assertEqual(bounded.node("llm_call").resource.max_executions_per_invocation, 3)
+
     def test_context_policy_preserves_graph_and_uses_ordinary_compaction(self):
         """Custom triggers retain ordinary Node boundaries and opt-in replay safety."""
         graph = WorkflowCompiler().compile_or_raise(agent_workflow(context_policy=ContextPolicy(trigger=trigger)))
@@ -109,8 +120,8 @@ class AgentConfigurationContracts:
         async def lifespan(setup):
             async with AsyncExitStack() as stack:
                 selected = await stack.enter_async_context(provider()) if callable(provider) and not hasattr(provider, "ainvoke") else provider
-                setup.agent_context.resources.register_provider("offline", selected)
-                setup.agent_context.set_defaults(settings())
+                setup.providers.register("offline", selected)
+                setup.extensions["agent"].context.set_defaults(settings())
                 yield
         async with AutoAgentHost(workflows=[agent_workflow(policies=policies, extensions=extensions, **options)],
             lifespan=lifespan, environment={}, pricing=pricing,
@@ -162,7 +173,7 @@ class AgentConfigurationContracts:
         """Workflow generation options override an unset Session model through the fixed builder."""
         provider = ScriptedProvider(answer())
         async with self.host(provider, llm_options={"model": "application-model", "max_output_tokens": 42}) as host:
-            await host.agent_context.configure("raw-request", AgentSessionSettings(model=AgentModelSelection(provider="offline")))
+            await host.extensions["agent"].context.configure("raw-request", AgentSessionSettings(model=AgentModelSelection(provider="offline")))
             result = await self.run_agent(host, session_id="raw-request")
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual((provider.requests[0].model, provider.requests[0].max_output_tokens), ("application-model", 42))

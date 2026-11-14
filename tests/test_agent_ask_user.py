@@ -118,7 +118,7 @@ class AskUserContracts:
             self.assertEqual(effects, ["ok"])
             self.assertEqual(len(waiting.waits), 2)
             self.assertIn("ask_user", [tool.name for tool in provider.requests[0].tools])
-            self.assertFalse(host.agent_context.resources.has("tool", "ask_user"))
+            self.assertFalse(self.resources.has("tool", "ask_user"))
             waits = {wait.request["call_id"]: wait.id for wait in waiting.waits}
             await host.respond(waiting.invocation_id, waits["b"], reply(text="second"))
             partial = await host.join(waiting.invocation_id)
@@ -301,7 +301,7 @@ class AskUserContracts:
             defaults=settings(access=AgentAccess(rules={"ask_user": "ask"}))) as host:
             waiting = await self.run_agent(host)
             await host.pause(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(mode="bypass").session_defaults())
+            await host.extensions["agent"].context.configure(waiting.session_id, settings(mode="bypass").session_defaults())
             result = await host.recover(waiting.invocation_id)
             self.assertEqual(result.status, "waiting", result.error)
             self.assertEqual(result.waits[0].request["kind"], "agent.ask_user")

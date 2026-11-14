@@ -9,6 +9,13 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
+from pydantic import JsonValue, TypeAdapter
+
+from ..models._base import _check_finite
+
+
+_attributes_adapter = TypeAdapter(dict[str, JsonValue])
+
 
 @dataclass(frozen=True, slots=True)
 class ToolContext:
@@ -19,6 +26,8 @@ class ToolContext:
     approval_scope optionally supplies a stable application execution identity
     for approval checks outside an Operator; otherwise the current Core call
     identity is used. Never populate either field from model arguments.
+    attributes contains explicitly supplied, immutable JSON permission facts;
+    declarative policies cannot inspect services or authorization internals.
     """
 
     services: Mapping[str, Any] = field(default_factory=dict, repr=False)
@@ -30,11 +39,15 @@ class ToolContext:
     authorization: Mapping[str, Any] = field(default_factory=dict, repr=False)
     approval_scope: Mapping[str, Any] | None = field(default=None, repr=False)
     operations: tuple = ()
+    attributes: Mapping[str, JsonValue] = field(default_factory=dict, repr=False)
     arguments: Mapping[str, Any] = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self):
         object.__setattr__(self, "services", MappingProxyType(dict(self.services)))
         object.__setattr__(self, "arguments", MappingProxyType({}))
+        attributes = _attributes_adapter.validate_python(_plain(self.attributes), strict=True)
+        _check_finite(attributes)
+        object.__setattr__(self, "attributes", _freeze(attributes))
         from .operations import ToolOperation
         object.__setattr__(self, "operations", tuple(ToolOperation.model_validate(value) for value in self.operations))
         object.__setattr__(self, "authorization", _freeze(self.authorization))
@@ -94,6 +107,14 @@ def _freeze(value):
         return MappingProxyType({key: _freeze(item) for key, item in value.items()})
     if isinstance(value, (list, tuple)):
         return tuple(_freeze(item) for item in value)
+    return value
+
+
+def _plain(value):
+    if isinstance(value, Mapping):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_plain(item) for item in value]
     return value
 
 

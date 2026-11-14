@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from sqlalchemy import CheckConstraint, Index, MetaData, Table, delete, insert, select, update
 
-from autoagent.agent.context import AgentSessionSettings, restore
+from autoagent.agent.context import restore
 from autoagent.agent_app.models import ApplicationSettingsRecord, ApplicationSessionSettings
 from autoagent.agent.workspace import WorkspaceBinding
 from autoagent.host.persistence.models import ConflictError
@@ -26,11 +26,6 @@ workspaces = Table("agent_app_workspaces", context_meta,
 resource_configs = Table("agent_app_resource_configs", context_meta,
     c("id", nullable=False, pk=True), c("version", B, False),
     c("configuration", J, False), c("updated_at_us", B, False))
-provider_configs = Table("agent_app_providers", context_meta,
-    c("id", nullable=False, pk=True), c("version", B, False),
-    c("configuration", J, False), c("updated_at_us", B, False))
-
-
 class ApplicationContextStorage:
     def __init__(self, writer, queries):
         self.writer, self.queries, self._ready = writer, queries, False
@@ -39,49 +34,13 @@ class ApplicationContextStorage:
         if not self._ready:
             from sqlalchemy import inspect
             from autoagent.host.persistence.models import FormatError
-            await self._migrate_tables(conn)
             await conn.run_sync(context_meta.create_all)
-            await self._upgrade(conn)
-            await self._separate_sdk_records(conn)
-            for row in (await conn.execute(select(sessions))).mappings():
-                data = row["settings"]
-                if data.get("approval_mode") in {"bypass", "never_ask"}:
-                    data = {**data, "approval_mode": "auto_approve" if data["approval_mode"] == "bypass" else "policy"}
-                    await conn.execute(update(sessions).where(sessions.c.session_id == row["session_id"]).values(settings=data))
-            for row in (await conn.execute(select(resource_configs))).mappings():
-                configuration = row["configuration"]
-                old = configuration.get("permissions")
-                if old is not None and "decision" in old:
-                    rules = []
-                    for rule in old.get("operation_rules", ()):
-                        conditions = []
-                        for key in ("action", "resource"):
-                            if rule.get(key) is not None:
-                                conditions.append(dict(source="operation", path="/" + key, operator="glob", value=rule[key]))
-                        for key, value in rule.get("attributes", {}).items():
-                            conditions.append(dict(source="operation", path="/attributes/" + key.replace("~", "~0").replace("/", "~1"), operator="glob", value=value))
-                        rank = {"allow": 0, "ask": 1, "deny": 2}
-                        decision = max((old["decision"], rule["decision"]), key=rank.__getitem__)
-                        rules.append(dict(conditions=conditions, decision=decision, reason=rule.get("reason")))
-                    configuration = {**configuration, "permissions": dict(default=old["decision"], rules=rules)}
-                    await conn.execute(update(resource_configs).where(resource_configs.c.id == row["id"]).values(configuration=configuration))
             for table in context_meta.tables.values():
                 columns = await conn.run_sync(lambda sync, name=table.name:
                     {item["name"] for item in inspect(sync).get_columns(name)})
                 if columns != set(table.columns.keys()):
                     raise FormatError("Agent storage does not match the current schema.")
 
-    async def _migrate_tables(self, conn):
-        """Rename the previous product tables atomically, leaving Core facts untouched."""
-        from sqlalchemy import inspect, text
-        from autoagent.host.persistence.models import FormatError
-        names = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-        for suffix in ("sessions", "invocation_bindings", "workspaces", "resource_configs", "message_queue"):
-            old, new = "agent_" + suffix, "agent_app_" + suffix
-            if old in names:
-                if new in names:
-                    raise FormatError(f"Both {old} and {new} exist; resolve the application schema conflict.")
-                await conn.execute(text(f'ALTER TABLE "{old}" RENAME TO "{new}"'))
 
     async def purge_history(self, conn, invocation_ids, session_ids):
         """Participate in Host history deletion using the same SQL transaction."""
@@ -91,21 +50,9 @@ class ApplicationContextStorage:
             if await self._exists(conn, table):
                 await conn.execute(delete(table).where(table.c[field].in_(values)))
 
-    async def _separate_sdk_records(self, conn):
-        """Old shared settings never become product authority for user Workflows."""
-        from autoagent.agent_app.workflow import BUILTIN_AGENT_WORKFLOW_ID
-        invocations, revisions = meta.tables["invocations"], meta.tables["workflow_revisions"]
-        owned = select(invocations.c.invocation_id).join(revisions,
-            revisions.c.revision_id == invocations.c.workflow_revision_id).where(
-                revisions.c.workflow_id == BUILTIN_AGENT_WORKFLOW_ID)
-        foreign = select(invocations.c.invocation_id).where(invocations.c.invocation_id.not_in(owned))
-        await conn.execute(delete(invocation_bindings).where(invocation_bindings.c.invocation_id.in_(foreign)))
-        owned_sessions = select(invocations.c.session_id).where(invocations.c.invocation_id.in_(owned))
-        foreign_sessions = select(invocations.c.session_id).where(invocations.c.session_id.not_in(owned_sessions))
-        await conn.execute(delete(sessions).where(sessions.c.session_id.in_(foreign_sessions)))
 
     async def prepare(self):
-        """Upgrade only the obsolete Agent tables, preserving Core execution history."""
+        """Initialize and validate the current product schema without rewriting history."""
         self.writer.check_open()
         if self.writer.read_only:
             return
@@ -114,64 +61,13 @@ class ApplicationContextStorage:
                 await self._prepare(conn)
             self._ready = True
 
-    async def _upgrade(self, conn):
-        """One-time conversion of full settings rows to preferences and model bindings."""
-        from sqlalchemy import inspect
-        names = await conn.run_sync(lambda sync: set(inspect(sync).get_table_names()))
-        old_meta = MetaData()
-        for name in ("agent_session_settings", "agent_execution_settings"):
-            if name in names:
-                await conn.run_sync(lambda sync, name=name: Table(name, old_meta, autoload_with=sync))
-        def preferences(settings):
-            model = settings.get("model", {})
-            return dict(model={key: model.get(key) for key in ("provider", "model") if key in model},
-                approval_mode=settings.get("approval_mode", "policy"))
-        old = old_meta.tables.get("agent_session_settings")
-        if old is not None:
-            for row in (await conn.execute(select(old))).mappings():
-                if not await conn.scalar(select(sessions.c.session_id).where(sessions.c.session_id == row["session_id"])):
-                    await conn.execute(insert(sessions).values(session_id=row["session_id"], version=row["version"],
-                        settings=preferences(row["settings"]), workspace=row["settings"].get("workspace"),
-                        title=None, metadata_version=0, updated_at_us=row["updated_at_us"]))
-        old = old_meta.tables.get("agent_execution_settings")
-        if old is not None:
-            # Preserve the last accepted model of existing executions. No full
-            # settings history remains authoritative after this conversion.
-            accepted = select(old).join(meta.tables["runtime_events"],
-                old.c.activation_id == meta.tables["runtime_events"].c.event_id).order_by(old.c.epoch.desc())
-            for row in (await conn.execute(accepted)).mappings():
-                exists = await conn.scalar(select(invocation_bindings.c.binding_id).where(
-                    invocation_bindings.c.invocation_id == row["invocation_id"]))
-                if not exists:
-                    await conn.execute(insert(invocation_bindings).values(binding_id=row["snapshot_id"],
-                        session_id=row["session_id"], invocation_id=row["invocation_id"],
-                        model=preferences(row["settings"])["model"], workspace=row["settings"].get("workspace"),
-                        bindings=row["bindings"], activation_id=row["activation_id"], created_at_us=row["created_at_us"]))
-        if "agent_app_message_queue" in names:
-            columns = await conn.run_sync(lambda sync: {item["name"] for item in inspect(sync).get_columns("agent_app_message_queue")})
-            if "model" not in columns:
-                from .queue import messages
-                from sqlalchemy import text
-                await conn.execute(text("ALTER TABLE agent_app_message_queue ADD COLUMN model JSON"))
-                # Old queued submissions did not capture a model. Capture their
-                # existing Session selection once during the schema upgrade.
-                for row in (await conn.execute(select(messages).where(messages.c.state.in_(("queued", "starting", "blocked"))))).mappings():
-                    saved = await conn.scalar(select(sessions.c.settings).where(sessions.c.session_id == row["session_id"]))
-                    if saved:
-                        await conn.execute(update(messages).where(messages.c.id == row["id"]).values(model=saved["model"]))
-        await conn.run_sync(old_meta.drop_all)
 
     async def _exists(self, conn, table):
         from sqlalchemy import inspect
         return await conn.run_sync(lambda sync: inspect(sync).has_table(table.name))
 
     async def resource_records(self):
-        return await self._configuration_records(resource_configs)
-
-    async def provider_records(self):
-        return await self._configuration_records(provider_configs)
-
-    async def _configuration_records(self, table):
+        table = resource_configs
         engine = self.writer.storage.query_engine or self.writer.storage.engine
         async with engine.connect() as conn:
             if not await self._exists(conn, table):
@@ -180,12 +76,7 @@ class ApplicationContextStorage:
                 .order_by(table.c.id))).mappings()]
 
     async def save_resource(self, resource_id, configuration, expected_version):
-        return await self._save_configuration(resource_configs, resource_id, configuration, expected_version)
-
-    async def save_provider(self, resource_id, configuration, expected_version):
-        return await self._save_configuration(provider_configs, resource_id, configuration, expected_version)
-
-    async def _save_configuration(self, table, resource_id, configuration, expected_version):
+        table = resource_configs
         if type(expected_version) is not int or expected_version < 0:
             raise ValueError("expected_version must be a nonnegative integer.")
         self.writer.check_open()
@@ -256,6 +147,46 @@ class ApplicationContextStorage:
     @staticmethod
     def title(message):
         return " ".join(message.split())[:100] or None
+
+    async def completed_tool_results(self, sid, current_iid):
+        invocations, nodes, calls = (meta.tables[name] for name in ("invocations", "node_executions", "operator_calls"))
+        engine = self.writer.storage.query_engine or self.writer.storage.engine
+        async with engine.connect() as conn:
+            previous = await conn.scalar(select(invocations.c.invocation_id).where(
+                invocations.c.session_id == sid, invocations.c.invocation_id != current_iid,
+                invocations.c.started_at_us.is_not(None)).order_by(invocations.c.started_at_us.desc()).limit(1))
+            if previous is None:
+                return []
+            llm_end = await conn.scalar(select(nodes.c.completed_at_us).where(nodes.c.invocation_id == previous,
+                nodes.c.node_id == "llm_call", nodes.c.status == "completed").order_by(nodes.c.completed_at_us.desc()).limit(1))
+            if llm_end is None:
+                return []
+            rows = await conn.execute(select(calls.c.output_ref).join(nodes,
+                (calls.c.invocation_id == nodes.c.invocation_id) & (calls.c.occurrence_id == nodes.c.occurrence_id)).where(
+                calls.c.invocation_id == previous, calls.c.status == "completed", calls.c.started_at_us >= llm_end,
+                nodes.c.node_id.in_(("tool_execute", "tool_execute_approved"))).order_by(calls.c.completed_at_us))
+            result = []
+            for row in rows:
+                if row[0] is not None:
+                    value = (await self.queries._resolve(conn, (), row[0]))["value"]
+                    if isinstance(value, dict):
+                        result.append(value)
+            return result
+
+    async def remember_model(self, sid, model):
+        self.writer.check_open()
+        async with self.writer.mutation:
+            async with self.writer.storage.transaction() as conn:
+                await self._prepare(conn)
+                row = (await conn.execute(select(sessions).where(sessions.c.session_id == sid))).mappings().one()
+                if row["settings"]["model"] != model:
+                    await conn.execute(update(sessions).where(sessions.c.session_id == sid).values(
+                        settings={**row["settings"], "model": model}, version=row["version"] + 1, updated_at_us=time.time_ns() // 1000))
+                row = (await conn.execute(select(sessions).where(sessions.c.session_id == sid))).mappings().one()
+                return ApplicationSettingsRecord(session_id=sid, version=row["version"],
+                    settings=restore(ApplicationSessionSettings, row["settings"]),
+                    workspace=restore(WorkspaceBinding, row["workspace"]) if row["workspace"] else None,
+                    title=row["title"], metadata_version=row["metadata_version"])
 
     async def settings(self, sid, defaults):
         engine = self.writer.storage.query_engine or self.writer.storage.engine

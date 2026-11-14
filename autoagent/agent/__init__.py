@@ -36,8 +36,10 @@ from .providers import (
 )
 from .providers import __all__ as _provider_exports
 from .tools import (
-    PolicyCondition, PolicyRule, DeclarativeToolPolicy,
-    ToolOperation, ToolOperationRule, ToolOperationPolicy, combine_decisions,
+    ToolPolicy, ToolPolicyRule, FieldCondition, AllCondition, AnyCondition,
+    NotCondition, ItemCondition, Condition,
+    ToolContextRequest, ToolContextProvider, provide_tool_context,
+    ToolOperation, ToolOperationPolicy, combine_decisions,
     ToolContext, ToolHooks, ToolDecision, ToolApproval, ToolApprovalRequest, ToolApprovalRequired, ToolPreflight,
     ExecutableTool, Tool, ToolBusinessError, ToolDefinition, ToolError,
     ToolExecutionError, ToolOutputError, ToolSet, get_tool_definition, tool,
@@ -131,3 +133,10 @@ __all__ = [
     *_file_exports,
     *_event_exports,
 ]
+
+from .workflow.resources import AgentResources
+__all__ += ["AgentResources"]
+
+from .files import FileTools
+from .execution import CommandTools
+__all__ += ["FileTools", "CommandTools"]

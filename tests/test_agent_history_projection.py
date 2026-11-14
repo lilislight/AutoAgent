@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import unittest
 
 from autoagent.agent import (
+    AgentResources,
     AgentSessionSettings, AgentModelSelection,
     AgentInput, AgentModelSettings, AgentHostSettings, AgentWorkflowOptions,
     AssetSource, AudioContent, ChatCompletionsAdapter, ContextPolicy, ContextPreparation, Conversation, DataSource, ImageContent,
@@ -22,7 +23,7 @@ from autoagent.agent.context import restore
 from autoagent.agent.workflow.compaction import serialize_history
 from autoagent.agent.workflow.policy import item_characters
 from autoagent.host import AutoAgentHost, HostSettings
-from autoagent.host.agent_context import HostAgentContext
+from autoagent.agent.runtime.context import AgentRuntime
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 
 
@@ -176,10 +177,10 @@ class HistoryProjectionTests(unittest.TestCase):
             model=AgentModelSettings(provider="a", model="m")))
         routes = []
         for endpoint in ("http://one.example/v1", "http://two.example/v1"):
-            context = HostAgentContext(SimpleNamespace(environment={}, root=Path("/project")))
+            context = AgentRuntime(AutoAgentHost(environment={}, root=Path("/project")).runtime_services)
             provider = OpenAIResponsesProvider(OpenAIProviderConfig(provider_id="connection-a", base_url=endpoint,
                 api_key="DO_NOT_STORE", headers={"Authorization": "SECRET_HEADER"}))
-            context.resources.register_provider("a", provider)
+            context.services.providers.register("a", provider)
             routes.append(context.history_route(snapshot, "m"))
         self.assertNotEqual(routes[0], routes[1])
         self.assertNotIn("DO_NOT_STORE", routes[0].model_dump_json())
@@ -332,13 +333,12 @@ class HistorySwitchContracts:
                         return "weather for " + city
                     @asynccontextmanager
                     async def lifespan(setup):
-                        setup.agent_context.resources.register_provider("a", chat)
-                        setup.agent_context.resources.register_provider("b", responses)
-                        setup.agent_context.resources.register_tool(lookup, workflows={"agent"})
-                        setup.agent_context.set_defaults(AgentHostSettings(model=AgentModelSettings(
+                        setup.providers.register("a", chat)
+                        setup.providers.register("b", responses)
+                        setup.extensions["agent"].context.set_defaults(AgentHostSettings(model=AgentModelSettings(
                             provider="a", model="model-a", streaming=streaming)))
                         yield
-                    options = dict(workflows=[agent_workflow()], root=root, lifespan=lifespan,
+                    options = dict(workflows=[agent_workflow(resources=AgentResources(tools=[lookup]))], root=root, lifespan=lifespan,
                         environment={}, settings=HostSettings(database_url=url))
                     async with AutoAgentHost(**options) as host:
                         first = await host.join(await host.execute("agent", AgentInput(message="weather")))
@@ -346,7 +346,7 @@ class HistorySwitchContracts:
                         self.assertEqual(chat.wires[1]["messages"][-2]["reasoning_content"], "ORIGINAL_REASONING")
                     async with AutoAgentHost(**options) as host:
                         async def turn(provider, model):
-                            await host.agent_context.configure(first.session_id, AgentSessionSettings(
+                            await host.extensions["agent"].context.configure(first.session_id, AgentSessionSettings(
                                 model=AgentModelSelection(provider=provider, model=model)))
                             result = await host.join(await host.execute("agent", AgentInput(message="continue"), session_id=first.session_id))
                             self.assertEqual(result.status, "completed", result.error)

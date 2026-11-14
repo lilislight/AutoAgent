@@ -4,6 +4,7 @@ import { AgentIcon } from './AgentIcon.js';
 import { ToolArgumentsPreview, ToolResultPreview, ToolPreviewNotice } from './ToolPayloadPreview.js';
 import { previewToolStrings } from './toolPreview.js';
 import { presentTool, toolGroupSummary, toolStateLabel } from './toolPresentation.js';
+import { toolApprovalRecord } from './approvalPresentation.js';
 import type { Interaction, ToolSnapshot } from './types.js';
 
 export interface ConversationTool { id: string; tool?: ToolSnapshot; interaction?: Interaction }
@@ -20,15 +21,18 @@ function QuestionRecord({ interaction }: { interaction: Interaction }) {
     <div className="agent-tool-preview" tabIndex={0} role="region" aria-label="Question answers preview">{records.map((record, index) => preview.texts[index * 2] || preview.texts[index * 2 + 1] ? <div key={record.id}><div className="agent-label">{preview.texts[index * 2]}</div><p>{preview.texts[index * 2 + 1]}</p></div> : null)}</div></>;
 }
 const ToolRow = memo(function ToolRow({ tool, interaction, lifecycle }: { tool?: ToolSnapshot; interaction?: Interaction; lifecycle?: string }) {
+  const approval = toolApprovalRecord(interaction, tool?.call_id);
   const presentation = tool ? presentTool(tool) : interaction?.type === 'question' ? { title: interaction.state === 'resolved' ? 'Your answers' : 'Question for you', icon: 'message' as const } : { title: 'Tool call', icon: 'wrench' as const };
-  const status = !tool && interaction?.type === 'question' ? interaction.state === 'resolved' ? undefined : 'Waiting' : toolStateLabel(tool, lifecycle);
+  const status = interaction?.type === 'approval' && interaction.state === 'pending' ? 'Under review'
+    : !tool && interaction?.type === 'question' ? interaction.state === 'resolved' ? undefined : 'Waiting' : toolStateLabel(tool, lifecycle);
   return <AgentDisclosure className={`agent-tool-row is-${tool?.state ?? 'unknown'}`} label={presentation.title}
     tooltip={presentation.title} icon={<AgentIcon name={presentation.icon} />} status={status}>
     {() => <div className="agent-tool-detail">
+      {approval ? <div className="agent-muted" role="note">{approval.label}{approval.reason ? <p>{previewToolStrings([approval.reason]).texts[0]}</p> : null}</div> : null}
       {interaction?.type === 'question' && interaction.state === 'resolved' ? <QuestionRecord interaction={interaction} /> : <>
         {tool ? <><div className="agent-label">Arguments</div><ToolArgumentsPreview arguments={tool.arguments} name={tool.name} /></> : null}
         {tool?.result ? <><div className="agent-label">Result</div><ToolResultPreview content={tool.result.content} structured={tool.result.structured_content} name={tool.name} /></>
-          : <p className="agent-muted">{status === 'Stopped' || status === 'Interrupted' ? 'Execution ended without a saved tool result.' : status === 'No saved result' ? 'No saved result is available.' : tool?.state === 'waiting' ? 'Waiting for input, an Agent update, or the deadline.' : 'The result will appear here when the call completes.'}</p>}
+          : <p className="agent-muted">{status === 'Stopped' || status === 'Interrupted' ? 'No saved result.' : status === 'No saved result' ? 'No saved result.' : tool?.state === 'waiting' ? 'Waiting…' : 'Running…'}</p>}
       </>}
     </div>}
   </AgentDisclosure>;

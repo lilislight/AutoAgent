@@ -169,6 +169,7 @@ class LLMRequest(Model):
     input: tuple[LLMItem, ...] = Field(min_length=1)
     streaming: bool = False
     routing: dict[str, JsonValue] = Field(default_factory=dict)
+    reasoning_effort: NonEmpty | None = None
     tools: tuple[LLMToolDefinition, ...] = ()
     tool_choice: LLMToolChoice | None = None
     max_output_tokens: int | None = Field(default=None, gt=0)

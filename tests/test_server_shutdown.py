@@ -21,6 +21,8 @@ from autoagent.server.watching import TraceWatchHub
 
 
 class _Host:
+    applications = {}
+
     async def get_trace_head(self, iid):
         return dict(invocation_id=iid, revision=0, cursor='test', store_id='test',
                     invocation_version=0, family_version=0, active=False)

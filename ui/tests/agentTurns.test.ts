@@ -131,6 +131,8 @@ test('tool rows describe operations and groups without loading arguments or resu
   assert.equal(presentTool(tool).title, 'Read orders.csv');
   assert.equal(presentTool({ ...tool, name: 'skill_load', arguments: '{"name":"demo-guide"}' }).title, 'Loaded demo-guide');
   assert.equal(presentTool({ ...tool, arguments: 'malformed' }).title, 'Read file');
+  assert.equal(presentTool({ ...tool, name: 'execute_command', arguments: '{"mode":"exec","program":"git","args":["status","--short"]}' }).title, 'Ran git status --short');
+  assert.equal(presentTool({ ...tool, name: 'execute_command', arguments: '{"mode":"shell","script":"echo hi"}' }).title, 'Ran echo hi');
   assert.equal(toolGroupSummary([tool, tool, { ...tool, name: 'execute_command' }, { ...tool, name: 'skill_load' }]), 'Read 2 files · 1 command · 1 more');
   assert.equal(toolStateLabel({ ...tool, state: 'running' }, 'cancelled'), 'Stopped');
   assert.equal(toolStateLabel({ ...tool, state: 'waiting' }, 'failed'), 'Interrupted');

@@ -1,4 +1,4 @@
-"""Declarative shared resources for the SDK Agent application."""
+"""Declarative resources owned by the Agent application."""
 
 from pathlib import Path
 from typing import Annotated, Literal
@@ -8,19 +8,15 @@ from pydantic import Field, field_validator, model_validator
 from autoagent.agent.mcp.config import MCPTransportConfig
 from autoagent.agent.mcp.recovery import MCPReconnectPolicy
 from autoagent.agent.models._base import Model, NonEmpty
-from autoagent.agent.tools.policy import DeclarativeToolPolicy
+from autoagent.agent.tools import ToolPolicy
 from .credentials import CredentialReference
-from .providers import connection_url
-
-
-class ResourcePermissions(DeclarativeToolPolicy):
-    """The product selects one effective declarative policy per Tool."""
+from autoagent.host.providers import connection_url
 
 
 class _ResourceConfig(Model):
     name: NonEmpty
     enabled: bool = True
-    permissions: ResourcePermissions = Field(default_factory=lambda: ResourcePermissions(default="allow"))
+    permissions: ToolPolicy = Field(default_factory=ToolPolicy)
 
 
 class MCPResourceConfig(_ResourceConfig):
@@ -79,7 +75,7 @@ class ResourceControl(_ResourceConfig):
 
     kind: Literal["resource"] = "resource"
     resource_id: NonEmpty
-    permissions: ResourcePermissions | None = None
+    permissions: ToolPolicy | None = None
 
 
 class GroupControl(_ResourceConfig):
@@ -87,11 +83,11 @@ class GroupControl(_ResourceConfig):
 
     kind: Literal["group"] = "group"
     group_id: NonEmpty
-    permissions: ResourcePermissions | None = None
+    permissions: ToolPolicy | None = None
 
 
 AgentResourceConfig = Annotated[MCPResourceConfig | SkillResourceConfig | ResourceControl | GroupControl,
     Field(discriminator="kind")]
 
 
-__all__ = ["AgentResourceConfig", "MCPResourceConfig", "SkillResourceConfig", "ResourceControl", "GroupControl", "ResourcePermissions"]
+__all__ = ["AgentResourceConfig", "MCPResourceConfig", "SkillResourceConfig", "ResourceControl", "GroupControl"]

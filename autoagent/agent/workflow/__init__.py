@@ -3,7 +3,7 @@
 from .builder import agent_workflow
 from .events import *
 from .events import __all__ as _event_exports
-from .resources import MCPSource, SkillDirectory
+from .resources import AgentResources, MCPSource, SkillDirectory
 from .subagents import SubagentsConfig, SubagentTarget, AgentSignalMessage, AgentObservation
 from .questions import AskUserOption, AskUserQuestion, AskUserArguments, AskUserRequest, AskUserAnswer, AskUserResponse
 from .configuration import AgentNodeId, AgentNodePolicy, AgentWorkflowPolicies, AgentWorkflowExtensions
@@ -16,7 +16,7 @@ from .models import (
 )
 
 __all__ = [
-    "MCPSource", "SkillDirectory",
+    "AgentResources", "MCPSource", "SkillDirectory",
     "SubagentsConfig", "SubagentTarget", "AgentSignalMessage", "AgentObservation",
     "AskUserOption", "AskUserQuestion", "AskUserArguments", "AskUserRequest", "AskUserAnswer", "AskUserResponse",
     "agent_workflow", "AgentInput", "AgentResult", "AgentWorkflowOptions", "AgentApprovalRequest", "AgentApprovalResponse", "AgentApprovalResolution",

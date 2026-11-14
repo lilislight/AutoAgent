@@ -87,11 +87,11 @@ function MemoryPanel({ id, anchor, snapshot, error, loading, windowSeconds, onRa
         <Metric label="Budget used" value={latest?.budget_ratio == null ? 'Unavailable' : `${(latest.budget_ratio * 100).toFixed(1)}%`} /></dl>
       <p className="memory-caption">Budget: {memoryBudgetSource(latest?.resources.budget_source)}
         {latest?.resources.capacity_bytes != null ? ` · Effective capacity ${memoryBytes(latest.resources.capacity_bytes)}` : ''}.
-        {' '}Pressure also accounts for shared system / Cgroup usage.</p>
+        </p>
       <section className="memory-trend"><div className="memory-section-header"><h3>RSS history</h3><div className="memory-ranges" role="group" aria-label="Memory history range">
         {ranges.map(range => <button type="button" key={range.seconds} aria-pressed={windowSeconds === range.seconds} onClick={() => onRange(range.seconds)}>{range.label}</button>)}</div></div>
         <MemoryChart snapshot={snapshot} windowSeconds={windowSeconds} />
-        <p className="memory-caption">{snapshot.history_count.toLocaleString()} samples · {snapshot.history.length.toLocaleString()} plotted points · RSS peaks preserved</p>
+        <p className="memory-caption">{snapshot.history_count.toLocaleString()} samples</p>
       </section>
       <section><div className="memory-section-header"><h3>Host & persistence</h3><small>Cached component estimates</small></div>
         <dl className="memory-details"><Metric label="Resident graphs" value={host?.resident_graphs} /><Metric label="Checkpoint jobs" value={host?.checkpoint_jobs} />
@@ -100,7 +100,7 @@ function MemoryPanel({ id, anchor, snapshot, error, loading, windowSeconds, onRa
           <Metric label="Projection cache" value={memoryBytes(projections?.bytes)} /><Metric label="Cache entries" value={projections?.entries} />
           <Metric label="State estimate" value={memoryBytes(host?.residency.estimated_bytes)} /><Metric label="Active requests" value={host?.requests} /></dl>
         {queue?.fault ? <p className="memory-notice" role="alert">Writer fault: {queue.fault}</p> : null}
-        <p className="memory-caption">Component estimates overlap and do not add up to process RSS.</p></section>
+        </section>
       {latest?.cgroup ? <section><div className="memory-section-header"><h3>Cgroup</h3><small>Shared usage, including other processes and file cache</small></div>
         <dl className="memory-details"><Metric label="Current" value={memoryBytes(latest.cgroup.current_bytes)} /><Metric label="Effective limit" value={memoryBytes(latest.cgroup.limit_bytes)} />
           <Metric label="Available headroom" value={memoryBytes(latest.cgroup.available_bytes)} />
@@ -110,7 +110,7 @@ function MemoryPanel({ id, anchor, snapshot, error, loading, windowSeconds, onRa
         <dl className="memory-details"><Metric label="Physical capacity" value={memoryBytes(latest?.resources.system_total_bytes)} />
           <Metric label="Available" value={memoryBytes(latest?.resources.system_available_bytes)} />
           <Metric label="Shared capacity used" value={latest ? `${(latest.resources.shared_pressure_ratio * 100).toFixed(1)}%` : undefined} /></dl>
-        <p className="memory-caption">Highest usage across available system and Cgroup measurements.</p></section>
+        </section>
       <section><div className="memory-section-header"><h3>Largest resident Sessions</h3><small>Cached estimates</small></div>
         {host?.residency.top_sessions.length ? <div className="memory-session-list">{host.residency.top_sessions.map(session => <div key={session.session_id}>
           <code title={session.session_id}>{session.session_id}</code><span>{memoryBytes(session.estimated_bytes)}</span>

@@ -7,7 +7,7 @@ export interface QueuedMessage {
 export interface MessageQueue { items: QueuedMessage[]; invocation_id: string | null }
 export type AccessAction = 'allow' | 'ask' | 'deny';
 export interface SessionSettings {
-  model: { provider: string; model: string | null };
+  model: { provider: string; model: string | null; reasoning_effort?: string | null };
   approval_mode: 'always_ask' | 'policy' | 'auto_approve';
 }
 export interface AgentWorkspaceInfo { id: string; name: string; backend: string; path: string | null; is_project: boolean; available: boolean | null }
@@ -17,8 +17,8 @@ export interface WorkspaceAgent {
   include_ask_user: boolean; subagents: boolean;
   context_policy: { context_window: number | null; compact_at_ratio: number; compact_at_tokens: number | null; target_ratio: number; target_tokens: number | null };
 }
-export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; provider_options?: { id: string; name: string; models: string[] }[]; defaults: SessionSettings; project_workspace_id: string }
-export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number; workspace_id?: string | null }
+export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; provider_options?: { id: string; name: string; models: string[]; model_details?: import('./settings/types.js').ConfiguredModel[] }[]; defaults: SessionSettings; project_workspace_id: string }
+export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number; workspace_id?: string | null; status?: string; control_state?: string; last_sequence?: number }
 export interface Page<T> { items: T[]; next_cursor: string | null }
 export interface AgentInvocation { invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number | null; completed_at_us?: number | null; [key: string]: unknown }
 export interface PendingWait { invocation_id: string; wait_id: string; node_id?: string; occurrence_id: string }
@@ -55,6 +55,7 @@ export interface Payloads {
   'agent.completed': { final_response_id: string; rounds: number };
 }
 export type AgentEvent = { [K in keyof Payloads]: { id: string; session_id: string; invocation_id: string; occurrence_id: string | null; occurred_at_us: number; sequence: number | null; persist: boolean; kind: K; payload: Payloads[K] & { v: 1; node_id: string } } }[keyof Payloads];
-export interface ActionSpec { root_invocation_id: string; request: Record<string, Json> | null; response_example: Json; input_schema: unknown; endpoints: string[]; next_sequence: number }
+export interface InteractionReview { reviewer: 'user' | 'system' | 'policy' | 'agent'; requires_user_input: boolean }
+export interface ActionSpec { root_invocation_id: string; request: Record<string, Json> | null; review?: InteractionReview; response_example: Json; input_schema: unknown; endpoints: string[]; next_sequence: number }
 export interface ActionInput { invocation_id: string; action: 'pause' | 'recover' | 'cancel' | 'respond' | 'signal'; request_id: string; expected_version?: number; target_invocation_id?: string; wait_id?: string; payload?: unknown; endpoint?: string; source_id?: string; sequence?: number }
 export interface Operation { operation_id: string; status: 'running' | 'succeeded' | 'failed' | 'unobserved'; result: Record<string, Json> | null; error: { code: string; message: string } | null }

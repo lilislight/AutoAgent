@@ -182,7 +182,8 @@ def capture_snapshot(skill, *, paths=None, expected_revision=None):
     revision = _revision(skill.metadata.name, files)
     if expected_revision is not None and revision != expected_revision:
         raise SkillChangedError("Skill snapshot does not match the expected version.")
-    return SkillSnapshot(name=skill.metadata.name, source_location=skill.source.location, revision=revision, files=tuple(files))
+    origin = getattr(getattr(skill.source, "snapshot", None), "source_location", skill.source.location)
+    return SkillSnapshot(name=skill.metadata.name, source_location=origin, revision=revision, files=tuple(files))
 
 
 __all__ = ["SkillSnapshotFile", "SkillSnapshot", "SnapshotSkillSource"]

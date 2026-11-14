@@ -12,7 +12,6 @@ class ApplicationSessionSettings(AgentSessionSettings):
     @classmethod
     def from_runtime(cls, settings):
         values = settings.session_defaults().model_dump(mode="json")
-        values["approval_mode"] = {"bypass": "auto_approve", "never_ask": "policy"}.get(values["approval_mode"], values["approval_mode"])
         return cls.model_validate_json(json.dumps(values))
 
 

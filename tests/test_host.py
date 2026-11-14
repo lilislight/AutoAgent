@@ -739,12 +739,13 @@ class HostConfigurationTests(unittest.TestCase):
     def test_env_example_covers_every_host_and_agent_application_setting(self):
         """Document startup settings at their Host and Agent application parser locations."""
         from autoagent.agent_app import AgentApplication
-        from autoagent.host.agent_context import HostAgentContext
+        from autoagent.agent_app.resources import ManagedAgentResources
+        from autoagent.host.providers import HostProviders
         from autoagent.host.project import Project
 
         names = {
             value
-            for parser in (HostSettings.from_environment.__func__, HostAgentContext.__init__, Project.load,
+            for parser in (HostSettings.from_environment.__func__, ManagedAgentResources.skill_roots, HostProviders.__init__, Project.load,
                            AgentApplication.project_workflows, AgentApplication._configure_startup)
             for value in parser.__code__.co_consts
             if isinstance(value, str) and value.startswith("AUTOAGENT_") and value.isidentifier()
@@ -754,7 +755,7 @@ class HostConfigurationTests(unittest.TestCase):
             for line in (Path(__file__).resolve().parents[1] / ".env.example")
             .read_text()
             .splitlines()
-            if line.startswith("AUTOAGENT_") and not line.startswith(("AUTOAGENT_SERVER_", "AUTOAGENT_LLM_", "AUTOAGENT_EMBEDDING_", "AUTOAGENT_LOG_"))
+            if line.startswith("AUTOAGENT_") and not line.startswith(("AUTOAGENT_SERVER_", "AUTOAGENT_LOG_"))
         }
         self.assertEqual(names, documented)
 

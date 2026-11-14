@@ -27,16 +27,18 @@ def echo(value: EchoInput) -> EchoInput:
 
 class ApplicationBoundaryTests(unittest.TestCase):
     def test_foundations_do_not_import_product_implementation_or_metadata(self):
-        """Core, SDK and Host persistence stay independent of product APIs and Session metadata."""
+        """Core/Host do not import the product; SDK also avoids concrete Host dependencies."""
         import ast
         from autoagent.agent.context import AgentSettingsRecord
         from autoagent.host.runtime import HostSetup
         root = Path(__file__).resolve().parents[1] / 'autoagent'
-        for directory in ('core', 'agent', 'host/persistence'):
+        for directory in ('core', 'agent', 'host'):
             for path in (root / directory).rglob('*.py'):
                 for node in ast.walk(ast.parse(path.read_text())):
                     imports = [alias.name for alias in node.names] if isinstance(node, ast.Import) else [node.module or ''] if isinstance(node, ast.ImportFrom) else []
                     self.assertFalse(any(name.startswith('autoagent.agent_app') for name in imports), str(path))
+                    if directory == 'agent':
+                        self.assertFalse(any(name.startswith('autoagent.host') for name in imports), str(path))
         self.assertNotIn('title', AgentSettingsRecord.model_fields)
         self.assertNotIn('metadata_version', AgentSettingsRecord.model_fields)
         self.assertNotIn('agent_app', HostSetup.__dataclass_fields__)
@@ -73,26 +75,28 @@ class ApplicationLifecycleContracts:
 
     def host(self, workflows=(), *, lifespan=None, read_only=False):
         return AutoAgentHost(root=self.root, workflows=workflows, lifespan=lifespan,
-            settings=HostSettings(database_url=self.url), environment={}, read_only=read_only)
+            settings=HostSettings(database_url=self.url), environment={"AUTOAGENT_BUILTIN_AGENT_ENABLED":"false"}, read_only=read_only, applications=(AgentApplication,))
 
     async def test_user_workflows_run_without_product_services(self):
         """Custom Agent and ordinary Workflows execute without product queue or resource monitoring."""
-        private = agent_workflow(workflow_id="private", files=False, execution=False)
+        private = agent_workflow(workflow_id="private",  )
         ordinary = Workflow("ordinary", nodes=[Node("echo", Operator(echo))])
         provider = ScriptedProvider(answer("Private answer"))
 
         @asynccontextmanager
         async def resources(setup):
-            setup.agent_context.resources.register_provider("offline", provider)
-            setup.agent_context.set_defaults(settings())
+            setup.providers.register("offline", provider)
+            setup.extensions["agent"].context.set_defaults(settings())
+            if "agent" in setup.applications:
+                setup.applications["agent"].context.set_defaults(settings())
             yield
 
         async with self.host([private, ordinary], lifespan=resources) as host:
-            self.assertFalse(host.agent_app.enabled)
-            self.assertFalse(host.agent_app.running)
-            self.assertFalse(host.agent_app.owns(private))
-            self.assertIsNone(host.agent_app.context.messages.task)
-            self.assertIsNone(host.agent_app.context.shared_resources.monitor)
+            self.assertFalse(host.applications["agent"].enabled)
+            self.assertFalse(host.applications["agent"].running)
+            self.assertFalse(host.applications["agent"].owns(private))
+            self.assertIsNone(host.applications["agent"].context.messages.task)
+            self.assertIsNone(host.applications["agent"].context.shared_resources.monitor)
             private_result = await host.join(await host.execute("private", AgentInput(message="Hello")))
             self.assertEqual(private_result.status, "completed", private_result.error)
             ordinary_result = await host.join(await host.execute("ordinary", {"text": "Hello"}))
@@ -102,9 +106,9 @@ class ApplicationLifecycleContracts:
     async def test_product_owns_only_its_workflow_and_closes_its_services(self):
         """The product owns its definitions and IR, and stops both queue and monitor on Host exit."""
         product = builtin_agent_workflow(execution=False)
-        private = agent_workflow(workflow_id="private", files=False, execution=False)
+        private = agent_workflow(workflow_id="private",  )
         async with self.host([product, private]) as host:
-            application = host.agent_app
+            application = host.applications["agent"]
             self.assertIs(host._runtime.setup.applications["agent"], application)
             self.assertTrue(application.enabled)
             self.assertTrue(application.running)
@@ -114,8 +118,8 @@ class ApplicationLifecycleContracts:
             self.assertFalse(application.owns(private))
             self.assertFalse(application.owns(host._runtime.workflow_irs[
                 host._runtime.workflow_ids["private"]]))
-            queue = host.agent_app.context.messages.task
-            monitor = host.agent_app.context.shared_resources.monitor
+            queue = host.applications["agent"].context.messages.task
+            monitor = host.applications["agent"].context.shared_resources.monitor
             self.assertFalse(queue.done())
             self.assertFalse(monitor.done())
             with self.assertRaisesRegex(RuntimeError, "already started"):
@@ -134,7 +138,7 @@ class ApplicationLifecycleContracts:
             yield
 
         async with self.host(lifespan=resources) as host:
-            self.assertTrue(host.agent_app.running)
+            self.assertTrue(host.applications["agent"].running)
             self.assertIn(BUILTIN_AGENT_WORKFLOW_ID, host._runtime.workflow_ids)
 
     async def test_reserved_id_fails_before_database_open(self):
@@ -145,7 +149,7 @@ class ApplicationLifecycleContracts:
                 async with host:
                     self.fail("An ordinary Agent build cannot become the product.")
             opened.assert_not_called()
-        self.assertFalse(host.agent_app.running)
+        self.assertFalse(host.applications["agent"].running)
 
     async def test_late_reserved_id_failure_releases_project_resources(self):
         """An invalid lifespan registration unwinds resources and releases the database writer."""
@@ -164,32 +168,32 @@ class ApplicationLifecycleContracts:
             async with host:
                 self.fail("The invalid product registration must fail.")
         self.assertEqual(released, [True])
-        self.assertFalse(host.agent_app.running)
-        self.assertIsNone(host.agent_app.context.messages.task)
-        self.assertIsNone(host.agent_app.context.shared_resources.monitor)
+        self.assertFalse(host.applications["agent"].running)
+        self.assertIsNone(host.applications["agent"].context.messages.task)
+        self.assertIsNone(host.applications["agent"].context.shared_resources.monitor)
         async with self.host() as reopened:
-            self.assertFalse(reopened.agent_app.enabled)
+            self.assertFalse(reopened.applications["agent"].enabled)
 
     async def test_partial_submission_startup_closes_queue_and_runtime_resources(self):
         """A failure after queue creation closes every product service and releases the writer."""
         host = self.host([builtin_agent_workflow(execution=False)])
-        start = host.agent_app.context.messages.start
+        start = host.applications["agent"].context.messages.start
 
         async def fail():
             await start()
             raise ValueError("submission startup failed")
 
         with self.assertNoLogs("autoagent.host.residency", level="ERROR"):
-            with patch.object(host.agent_app.context.messages, "start", side_effect=fail):
+            with patch.object(host.applications["agent"].context.messages, "start", side_effect=fail):
                 with self.assertRaisesRegex(ValueError, "submission startup failed"):
                     async with host:
                         self.fail("Queue startup must fail.")
-        self.assertFalse(host.agent_app.running)
-        self.assertTrue(host.agent_app.context.messages.task.done())
-        self.assertTrue(host.agent_app.context.shared_resources.monitor.done())
+        self.assertFalse(host.applications["agent"].running)
+        self.assertTrue(host.applications["agent"].context.messages.task.done())
+        self.assertTrue(host.applications["agent"].context.shared_resources.monitor.done())
         self.assertTrue(host._runtime.residency.task.done())
         async with self.host([builtin_agent_workflow(execution=False)]) as reopened:
-            self.assertTrue(reopened.agent_app.running)
+            self.assertTrue(reopened.applications["agent"].running)
 
     async def test_read_only_host_does_not_start_product_services(self):
         """Opening existing history read-only never starts product resources or submissions."""
@@ -197,10 +201,10 @@ class ApplicationLifecycleContracts:
         async with self.host([product]):
             pass
         async with self.host([product], read_only=True) as host:
-            self.assertFalse(host.agent_app.enabled)
-            self.assertFalse(host.agent_app.running)
-            self.assertIsNone(host.agent_app.context.messages.task)
-            self.assertIsNone(host.agent_app.context.shared_resources.monitor)
+            self.assertFalse(host.applications["agent"].enabled)
+            self.assertFalse(host.applications["agent"].running)
+            self.assertIsNone(host.applications["agent"].context.messages.task)
+            self.assertIsNone(host.applications["agent"].context.shared_resources.monitor)
 
 
 class SQLiteApplicationLifecycleTests(ApplicationLifecycleContracts, unittest.IsolatedAsyncioTestCase):

@@ -1,11 +1,13 @@
 """Composition and lifecycle of the built-in Agent product."""
 
+import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 
 from .workflow import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow, is_builtin_agent
 
 
 class AgentApplication:
+    id = "agent"
     """Own product registration and services without adopting user Workflows.
 
     Host enters the runtime scope after project resources have been declared,
@@ -21,8 +23,6 @@ class AgentApplication:
         self._edit_code_permissions = True
         from .context import ApplicationContext
         self.context = ApplicationContext(host)
-        from .providers import ApplicationProviders
-        self.providers = ApplicationProviders(self)
         self._workflow = None
         self._entered = False
         self._runtime_active = False
@@ -36,7 +36,7 @@ class AgentApplication:
         flag = self.host.environment.get("AUTOAGENT_AGENT_EDIT_CODE_PERMISSIONS", "true").strip().lower()
         if flag not in {"true", "false", "1", "0"}:
             raise ValueError("AUTOAGENT_AGENT_EDIT_CODE_PERMISSIONS must be true, false, 1 or 0.")
-        credentials = ApplicationCredentials(self.host, self.host.environment.get("AUTOAGENT_APP_SECRETS_FILE"))
+        credentials = ApplicationCredentials(self.host)
         self._edit_code_permissions = flag in {"true", "1"}
         self._credentials = credentials
 
@@ -49,6 +49,32 @@ class AgentApplication:
     def edit_code_permissions(self):
         self._configure_startup()
         return self._edit_code_permissions
+
+    def prepare_workflows(self, workflows):
+        selected = self.validate_workflows(workflows)
+        if selected is None:
+            workflows = self.project_workflows(workflows, self.host.environment)
+        else:
+            # Product registries belong to this application instance. Reusing a
+            # Workflow definition after shutdown must not reuse previous live registrations.
+            from .registry import ApplicationResources
+            handler = next(node.executable.handler for node in selected.nodes if node.id == "start")
+            template = handler.__autoagent_resources__
+            resources = ApplicationResources(self.context, tools=template.tools, mcp=template.mcp, skills=template.skills,
+                namespace=template.namespace)
+            fresh = builtin_agent_workflow(resources=resources, execution=getattr(handler, "__agent_app_execution__", None) or False)
+            workflows = tuple(fresh if workflow is selected else workflow for workflow in workflows)
+        self._workflow = self.validate_workflows(workflows)
+        if self._workflow is not None:
+            handler = next(node.executable.handler for node in self._workflow.nodes if node.id == "start")
+            from .registry import ApplicationResources
+            registry = handler.__autoagent_resources__
+            if not isinstance(registry, ApplicationResources):
+                registry = ApplicationResources(self.context, tools=registry.tools, mcp=registry.mcp, skills=registry.skills,
+                    namespace=registry.namespace)
+                handler.__autoagent_resources__ = registry
+            self.context.resources = registry
+        return workflows
 
     @staticmethod
     def project_workflows(workflows, environment):
@@ -96,17 +122,18 @@ class AgentApplication:
 
     async def catalog(self):
         result = await self.context.workspace_catalog()
-        choices = await self.providers.describe() if self.enabled else {'items': []}
-        result['provider_options'] = [dict(id=row['alias'], name=row['configuration']['name'],
-            models=row['configuration'].get('models', [])) for row in choices['items']
-            if row['configuration'].get('enabled', True)]
+        choices = await self.host.providers.describe()
+        result['provider_options'] = [dict(id=row['id'], name=row['id'],
+            models=[model['id'] for model in row['models'] if model['enabled']],
+            model_details=[model for model in row['models'] if model['enabled']]) for row in choices['items'] if row['enabled']]
+        result['providers'] = [row['id'] for row in result['provider_options']]
         return result
 
     async def resource_configs(self, workspace_id=None):
         self.require_enabled()
         result = await self.context.shared_resources.describe(workspace_id)
-        from .resource_config import ResourcePermissions
-        return {**result, "policy_schema": ResourcePermissions.model_json_schema(),
+        from autoagent.agent import ToolPolicy
+        return {**result, "policy_schema": ToolPolicy.model_json_schema(),
             "edit_code_permissions": self.edit_code_permissions}
 
     async def save_resource(self, config, *, resource_id=None, expected_version=0):
@@ -117,39 +144,50 @@ class AgentApplication:
         self.require_enabled()
         return await self.context.shared_resources.skill_document(management_id, workspace_id)
 
-    async def preview_policy(self, policy, *, tool_name, arguments, operations=()):
+    async def preview_policy(self, policy, *, tool_name, arguments, operations=(), context=None):
         """Evaluate an editor example without executing a Tool or issuing an approval."""
         self.require_enabled()
         import json
         from autoagent.agent import LLMToolCall, ToolContext
         call = LLMToolCall(name=tool_name, call_id="policy-preview", arguments=json.dumps(arguments))
-        context = ToolContext(operations=operations).for_call(call, arguments)
-        return dict(preview_only=True, decision=policy(call, context).model_dump(mode='json'))
+        supplied = context or {}
+        if set(supplied) - {"user_id", "session_id", "attributes"}:
+            raise ValueError("Preview Context accepts user_id, session_id and attributes only.")
+        current = ToolContext(operations=operations, **supplied).for_call(call, arguments)
+        return dict(preview_only=True, **policy.explain(call, current))
+
+    async def parse_policy(self, text, *, format):
+        """Validate editor text using the SDK parser, without touching application settings."""
+        self.require_enabled()
+        from autoagent.agent import ToolPolicy
+        if format not in {"json", "yaml"}:
+            raise ValueError("Unsupported policy format.")
+        policy = ToolPolicy.from_yaml(text) if format == "yaml" else ToolPolicy.from_json(text)
+        return dict(policy=policy.to_dict(), json=policy.to_json(), yaml=policy.to_yaml())
 
     async def test_mcp(self, config):
         self.require_enabled()
         from .resource_config import MCPResourceConfig
-        from autoagent.agent import MCPClient
+        from autoagent.agent import AgentResourceRegistry, MCPClient, MCPResourceSource, MCPToolRegistry
         if not isinstance(config, MCPResourceConfig):
             raise ValueError("An MCP resource configuration is required.")
         async def test():
             try:
                 transport = config.resolve_transport(self.credentials)
                 async with MCPClient(transport, reconnect_policy=config.reconnect) as client:
-                    tools = await client.list_tools()
-                    return dict(connected=True, tools=[dict(name=tool.name, description=tool.description,
-                        input_schema=tool.input_schema) for tool in tools])
+                    registry = MCPToolRegistry(client, prefix=config.prefix)
+                    resources = AgentResourceRegistry(namespace="mcp-preview")
+                    async with MCPResourceSource(resources, registry, reconnect_policy=config.reconnect):
+                        return dict(connected=True, tools=[dict(name=tool["name"],
+                            description=tool.get("description"), input_schema=tool["inputSchema"])
+                            for tool in registry.metadata.values()])
             except Exception:
                 return dict(connected=False, tools=[], error="Cannot connect to MCP Server; check configuration and credential references.")
         return await self.host._perform(lambda: self.context.approvals._run(test))
 
     async def list_providers(self):
         self.require_enabled()
-        return await self.providers.describe()
-
-    async def save_provider(self, config, *, provider_id=None, expected_version=0):
-        self.require_enabled()
-        return await self.providers.save(config, provider_id=provider_id, expected_version=expected_version)
+        return await self.host.providers.describe()
 
     async def start_conversation(self, *args, **kwargs):
         self.require_enabled()
@@ -234,6 +272,8 @@ class AgentApplication:
                 return None
             record = await self.context.get_settings(row['session_id'])
             return dict(session_id=row['session_id'], title=record.title or 'Chat', invocation_id=current.items[0]['invocation_id'],
+                status=current.items[0]['status'], control_state=current.items[0]['control_state'],
+                last_sequence=current.items[0]['last_sequence'],
                 updated_at_us=row['updated_at_us'], invocation_count=row['invocation_count'],
                 workspace_id=record.workspace.workspace_id if record.workspace else None, metadata_version=record.metadata_version)
         items = await asyncio.gather(*(describe(row) for row in page.items))
@@ -273,11 +313,16 @@ class AgentApplication:
         try:
             if self.enabled:
                 self._configure_startup()
-                self.context.initialize_defaults(self.host.agent_context)
+                self.context.initialize_defaults(self.host.extensions["agent"].context)
                 async with AsyncExitStack() as stack:
-                    stack.enter_context(self.host.agent_context.context_scope(self.owns, self.context))
+                    stack.enter_context(self.host.extensions["agent"].context.context_scope(self.owns, self.context))
+                    await stack.enter_async_context(self.context.approvals.runtime_scope())
                     await stack.enter_async_context(self.context.resource_scope())
-                    await stack.enter_async_context(self.providers.lifespan())
+                    monitor = asyncio.create_task(self.context._watch_resources())
+                    async def stop_monitor():
+                        monitor.cancel()
+                        await asyncio.gather(monitor, return_exceptions=True)
+                    stack.push_async_callback(stop_monitor)
                     await stack.enter_async_context(self.context.shared_resources.lifespan())
                     self._runtime_active = True
                     yield
@@ -297,10 +342,26 @@ class AgentApplication:
             raise RuntimeError("Agent application submissions have already started.")
         self._queue_started = True
         try:
+            await self._cancel_open_tasks("Agent application restarted; the previous task was stopped.")
             await self.context.messages.start()
         except BaseException:
             await self.close()
             raise
+
+    async def _cancel_open_tasks(self, reason):
+        cursor = None
+        while True:
+            page = await self.host.list_execution_sessions(workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,), statuses=("created", "running", "waiting", "settling"), limit=100, cursor=cursor)
+            for row in page.items:
+                latest = await self.host.list_session_invocations(row["session_id"], workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,), limit=1)
+                if not latest.items:
+                    continue
+                invocation = latest.items[0]
+                if invocation["parent_invocation_id"] is None and invocation["status"] not in {"completed", "failed", "cancelled"}:
+                    await self.host.cancel(invocation["invocation_id"], reason=reason)
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
 
     async def close(self):
         """Stop product submissions before Host execution and persistence close."""

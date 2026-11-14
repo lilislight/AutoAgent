@@ -9,7 +9,7 @@ from uuid import uuid4
 
 import httpx
 
-from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
+from autoagent.agent_app import AgentApplication, BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
 from autoagent.agent import AgentInput, ExecutionToolsConfig, CommandRule
 from autoagent.host import AutoAgentHost, HostSettings, ProjectError
 from autoagent.host.project import Project
@@ -25,17 +25,20 @@ class BuiltinRegistrationTests(unittest.TestCase):
         workflow = builtin_agent_workflow(execution=config)
         start = next(node for node in workflow.nodes if node.id == "start")
         self.assertEqual(start.executable.handler.__autoagent_context_policy__.context_window, 200_000)
-        self.assertEqual(start.executable.handler.__autoagent_resources__.execution, config)
+        self.assertEqual(start.executable.handler.__agent_app_execution__.default_decision, config.default_decision)
+        self.assertEqual(start.executable.handler.__agent_app_execution__.rules, config.rules)
 
     def test_empty_directory_and_empty_manifest_register_sdk_agent(self):
-        """Both discovery without factories and an explicit empty list include the SDK Agent."""
+        """Empty projects leave product registration to explicit application composition."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for manifest in (False, True):
                 if manifest:
                     (root / 'auto-agent.toml').write_text('schema_version=1\nworkflows=[]\n')
                 workflows, lifespan = Project.find(root).load({})
-                self.assertEqual([wf.id for wf in workflows], [BUILTIN_AGENT_WORKFLOW_ID])
+                self.assertEqual(workflows, ())
+                product = AgentApplication.project_workflows(workflows, {})
+                self.assertEqual([wf.id for wf in product], [BUILTIN_AGENT_WORKFLOW_ID])
                 self.assertIsNone(lifespan)
                 self.assertEqual(Project.find(root).load({'AUTOAGENT_BUILTIN_AGENT_ENABLED': 'false'})[0], ())
 
@@ -44,15 +47,15 @@ class BuiltinRegistrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             project = Project(root, 'test')
-            with self.assertRaisesRegex(ProjectError, 'AUTOAGENT_BUILTIN_AGENT_ENABLED'):
-                project.load({'AUTOAGENT_BUILTIN_AGENT_ENABLED': 'sometimes'})
+            with self.assertRaisesRegex(ValueError, 'AUTOAGENT_BUILTIN_AGENT_ENABLED'):
+                AgentApplication.project_workflows(project.load({})[0], {'AUTOAGENT_BUILTIN_AGENT_ENABLED': 'sometimes'})
             module = 'reserved_' + uuid4().hex
             (root / (module + '.py')).write_text('from autoagent.agent import agent_workflow\n'
                 'workflow = agent_workflow(workflow_id="autoagent.agent")\n')
             project = Project(root, 'test', (module + ':workflow',))
             for flag in ('true', 'false'):
-                with self.assertRaisesRegex(ProjectError, 'reserved'):
-                    project.load({'AUTOAGENT_BUILTIN_AGENT_ENABLED': flag})
+                with self.assertRaisesRegex(ValueError, 'reserved'):
+                    AgentApplication.project_workflows(project.load({})[0], {'AUTOAGENT_BUILTIN_AGENT_ENABLED': flag})
 
 
 class BuiltinApplicationContracts:
@@ -74,10 +77,12 @@ class BuiltinApplicationContracts:
             provider = ScriptedProvider(*(answer(f'Answer {i}') for i in range(8)))
             @asynccontextmanager
             async def lifespan(setup):
-                setup.agent_context.resources.register_provider('offline', provider)
-                setup.agent_context.set_defaults(settings())
+                setup.providers.register('offline', provider)
+                if "agent" in setup.extensions:
+                    setup.extensions["agent"].context.set_defaults(settings())
+                setup.applications["agent"].context.set_defaults(settings())
                 yield
-            async with AutoAgentHost.from_project(root, use_env_file=False,
+            async with AutoAgentHost.from_project(root, use_env_file=False, applications=(AgentApplication,),
                 environment={'AUTOAGENT_BUILTIN_AGENT_ENABLED': 'false' if disabled else 'true'},
                 lifespan=lifespan, settings=HostSettings(database_url=await self.database_url(root))) as host:
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=create_app(host)),
@@ -110,10 +115,10 @@ class BuiltinApplicationContracts:
             rows = (await client.get('/api/v2/agent/sessions')).json()['items']
             self.assertEqual(len(rows), 1)
             self.assertNotIn('workflow_id', rows[0])
-            self.assertNotIn('status', rows[0])
+            self.assertEqual(rows[0]['status'], 'completed')
 
     async def test_disabled_agent_allows_empty_host_and_returns_clear_chat_state(self):
-        """Disabling the SDK Agent still permits project startup with zero Workflows."""
+        """Disabling the Agent application still permits startup with zero Workflows."""
         async with self.project(disabled=True) as (host, client):
             self.assertEqual((await client.get('/api/v2/workflows')).json()['items'], [])
             self.assertIsNone((await client.get('/api/v2/agent/catalog')).json()['agent'])
@@ -126,7 +131,7 @@ class BuiltinApplicationContracts:
         async with self.project(custom=True) as (host, client):
             custom = await host.execute('custom', AgentInput(message='Custom'))
             await host.join(custom)
-            sdk = await host.agent_app.context.start_conversation('sdk-only', 'SDK')
+            sdk = await host.applications["agent"].context.start_conversation('sdk-only', 'SDK')
             await host.join(sdk)
             for route, params in (
                 ('execution', {'invocation_id': custom.invocation_id}),

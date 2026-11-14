@@ -60,6 +60,10 @@ class OpenAIProvider(OpenAIClientOwner, LLMProvider):
     def protocol(self) -> str:
         return self.adapter.protocol
 
+    def context_message_role(self, model: str | None = None) -> str:
+        from urllib.parse import urlsplit
+        return "system" if urlsplit(self.config.base_url).hostname == "api.openai.com" else "user"
+
     async def _prepare_request(self, request: LLMRequest) -> LLMRequest:
         profile = self._profiles.get(request.model)
         if profile is not None:

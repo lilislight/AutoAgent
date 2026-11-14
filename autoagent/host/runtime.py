@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
@@ -35,8 +34,9 @@ class HostSetup:
     workflows: list
     operators: list
     capability_resolvers: dict = field(default_factory=dict)
-    agent_context: object = None
+    extensions: dict = field(default_factory=dict)
     applications: dict = field(default_factory=dict)
+    providers: object = None
 
     def register_operator(
         self, operator, *, capability_id, priority=0, enabled=True, default=False
@@ -70,7 +70,7 @@ class Runtime:
     """Owned by Host; caller-loop coordination never enters Core private state."""
 
     def __init__(
-        self, persistence, settings, workflows, operators, lifespan, environment, *, usage_policy=None, agent_context=None,
+        self, persistence, settings, workflows, operators, lifespan, environment, *, usage_policy=None, providers=None, extensions=None,
         on_user_event=None, applications=None, resource_scopes=(),
     ):
         self.settings = settings
@@ -81,8 +81,10 @@ class Runtime:
             MappingProxyType(dict(environment)), list(workflows), list(operators)
         )
         self.lifespan = lifespan
-        self.agent_context = agent_context
-        self.setup.agent_context = agent_context
+        self.extensions = extensions
+        self.setup.extensions = extensions.items
+        self.setup.providers = providers
+        self.resource_loop = None
         self.setup.applications.update(applications or {})
         self.resource_scopes = tuple(resource_scopes)
         self.journal = InMemoryUserEventJournal()
@@ -117,29 +119,27 @@ class Runtime:
     @asynccontextmanager
     async def _resources(self):
         from autoagent.agent.recording import runtime_llm_recorder
-        from .agent import agent_resources
-        from autoagent.agent.context import agent_runtime_context
 
         with runtime_llm_recorder(self.persistence, usage_policy=self.usage_policy):
             async with AsyncExitStack() as stack:
-                if self.agent_context is not None:
-                    stack.enter_context(agent_runtime_context(self.agent_context))
-                    await stack.enter_async_context(self.agent_context.approvals.runtime_scope())
+                import asyncio
+                self.resource_loop = asyncio.get_running_loop()
+                await self.extensions.enter_lifespans(self.setup, stack)
+                if self.setup.providers is not None:
+                    await stack.enter_async_context(self.setup.providers.lifespan(self.setup))
                 if self.lifespan is not None:
                     await stack.enter_async_context(self.lifespan(self.setup))
-                await stack.enter_async_context(agent_resources(self.setup))
-                if self.agent_context is not None:
-                    await stack.enter_async_context(self.agent_context.resource_scope())
+                self.extensions.discover(self.setup.workflows)
+                await self.extensions.enter_lifespans(self.setup, stack)
+                if self.setup.providers is not None:
+                    self.setup.providers.install_operators(self.setup)
+                await self.extensions.enter_resources(self.setup, stack)
                 for scope in self.resource_scopes:
                     await stack.enter_async_context(scope(self.setup))
-                if self.agent_context is not None:
-                    self.agent_context.install_operators(self.setup)
                 yield
 
     async def prepare(self):
         await self.app.aprepare()
-        for capability_id, resolver in self.setup.capability_resolvers.items():
-            self.app.register_capability_resolver(capability_id, resolver)
         ids = set()
         compiler = WorkflowCompiler()
         closure = {}
@@ -163,10 +163,9 @@ class Runtime:
                         pending.append(node.executable.workflow)
                     elif isinstance(node.executable, Operator):
                         self._definition(node.executable)
-        if self.agent_context is not None:
-            for context in self.agent_context.contexts():
-                await context.prepare_resources({key: ir for key, ir in closure.items()
-                    if self.agent_context.for_definition(ir) is context})
+        await self.extensions.call("prepare", closure, self.setup)
+        for capability_id, resolver in self.setup.capability_resolvers.items():
+            self.app.register_capability_resolver(capability_id, resolver)
         for registration in self.setup.operators:
             self._definition(registration.operator)
         # Persistence is complete before any definition becomes executable.
@@ -206,17 +205,7 @@ class Runtime:
         self.definitions[operator.id] = definition
 
     async def append(self, event):
-        snapshot = None
-        context = self.agent_context
-        if self.agent_context is not None and event.invocation_id is not None:
-            if event.event_name == "invocation.started":
-                ir = self.workflow_irs.get(event.payload.workflow_revision_id)
-                if ir is not None and self.agent_context.options_for_workflow(ir) is not None:
-                    context = self.agent_context.for_workflow(ir.workflow_revision_id)
-                    snapshot = await context.activate(event.session_id, event.invocation_id,
-                        reason="start", activation_id=event.id, workflow_revision=ir.workflow_revision_id,
-                        model=event.payload.input.get("model") if isinstance(event.payload.input, Mapping) else None,
-                        message=event.payload.input.get("message") if isinstance(event.payload.input, Mapping) else None)
+        await self.extensions.call("before_event", event)
         definition_id = None
         if event.event_name in ("operator_call.started", "capability.resolved"):
             operator_id = event.payload.operator_id
@@ -230,15 +219,7 @@ class Runtime:
         size = await self.persistence.append_runtime_event(
             event, operator_definition_id=definition_id
         )
-        if snapshot is not None:
-            context.adopt(snapshot)
-        if self.agent_context is not None and event.event_name in {"node_occurrence.waiting", "invocation.waiting"}:
-            await self.agent_context.approvals.changed(event.session_id)
-        if self.agent_context is not None and event.event_name == "invocation.cancelled":
-            await self.agent_context.cancel_processes({event.invocation_id})
-        if self.agent_context is not None and event.event_name == "child_invocation.planned":
-            for unit in event.payload.units:
-                self.agent_context._agent_parents[unit.child_invocation_id] = event.invocation_id
+        await self.extensions.call("after_event", event)
         if self.residency is not None:
             units = tuple(unit.child_session_id for unit in event.payload.units) if event.event_name == "child_invocation.planned" else ()
             self.residency.loop.call_soon_threadsafe(
@@ -275,8 +256,10 @@ class Runtime:
         ref = self.resident.pop(sid, None)
         if ref is not None:
             self.needs_recovery.discard(ref.invocation_id)
-            if self.agent_context is not None:
-                self.agent_context.forget(ref.invocation_id)
+            for extension in self.extensions.items.values():
+                callback = getattr(extension, "forget", None)
+                if callback is not None:
+                    callback(ref.invocation_id)
         self.owners = {child: root for child, root in self.owners.items() if root != sid}
 
     async def reference(self, invocation_id):
@@ -338,6 +321,7 @@ class Runtime:
             for iid, sequence in bundle["user_frontiers"].items():
                 if iid in kept:
                     self.journal.continue_sequence(iid, sequence)
+            await self.extensions.call("restored", graph)
             await self.app.aload_checkpoint(graph)
             root = next(item.state.invocation for item in graph.sessions if item.session_id == ref.session_id)
             if not root.terminal:
@@ -384,10 +368,6 @@ class Runtime:
             state = states[sid]
             selected[sid] = state
             if state.invocation is not None:
-                if self.agent_context is not None:
-                    for plan in state.invocation.child_plans.values():
-                        for unit in plan.units:
-                            self.agent_context._agent_parents[unit.invocation_id] = state.invocation.id
                 pending.extend(
                     unit.session_id
                     for plan in state.invocation.child_plans.values()
@@ -420,6 +400,10 @@ class Runtime:
         status = await self.app.astatus(ref)
         if not force and (status.control_state != "active" or status.status in {"completed", "failed", "cancelled"}):
             return None
+        if not self.extensions.allows_recovery(ref.workflow_revision_id, status,
+                interrupted=ref.invocation_id in self.needs_recovery, automatic=not force):
+            from .models import HostRunConflict
+            raise HostRunConflict("recovery_not_allowed", "This task ended or was interrupted. Send a new message to continue.")
         task = self.recovery_tasks.get(ref.invocation_id)
         if task is None:
             async def recover():
@@ -434,8 +418,8 @@ class Runtime:
                 operation = self.app.arecover(ref, source=source, request_id=request_id, expected_version=expected_version)
                 source = None
                 result = await operation
-                if self.agent_context is not None:
-                    result = await self.agent_context.approvals.reconcile(ref, result)
+                for extension in self.extensions.items.values():
+                    result = await extension.recovered(ref, result)
                 return result
             # Install single-flight ownership before SQL reads or reconstruction
             # yield; a second request must not start another recovery plan.

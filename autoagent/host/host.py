@@ -62,6 +62,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         read_only=False,
         usage_policy=None,
         pricing=None,
+        applications=(),
     ):
         self.root = Path(root or Path.cwd()).expanduser().resolve()
         self.environment = MappingProxyType(
@@ -94,10 +95,31 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         self._import_context = None
         self._memory_monitor = None
         self._user_events = UserEventHub()
-        from .agent_context import HostAgentContext
-        self.agent_context = HostAgentContext(self)
-        from autoagent.agent_app import AgentApplication
-        self.agent_app = AgentApplication(self)
+        from .providers import HostProviders
+        self.providers = HostProviders(self)
+        from .extensions import RuntimeServices, RuntimeExtensions
+        self.runtime_services = RuntimeServices(self)
+        self._extensions = RuntimeExtensions(self.runtime_services)
+        self.extensions = self._extensions.items
+        self.applications = {}
+        for factory in applications:
+            self.add_application(factory)
+        self._extensions.discover(self._workflows)
+        self._discover_applications(self._workflows)
+
+    def add_application(self, factory):
+        """Install a product explicitly; Host does not know its settings or tables."""
+        name = factory.id
+        if name not in self.applications:
+            self.applications[name] = factory(self)
+        return self.applications[name]
+
+    def _discover_applications(self, workflows):
+        for workflow in workflows:
+            for node in workflow.nodes:
+                factory = getattr(getattr(node.executable, "handler", None), "__runtime_application__", None)
+                if factory is not None:
+                    self.add_application(factory)
 
     @classmethod
     def from_project(
@@ -110,6 +132,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         environment=None,
         lifespan=None,
         read_only=False,
+        applications=(),
     ):
         project = Project.find(path)
         env = load_project_environment(
@@ -119,7 +142,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             environ=environment,
         )
         host = cls(
-            settings=settings, environment=env, root=project.root, lifespan=lifespan, read_only=read_only
+            settings=settings, environment=env, root=project.root, lifespan=lifespan, read_only=read_only, applications=applications
         )
         host._project = project
         return host
@@ -192,7 +215,12 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             # Static checks precede creating databases or project resources.
             from autoagent import WorkflowCompiler
 
-            self.agent_app.validate_workflows(workflows)
+            for application in self.applications.values():
+                workflows = application.prepare_workflows(workflows)
+            self._discover_applications(workflows)
+            self._extensions.discover(workflows)
+            for application in self.applications.values():
+                application.validate_workflows(workflows)
             for workflow in workflows:
                 WorkflowCompiler().compile_or_raise(workflow)
             url = self.settings.resolved_database_url(self.root)
@@ -221,9 +249,10 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 lifespan,
                 self.environment,
                 usage_policy=self._usage_policy,
-                agent_context=self.agent_context,
-                applications={"agent": self.agent_app},
-                resource_scopes=(self.agent_app.runtime_scope,),
+                providers=self.providers,
+                extensions=self._extensions,
+                applications=self.applications,
+                resource_scopes=tuple(app.runtime_scope for app in self.applications.values()),
                 on_user_event=self._notice_user_event,
             )
             await self._runtime.prepare()
@@ -232,12 +261,14 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             await self._memory_monitor.ready()
             if self._state != "closing":
                 self._state = "ready"
-                await self.agent_app.start()
+                for application in self.applications.values():
+                    await application.start()
         except BaseException:
             try:
                 if self._memory_monitor is not None:
                     await self._memory_monitor.stop()
-                await self.agent_app.close()
+                for application in reversed(tuple(self.applications.values())):
+                    await application.close()
                 if self._execution_operations is not None:
                     await self._execution_operations.close()
                 if self._runtime is not None:
@@ -269,7 +300,8 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 except BaseException:  # noqa: BLE001 -- opening already released every resource
                     return
             if self._runtime is not None:
-                await self.agent_app.close()
+                for application in reversed(tuple(self.applications.values())):
+                    await application.close()
                 await self._execution_operations.close()
                 await self._runtime.residency.stop()
                 try:
@@ -817,7 +849,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                     result = await self._runtime.app.astatus(ref)
                 else:
                     result = await self._stored_result(ref)
-                return _result_view(await self.agent_context.approvals.project(result))
+                return _result_view(await self._extensions.project(result))
         return await self._perform(query)
 
     async def join(self, execution, *, timeout=None):
@@ -832,10 +864,10 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                     return _result_view(await asyncio.wait_for(asyncio.shield(pending_fork), timeout))
                 if self._runtime.resident.get(ref.session_id) == ref:
                     result = await self._runtime.app.ajoin(ref, timeout=timeout)
-                    return _result_view(await self.agent_context.approvals.project(result))
+                    return _result_view(await self._extensions.project(result))
                 result = await self._stored_result(ref)
                 if result.status in ("completed", "failed", "cancelled") or result.control_state == "paused" or result.waits:
-                    return await self.agent_context.approvals.project(result)
+                    return await self._extensions.project(result)
                 raise HostError("Invocation is not active in this Host; use recover.")
         return await self._perform(wait)
 
@@ -843,7 +875,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         async def deliver():
             async with self._execution(execution, load=True, touch=True) as ref:
                 await self._runtime.activate(ref)
-                await self.agent_context.approvals.respond(ref, wait_id, response)
+                await self._extensions.respond(ref, wait_id, response)
                 return ref
         return await self._perform(deliver, payload=response, control=True)
 
@@ -866,7 +898,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         async def recover():
             async with self._execution(execution, load=True, touch=True) as ref:
                 result = await self._runtime.activate(ref, force=True, request_id=request_id, expected_version=expected_version)
-                return _result_view(await self.agent_context.approvals.project(result))
+                return _result_view(await self._extensions.project(result))
         return await self._perform(recover, control=True)
 
     async def cancel(self, execution, *, reason=None):

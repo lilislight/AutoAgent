@@ -1,6 +1,6 @@
 """Agent application configuration and chat routes over reusable Host capabilities."""
 
-import json
+from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from fastapi.routing import APIRoute
@@ -9,10 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from autoagent.agent import AgentModelSelection
 from autoagent.agent_app.models import ApplicationSessionSettings
-from autoagent.agent_app.resource_config import AgentResourceConfig, ResourcePermissions
+from autoagent.agent_app.resource_config import AgentResourceConfig
+from autoagent.agent import ToolPolicy
 from autoagent.agent import ToolOperation
-from autoagent.agent_app.providers import ApplicationProviderConfig
-from autoagent.host import HostNotFoundError
 from autoagent.host.persistence import ConflictError
 
 
@@ -69,18 +68,19 @@ class CreateWorkspace(BaseModel):
     path: str = Field(min_length=1, max_length=4096)
 
 
-class ConfigureProvider(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    configuration: ApplicationProviderConfig
-    expected_version: int = Field(default=0, ge=0)
-
-
 class PolicyPreview(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
-    policy: ResourcePermissions
+    policy: ToolPolicy
     tool_name: str = Field(min_length=1)
     arguments: dict = Field(default_factory=dict)
     operations: list[ToolOperation] = Field(default_factory=list)
+    context: dict = Field(default_factory=dict)
+
+
+class ParsePolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    format: Literal["json", "yaml"]
+    text: str = Field(max_length=1_048_576)
 
 
 class _AgentRoute(APIRoute):
@@ -126,20 +126,11 @@ def agent_router(application, settings, query, *, user_events):
     @router.post('/agent/policies/preview')
     async def preview_policy(body: PolicyPreview):
         return await agent_query(application.preview_policy(body.policy, tool_name=body.tool_name,
-            arguments=body.arguments, operations=body.operations))
+            arguments=body.arguments, operations=body.operations, context=body.context))
 
-    @router.post('/agent/providers', status_code=201)
-    async def create_provider(body: ConfigureProvider):
-        return await agent_query(application.save_provider(body.configuration, expected_version=body.expected_version))
-
-    @router.put('/agent/providers/{provider_id}')
-    async def update_provider(provider_id: str, body: ConfigureProvider):
-        return await agent_query(application.save_provider(body.configuration, provider_id=provider_id, expected_version=body.expected_version))
-
-    @router.delete('/agent/providers/{provider_id}')
-    async def delete_provider(provider_id: str, expected_version: int = Query(ge=1)):
-        await agent_query(application.save_provider(None, provider_id=provider_id, expected_version=expected_version))
-        return dict(deleted=True)
+    @router.post('/agent/policies/parse')
+    async def parse_policy(body: ParsePolicy):
+        return await agent_query(application.parse_policy(body.text, format=body.format))
 
     @router.post('/agent/mcp/test')
     async def test_mcp(body: ConfigureResource):
@@ -224,7 +215,6 @@ def agent_router(application, settings, query, *, user_events):
 
     @router.put('/agent/settings')
     async def configure(body: ConfigureAgent):
-        await query(application.workspace_session(body.session_id, allow_new=True), settings)
         try:
             return await query(application.configure(body.session_id, body.settings,
                 expected_version=body.expected_version), settings)
@@ -235,7 +225,7 @@ def agent_router(application, settings, query, *, user_events):
     async def resources(revision_id: str = Query(min_length=1, max_length=4096),
                         session_id: str | None = Query(None, min_length=1, max_length=512),
                         workspace_id: str | None = Query(None, min_length=1, max_length=512), unbound: bool = False):
-        return await agent_query(application.workspace_resources(revision_id, builtin=True, session_id=session_id,
+        return await agent_query(application.workspace_resources(revision_id, session_id=session_id,
             workspace_id=workspace_id, unbound=unbound))
 
     @router.get('/agent/workspaces')

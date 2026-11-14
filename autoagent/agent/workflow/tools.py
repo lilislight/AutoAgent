@@ -37,8 +37,7 @@ def binding_error(service, snapshot, task, *, catalog=None):
 async def branch_tools(value):
     service = current_agent_context()
     snapshot = await service.snapshot()
-    if snapshot.settings.workspace is not None:
-        await service.prepare_workspace(snapshot)
+    await service.prepare_workspace(snapshot)
     calls = value.response.tool_calls
     if len({call.call_id for call in calls}) != len(calls):
         raise ValueError("Model response contains duplicate Tool call IDs.")
@@ -70,6 +69,7 @@ async def branch_tools(value):
                 (waits if waiting else allow).append(task)
             continue
         tools = service.toolset(snapshot, binding=authorization_binding(task), catalog=catalog)
+        tools.context = await service.tool_context(snapshot, call, context=tools.context, phase="preflight")
         with tool_context(tools.context):
             checked = await tools.apreflight(call)
         if checked.result is not None:
@@ -104,14 +104,14 @@ async def execute_tool(task: ToolTask) -> LLMToolResult:
         return approval_denied_result(task.call, task.approval)
     service = current_agent_context()
     snapshot = await service.snapshot()
-    if snapshot.settings.workspace is not None:
-        await service.prepare_workspace(snapshot)
+    await service.prepare_workspace(snapshot)
     catalog, _ = workflow_catalog(service, snapshot)
     error = binding_error(service, snapshot, task, catalog=catalog)
     if error is not None:
         return error
     tools = service.toolset(snapshot, binding=authorization_binding(task), catalog=catalog,
         observations=task.observed_versions)
+    tools.context = await service.tool_context(snapshot, task.call, context=tools.context, phase="execution")
     permission_revision = service.resource_revision(snapshot)
     # Pin the checked executable. A final hook is the borrowing boundary:
     # changes during an async policy cannot silently replace that executable.
@@ -163,6 +163,7 @@ async def execute_builtin(task: ToolTask) -> LLMToolResult:
         return error
     context = ToolContext(session_id=snapshot.session_id,
         services={"agent_snapshot": snapshot, "agent_observations": task.observed_versions})
+    context = await service.tool_context(snapshot, task.call, context=context, phase="execution")
     try:
         with tool_context(context):
             result = await catalog[task.call.name].value.ainvoke(task.call, context=context)

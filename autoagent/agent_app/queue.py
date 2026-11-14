@@ -23,7 +23,7 @@ class AgentMessageQueue:
         return lock
 
     async def storage(self, method, *args, **kwargs):
-        return await self.host.agent_app.storage.queue(method, *args, **kwargs)
+        return await self.host.applications["agent"].storage.queue(method, *args, **kwargs)
 
     async def start(self):
         self.wake.set()
@@ -87,11 +87,11 @@ class AgentMessageQueue:
             return
         if latest and latest["status"] != "completed" and item["continue_after_id"] != iid:
             await self.storage("change", sid, item["id"], ("queued",), state="blocked",
-                blocked_on_id=iid, error="The previous task did not complete. Resume it or continue the queue.")
+                blocked_on_id=iid, error="The previous task ended. Continue the queue to start the next task.")
             return
         await self.storage("change", sid, item["id"], ("queued",), state="starting", previous_invocation_id=iid, error=None)
         try:
-            ref = await self.service.start_conversation(sid, item["message"], request_id=item["id"], model=item["model"])
+            ref = await self.service.start_conversation(sid, item["message"], request_id=item["id"], model=item["model"], remember_model=False)
             # The accepted Invocation identity must be durable before retiring its submission.
             await self.host._persistence.flush()
             await self.storage("change", sid, item["id"], ("starting",), state="started", invocation_id=ref.invocation_id)
@@ -118,7 +118,7 @@ class AgentMessageQueue:
                 catalog = await self.service.workspace_catalog()
                 if catalog["agent"] is None:
                     from autoagent.host.models import HostNotFoundError
-                    raise HostNotFoundError("The SDK Agent is disabled for this project.")
+                    raise HostNotFoundError("The Agent application is disabled for this project.")
                 record = await self.service.conversation_settings(sid, workspace_id, unbound=unbound)
                 previous = await self.storage("rows", sid, item_id=request_id)
                 if initial_settings is not None and not previous:
@@ -136,7 +136,7 @@ class AgentMessageQueue:
                 from autoagent.agent import AgentModelSelection
                 from autoagent.agent.context import restore
                 selected = None if send_to is not None else (model if model is not None else record.settings.model)
-                selected = restore(AgentModelSelection, selected).model_dump(mode="json") if selected is not None else None
+                selected = self.service.bind_model(restore(AgentModelSelection, selected)).model_dump(mode="json") if selected is not None else None
                 if previous and model is None and send_to is None:
                     selected = previous[0]["model"]
                 if previous and previous[0]["state"] in ("started", "sent", "cancelled"):
@@ -146,12 +146,22 @@ class AgentMessageQueue:
                     if not latest or latest["invocation_id"] != send_to:
                         raise HostRunConflict("queue_target_changed", "The current task changed; your message was not sent.")
                 item = await self.storage("add", sid, request_id, message, selected)
+                if not previous and selected is not None:
+                    await self.service.remember_model(sid, selected)
                 if send_to is not None:
                     if item["state"] in ("queued", "blocked"):
                         await self.storage("change", sid, request_id, (item["state"],), state="sending", invocation_id=send_to, error=None)
                     if item["state"] in ("queued", "blocked", "sending"):
                         await self._signal((await self.storage("rows", sid, item_id=request_id))[0])
                 else:
+                    if not previous:
+                        latest = await self.latest(sid)
+                        if latest and latest["status"] in ("failed", "cancelled"):
+                            rows = await self.storage("rows", sid)
+                            for queued in rows:
+                                if queued["state"] in ("queued", "blocked"):
+                                    await self.storage("change", sid, queued["id"], (queued["state"],), state="queued",
+                                        continue_after_id=latest["invocation_id"], blocked_on_id=None, error=None)
                     await self._advance(sid)
                 self.wake.set()
                 return (await self.storage("rows", sid, item_id=request_id))[0]

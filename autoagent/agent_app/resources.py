@@ -13,7 +13,6 @@ from pydantic import TypeAdapter
 from autoagent.agent.context import plain
 from .resource_config import AgentResourceConfig
 from autoagent.agent.resources import AgentResourceRegistry
-from autoagent.agent.tools.operations import combine_decisions
 
 
 CONFIG = TypeAdapter(AgentResourceConfig)
@@ -36,7 +35,7 @@ class _Source:
 
 
 class ManagedAgentResources:
-    """Shared SDK Agent configuration; user Workflows retain explicit Build/Host grants."""
+    """Product resource configuration; SDK Workflows retain their own registries."""
 
     def __init__(self, service):
         self.service = service
@@ -49,13 +48,34 @@ class ManagedAgentResources:
         self.enabled = False
         self._known_resources = {}
 
+    def skill_roots(self):
+        roots = [workspace.root for workspace in self.service.workspaces.entries() if hasattr(workspace, "root")]
+        roots.extend(Path(config.path) for _, config in self.records.values() if config.kind == "skills")
+        configured = self.service.host.environment.get("AUTOAGENT_APP_SKILLS_DIR", "").strip()
+        if configured:
+            root = Path(configured).expanduser()
+            roots.append(root if root.is_absolute() else self.service.host.root / root)
+        return tuple(roots)
+
+    def _permissions_editable(self, origin):
+        return origin != "builtin" and (origin != "project" or self.service.host.applications["agent"].edit_code_permissions)
+
     @asynccontextmanager
     async def lifespan(self):
-        self.enabled = self.service.host.agent_app.enabled
+        self.enabled = self.service.host.applications["agent"].enabled
         rows = await self.service.storage("resource_records")
         for row in rows:
-            row = await self._migrate_credentials(row)
             self._publish(row["id"], row)
+        configured = self.service.host.environment.get("AUTOAGENT_APP_SKILLS_DIR", "").strip()
+        if configured:
+            from autoagent.agent import SkillDirectorySource
+            root = Path(configured).expanduser()
+            root = root if root.is_absolute() else self.service.host.root / root
+            self.environment_skills = SkillDirectorySource(self.service.resources, [root], name="environment-skills",
+                workflows={"autoagent.agent"})
+            await self.environment_skills.__aenter__()
+        else:
+            self.environment_skills = None
         self.monitor = asyncio.create_task(self._watch())
         try:
             yield
@@ -70,25 +90,8 @@ class ManagedAgentResources:
             self.sources.clear()
             self.retired.clear()
             self.records.clear()
-
-    async def _migrate_credentials(self, row):
-        configuration = row['configuration']
-        if configuration.get('kind') != 'mcp':
-            return row
-        data = {**configuration, 'transport':dict(configuration['transport'])}
-        changed = False
-        for old, new in (('env', 'environment'), ('headers', 'headers')):
-            values = data['transport'].pop(old, None)
-            if not values:
-                continue
-            references = dict(data.get(new, {}))
-            for key, value in values.items():
-                import hashlib
-                name = 'AUTOAGENT_MIGRATED_' + hashlib.sha256((row['id'] + old + key).encode()).hexdigest().upper()
-                references[key] = self.service.host.agent_app.credentials.import_legacy(name, value).model_dump(mode='json')
-            data[new] = references
-            changed = True
-        return await self.service.storage('save_resource', row['id'], data, row['version']) if changed else row
+            if self.environment_skills is not None:
+                await self.environment_skills.__aexit__(None, None, None)
 
     async def _watch(self):
         previous = None
@@ -145,7 +148,7 @@ class ManagedAgentResources:
                         include=config.include, interval_seconds=config.interval_seconds,
                         workflows={BUILTIN_AGENT_WORKFLOW_ID})
                 else:
-                    transport = config.resolve_transport(self.service.host.agent_app.credentials)
+                    transport = config.resolve_transport(self.service.host.applications["agent"].credentials)
                     client = await stack.enter_async_context(MCPClient(transport, reconnect_policy=config.reconnect))
                     tools = MCPToolRegistry(client, prefix=config.prefix)
                     source = MCPResourceSource(state.registry, tools, name="mcp", workflows={BUILTIN_AGENT_WORKFLOW_ID},
@@ -167,7 +170,7 @@ class ManagedAgentResources:
     async def save(self, configuration, *, resource_id=None, expected_version=0):
         if not self.enabled:
             from autoagent.host.models import HostNotFoundError
-            raise HostNotFoundError("The SDK Agent is disabled for this project.")
+            raise HostNotFoundError("The Agent application is disabled for this project.")
         if isinstance(configuration, Mapping):
             configuration = CONFIG.validate_json(json.dumps(plain(configuration)))
         if type(expected_version) is not int or expected_version < 0:
@@ -190,13 +193,30 @@ class ManagedAgentResources:
                     if config.kind == "resource":
                         target = self._known_resources.get(config.resource_id)
                         if target is None:
-                            registries = [self.service.resources, self.service.host.agent_context.resources,
+                            registries = [self.service.resources,
                                 *self.service._build_resources.values(), *self.service._workspaces._catalogs.values(),
                                 *(source.registry for source in self.sources.values())]
                             target = next((entry for registry in registries for kind in ("tool", "skill")
                                 for entry in registry.entries(kind, include_disabled=True) if entry.resource_id == config.resource_id), None)
                         if target is not None:
                             config = config.model_copy(update={"resource_id": self.resource_identity(target)["management_id"]})
+                        if target is not None and hasattr(target.value, "metadata") and not hasattr(target.value, "definition"):
+                            if config.permissions is not None:
+                                raise ValueError("Skills support only Enable/Disable.")
+                            from .skills import set_enabled
+                            try:
+                                await asyncio.to_thread(set_enabled, target.value, config.enabled, roots=self.skill_roots())
+                            except OSError as error:
+                                raise ValueError("Cannot update this Skill document; check its file permissions and refresh.") from error
+                            await self._refresh_registered_skill(target)
+                            for source in self.sources.values():
+                                if source.source is not None and hasattr(source.source, "roots"):
+                                    await source.source.refresh()
+                            if getattr(self, "environment_skills", None) is not None:
+                                await self.environment_skills.refresh()
+                            self.revision += 1
+                            await self.service.approvals.changed()
+                            return dict(id=config.resource_id, version=0, configuration=config.model_dump(mode="json"), state="ready", error=None)
                         for key, (_, other) in self.records.items():
                             if key != resource_id and other.kind == "resource" and other.resource_id == config.resource_id:
                                 raise ValueError("A resource already has a shared configuration; update that entry.")
@@ -204,9 +224,14 @@ class ManagedAgentResources:
                             and other.group_id == config.group_id for key, (_, other) in self.records.items()):
                         raise ValueError("A group already has a configuration; update that entry.")
                     target_id = config.resource_id if config.kind == "resource" else config.group_id if config.kind == "group" else ""
-                    if (target_id.startswith(("builtin/", "project/")) and not self.service.host.agent_app.edit_code_permissions
-                            and config.permissions is not None and (previous is None or config.permissions != previous[1].permissions)):
-                        raise ValueError("Permission editing for built-in and project resources is disabled.")
+                    locked = target_id.startswith("builtin/") or (
+                        target_id.startswith("project/") and not self.service.host.applications["agent"].edit_code_permissions)
+                    if locked:
+                        if config.permissions is not None and (previous is None or config.permissions != previous[1].permissions):
+                            raise ValueError("Permission editing for this resource is disabled.")
+                        # Locked permissions stay inactive; saving Enable also
+                        # clears permission overrides hidden by the edit policy.
+                        config = config.model_copy(update={"permissions": None})
                     data = config.model_dump(mode="json")
                 else:
                     data = None
@@ -215,6 +240,20 @@ class ManagedAgentResources:
             await self.service.approvals.changed()
             return self._describe(resource_id) if row is not None else None
         return await self.service.host._perform(lambda: self.service.approvals._run(update), control=True)
+
+    async def _refresh_registered_skill(self, target):
+        """Republish explicitly registered local snapshots after a document edit."""
+        from autoagent.agent import Skill
+        from .skills import location
+        path = location(target.value)
+        registries = {self.service.resources, *self.service._build_resources.values()}
+        for registry in registries:
+            for entry in registry.entries("skill", include_disabled=True):
+                if (entry.resource_id == f"{registry.namespace}/skill/{entry.name}"
+                        and location(entry.value) == path):
+                    skill = await asyncio.to_thread(lambda: Skill(path.parent, limits=entry.value.limits).freeze())
+                    registry.register_skill(skill, version=uuid4().hex, replace=True,
+                        workflows=entry.workflows, policy=entry.policy)
 
     def _describe(self, resource_id):
         row, config = self.records[resource_id]
@@ -239,7 +278,7 @@ class ManagedAgentResources:
             from types import SimpleNamespace
             runtime = self.service.host._runtime
             revision = runtime.workflow_ids.get(BUILTIN_AGENT_WORKFLOW_ID)
-            registries = [self.service.resources, self.service.host.agent_context.resources]
+            registries = [self.service.resources]
             if revision in self.service._build_resources:
                 registries.append(self.service._build_resources[revision])
             registries.extend(source.registry for source in self.sources.values())
@@ -263,7 +302,7 @@ class ManagedAgentResources:
             for registry in registries:
                 for kind in ("tool", "skill"):
                     for entry in registry.entries(kind, include_disabled=True):
-                        if BUILTIN_AGENT_WORKFLOW_ID in entry.workflows:
+                        if not entry.workflows or BUILTIN_AGENT_WORKFLOW_ID in entry.workflows:
                             identity = self.resource_identity(entry, kind)
                             if identity["management_id"] not in seen:
                                 seen.add(identity["management_id"])
@@ -281,9 +320,10 @@ class ManagedAgentResources:
                 group["resources"].append(entry)
             for group in groups.values():
                 control = next((config for _, config in self.records.values() if config.kind == 'group' and config.group_id == group['id']), None)
+                editable = self._permissions_editable(group['origin'])
                 group.update(enabled=control.enabled if control else True,
-                    permissions=control.permissions.model_dump(mode='json') if control and control.permissions else None,
-                    permissions_editable=group['origin'] not in {'builtin','project'} or self.service.host.agent_app.edit_code_permissions)
+                    permissions=control.permissions.model_dump(mode='json') if editable and control and control.permissions else None,
+                    permissions_editable=editable)
             return dict(items=[self._describe(key) for key in sorted(self.records)],
                 resources=inventory, groups=list(groups.values()), workspace_id=workspace_id or self.service.project_workspace_id,
                 revision=self.revision)
@@ -298,7 +338,7 @@ class ManagedAgentResources:
         group = next(((row, cfg) for row, cfg in self.records.values() if cfg.kind == "group"
             and cfg.group_id == identity["group_id"]), None)
         permissions = self.effective_permissions(entry)
-        editable = identity["origin"] not in {"builtin", "project"} or self.service.host.agent_app.edit_code_permissions
+        editable = self._permissions_editable(identity["origin"])
         access = self.service.defaults.access
         registered_default = access.rules.get(entry.name, access.default)
         registered_policies = [entry.policy] if entry.policy is not None else []
@@ -308,10 +348,10 @@ class ManagedAgentResources:
             if owner.policy is not None:
                 registered_policies.append(owner.policy)
             value = owner._tools[entry.name]
-        from autoagent.agent.tools.policy import DeclarativeToolPolicy
+        from autoagent.agent.tools import ToolPolicy
         rank = {'allow':0, 'ask':1, 'deny':2}
         registered_default = max((registered_default, *(policy.default for policy in registered_policies
-            if isinstance(policy, DeclarativeToolPolicy))), key=rank.__getitem__)
+            if isinstance(policy, ToolPolicy))), key=rank.__getitem__)
         source_enabled = True
         if identity["origin"] == "mcp":
             config = self.records[identity["source_id"]][1]
@@ -321,12 +361,18 @@ class ManagedAgentResources:
             available=available, enabled=available and source_enabled and bool(self.filter([entry])),
             permissions=permissions.model_dump(mode="json") if permissions is not None else None,
             default_decision=permissions.default if permissions is not None else registered_default,
-            parameter_policy=bool(permissions.rules) if permissions is not None else bool(registered_policies or access.operation_rules or access.policy),
+            parameter_policy=bool(permissions.rules) if permissions is not None else bool(registered_policies or access.policy),
             permissions_editable=editable,
-            permission_source=("tool" if selected and selected[1].permissions is not None else "group" if group and group[1].permissions is not None else "source")
-                if permissions is not None else "registration")
+            permission_source=("tool" if selected and selected[1].permissions is not None else "group" if group and group[1].permissions is not None else
+                "source" if identity.get("source_id") in self.records else "registration"))
+        if kind == "skill":
+            from .skills import enabled, editable
+            result["enabled"] = available and enabled(entry.value)
+            result["enabled_editable"] = editable(entry.value, self.skill_roots())
+            result["permissions_editable"] = False
         if kind == "tool":
             result.update(description=entry.value.definition.description, input_schema=entry.value.definition.parameters)
+            result["operation_schema"] = getattr(self._executable(entry.value), "operation_schema", None)
             result['approval_exempt'] = entry.resource_id.startswith('builtin:')
             if result['approval_exempt']:
                 result.update(default_decision='allow', permissions_editable=False, permission_source='system')
@@ -342,13 +388,13 @@ class ManagedAgentResources:
     async def skill_document(self, management_id, workspace_id=None):
         await self.describe(workspace_id)
         async def read():
-            registries = [self.service.resources, self.service.host.agent_context.resources,
+            registries = [self.service.resources,
                 *self.service._build_resources.values(), *self.service._workspaces._catalogs.values(),
                 *(source.registry for source in self.sources.values())]
             for registry in registries:
                 for entry in registry.entries("skill", include_disabled=True):
                     from .workflow import BUILTIN_AGENT_WORKFLOW_ID
-                    if BUILTIN_AGENT_WORKFLOW_ID not in entry.workflows:
+                    if entry.workflows and BUILTIN_AGENT_WORKFLOW_ID not in entry.workflows:
                         continue
                     if self.resource_identity(entry, "skill")["management_id"] == management_id:
                         document = await asyncio.to_thread(entry.value.load)
@@ -387,13 +433,18 @@ class ManagedAgentResources:
         groups = {config.group_id: (row, config) for row, config in tuple(self.records.values()) if config.kind == "group"}
         result = []
         for entry in entries:
+            if hasattr(entry.value, "metadata") and not hasattr(entry.value, "definition"):
+                from .skills import enabled
+                if enabled(entry.value):
+                    result.append(entry)
+                continue
             identity = self.resource_identity(entry)
             selected = controls.get(identity["management_id"]) or controls.get(entry.resource_id)
             group = groups.get(identity["group_id"])
             if group is not None and not group[1].enabled or selected is not None and not selected[1].enabled:
                 continue
             permission = selected if selected is not None and selected[1].permissions is not None else group
-            if identity["origin"] in {"builtin", "project"} and not self.service.host.agent_app.edit_code_permissions:
+            if not self._permissions_editable(identity["origin"]):
                 permission = None
             result.append(self._wrap(entry, permission[1].permissions, permission[0]["version"])
                 if permission is not None and permission[1].permissions is not None else entry)
@@ -409,6 +460,9 @@ class ManagedAgentResources:
         """Management keys exclude implementation versions and Workflow Revisions."""
         kind = kind or ("skill" if hasattr(entry.value, "metadata") and not hasattr(entry.value, "definition") else "tool")
         name = entry.name
+        if kind == "skill" and "/source/environment-skills/" in entry.resource_id:
+            return dict(management_id=f"shared/skill/{name}", group_id="shared/skills",
+                group_name="Shared directory", origin="shared")
         for key, source in tuple(self.sources.items()):
             if entry.resource_id.startswith(source.registry.namespace + "/"):
                 config = self.records[key][1]
@@ -434,7 +488,12 @@ class ManagedAgentResources:
                     relative = name
                 return dict(management_id=f"workspace/{workspace_id}/skill/{relative}", group_id=f"workspace/{workspace_id}",
                     group_name=workspace.info.name if workspace else workspace_id, origin="workspace", workspace_id=workspace_id)
-        if entry.resource_id.startswith(("builtin:", "skills:", "workspace:")) or entry.resource_id.startswith("build:"):
+        group_owner = getattr(self._executable(entry.value), "group", None) if kind == "tool" else None
+        if group_owner is not None:
+            group = group_owner.group_id
+            return dict(management_id=f"builtin/tool/{name}", group_id=f"builtin/{group}",
+                group_name={"files":"Files", "commands":"Commands"}.get(group, group), origin="builtin")
+        if entry.resource_id.startswith(("builtin:", "skills:")):
             if kind == "skill":
                 group, label = "builtin/skills", "Built-in Skills"
             elif name.startswith("skill_"):
@@ -448,19 +507,16 @@ class ManagedAgentResources:
             else:
                 group, label = "builtin/files", "Files"
             return dict(management_id=f"builtin/{kind}/{name}", group_id=group, group_name=label, origin="builtin")
-        project = self.service.host.agent_context.project_workspace_id
+        project = self.service.project_workspace_id
         return dict(management_id=f"project/{project}/{kind}/{name}", group_id=f"project/{project}",
             group_name="Project Tools" if kind == "tool" else "Project Skills", origin="project")
 
     def _wrap(self, entry, permissions, version):
-        async def policy(call, context):
-            return permissions(call, context)
-        policy.version = version
-        return replace(entry, policy=policy, permission_revision=entry.permission_revision + version)
+        return replace(entry, policy=permissions, permission_revision=entry.permission_revision + version)
 
     def effective_permissions(self, entry):
         identity = self.resource_identity(entry)
-        if identity["origin"] in {"builtin", "project"} and not self.service.host.agent_app.edit_code_permissions:
+        if not self._permissions_editable(identity["origin"]):
             return None
         tool = next((config.permissions for _, config in self.records.values() if config.kind == "resource"
             and config.resource_id in {identity["management_id"], entry.resource_id} and config.permissions is not None), None)
@@ -471,7 +527,18 @@ class ManagedAgentResources:
         if group is not None:
             return group
         source_id = identity.get("source_id")
-        return self.records[source_id][1].permissions if source_id in self.records else None
+        if source_id in self.records:
+            return self.records[source_id][1].permissions
+        from autoagent.agent.tools import ToolPolicy
+        if entry.policy is not None:
+            return entry.policy if isinstance(entry.policy, ToolPolicy) else None
+        value = entry.value
+        while getattr(value, "_owner", None) is not None:
+            owner = value._owner
+            if owner.policy is not None:
+                return owner.policy if isinstance(owner.policy, ToolPolicy) else None
+            value = owner._tools[entry.name]
+        return None
 
     @asynccontextmanager
     async def borrow(self, resource_id):

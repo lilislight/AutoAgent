@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from autoagent import (ConditionContext, ContextOperation, ContextPatch,
                        InputMappingContext, OutputBindingContext)
 from autoagent.agent import LLMMessage, LLMRequest, LLMResponse, LLMToolCall, LLMToolResult, TextContent
-from autoagent.host import llm_request
 from .tools import weather_tools
 
 
@@ -44,8 +43,9 @@ def record(value):
     return value
 
 
-def prepare(value: Question) -> LLMRequest:
-    return llm_request(
+async def prepare(value: Question) -> LLMRequest:
+    return LLMRequest(
+        streaming=True, max_output_tokens=1024,
         input=(LLMMessage(role="system", content=(TextContent(text=SYSTEM_PROMPT),)),
                LLMMessage(role="user", content=(TextContent(text=value.question),))),
         tools=weather_tools().definitions,

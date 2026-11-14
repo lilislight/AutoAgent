@@ -6,7 +6,7 @@ import sys
 
 from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
 from autoagent.agent import (
-    CommandRule, ContextPolicy, ExecutionToolsConfig, SubagentsConfig, SubagentTarget,
+    AgentResources, CommandTools, CommandRule, ContextPolicy, ExecutionToolsConfig, SubagentsConfig, SubagentTarget,
     Tool, ToolSet, ToolDecision, SkillDirectory, agent_workflow,
 )
 from autoagent.host import workflow
@@ -46,20 +46,31 @@ def demo_tools():
         policy=demo_tool_policy)
 
 
+def demo_resources():
+    tools = demo_tools()
+    commands = CommandTools(PROJECT_ROOT, config=demo_execution_config())
+    return AgentResources(tools=(*(tools[item.name] for item in tools.definitions), *commands.tools()),
+        skills=(SkillDirectory(PROJECT_ROOT / "skills", include=("demo-guide",)),))
+
+
 @asynccontextmanager
 async def lifespan(setup):
-    """Configure this demo's SDK chat before Runtime compiles its definitions."""
-    # /agent talks only to the SDK-owned Workflow. Keep that implementation and
+    """Register demo resources explicitly in the product application."""
+    # /agent talks only to the product Workflow. Keep that implementation and
     # marker, applying the same demo command policy as the execution Workflows.
-    for index, selected in enumerate(setup.workflows):
+    for selected in setup.workflows:
         if selected.id == BUILTIN_AGENT_WORKFLOW_ID:
-            setup.workflows[index] = builtin_agent_workflow(execution=demo_execution_config())
-    context = setup.agent_context
-    scope = {BUILTIN_AGENT_WORKFLOW_ID}
-    for handler in (add_numbers, get_demo_weather, save_demo_note):
-        context.resources.register_tool(Tool(handler), version="1", workflows=scope, policy=demo_tool_policy)
-    async with context.skill_directories([PROJECT_ROOT / "skills"], include=("demo-guide",), workflows=scope):
+            selected.nodes[0].executable.handler.__agent_app_execution__ = demo_execution_config()
+    application = setup.applications.get("agent")
+    if application is None or not application.enabled:
         yield
+        return
+    context = application.context
+    for handler in (add_numbers, get_demo_weather, save_demo_note):
+        context.resources.register_tool(Tool(handler), version="1", policy=demo_tool_policy)
+    async with context.resources.skill_directories([PROJECT_ROOT / "skills"], include=("demo-guide",), workflows={BUILTIN_AGENT_WORKFLOW_ID}):
+        yield
+
 
 
 INSTRUCTIONS = """你是 AutoAgent 的交互测试助手，默认使用中文回答。
@@ -79,9 +90,7 @@ reply_requested=true，并在正文明确需要回答什么；回复时填写 re
 def main_agent():
     return agent_workflow(
         user_events=True,
-        tools=demo_tools(),
-        execution=demo_execution_config(),
-        skills=[SkillDirectory(PROJECT_ROOT / "skills", include=("demo-guide",))],
+        resources=demo_resources(),
         instructions=INSTRUCTIONS,
         include_ask_user=True,
         user_signal_endpoint="user.messages",
@@ -106,9 +115,7 @@ def research_agent():
     return agent_workflow(
         user_events=True,
         workflow_id="researcher",
-        tools=demo_tools(),
-        execution=demo_execution_config(),
-        skills=[SkillDirectory(PROJECT_ROOT / "skills", include=("demo-guide",))],
+        resources=demo_resources(),
         instructions=INSTRUCTIONS + "\n你是研究子 Agent。独立完成任务并清楚返回结果。"
             "需要联系其他 Agent 时先用 get_agents 查询实际 ID，不能猜测 ID。",
         include_ask_user=True,

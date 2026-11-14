@@ -31,13 +31,13 @@ test('running and paused messages queue the next turn without implying resume or
   assert.equal(composerAction({ ...defaults, running: true, lifecycle: 'paused', canResume: true, draft: '', canSend: true }).kind, 'recover');
 });
 
-test('waiting for an in-flight node to pause does not block sending another message', () => {
+test('pending control actions keep their spinner visible even with a draft', () => {
   const empty = composerAction({ ...defaults, pending: 'pause', running: true, lifecycle: 'running' });
   assert.equal(empty.label, 'Pausing task');
   assert.equal(empty.disabled, true);
   const message = composerAction({ ...defaults, pending: 'pause', running: true, lifecycle: 'running', draft: 'Update', canSend: true });
-  assert.equal(message.kind, 'send');
-  assert.equal(message.disabled, false);
+  assert.equal(message.working, true);
+  assert.equal(message.disabled, true);
 });
 
 test('composer sizing grows from two lines, caps at eight, then shrinks with shorter text', () => {
@@ -50,10 +50,11 @@ test('composer sizing grows from two lines, caps at eight, then shrinks with sho
 
 test('the composer has two rows and its running control replaces a duplicate submit action', () => {
   const primary = composerAction({ ...defaults, running: true, lifecycle: 'running', canPause: true });
-  const html = renderToStaticMarkup(createElement(AgentComposer, { primary, onControl() {}, session: 'one', draft: '', busy: false, running: true, disabled: false, canSend: true, caption: 'Running', inputRef: createRef<HTMLTextAreaElement>(), sidebar: true, onSidebar() {}, onDraft() {}, onSend() {}, onPanel() {} }));
+  const html = renderToStaticMarkup(createElement(AgentComposer, { primary, onControl() {}, session: 'one', draft: '', busy: false, running: true, disabled: false, canSend: true, caption: 'Running', canCancel: true, inputRef: createRef<HTMLTextAreaElement>(), onDraft() {}, onSend() {} }));
   assert.match(html, /rows="2"/);
   assert.match(html, /type="button" class="agent-send" aria-label="Pause task"/);
-  assert.doesNotMatch(html, /Cancel|Trace|Task details/);
+  assert.match(html, /aria-label="Cancel task"/);
+  assert.doesNotMatch(html, /Toggle conversations|Available tools and skills|Trace|Task details/);
 });
 
 test('usage shows all recorded tokens and precise available cost without double-counting subsets', () => {
@@ -61,13 +62,12 @@ test('usage shows all recorded tokens and precise available cost without double-
   assert.match(html, /10,500/);
   assert.match(html, /10,000/);
   assert.match(html, /8,000/);
-  assert.match(html, /included above/);
   assert.match(html, /\$0\.001234/);
 });
 
 test('submitting shows only a spinner while an optional separate action sends an immediate update', () => {
   const primary = composerAction({ ...defaults, sending: true });
-  const html = renderToStaticMarkup(createElement(AgentComposer, { primary, onControl() {}, session: 'one', draft: 'Next task', busy: true, running: true, disabled: true, canSend: true, canSendNow: true, onSendNow() {}, caption: 'Running', inputRef: createRef<HTMLTextAreaElement>(), sidebar: true, onSidebar() {}, onDraft() {}, onSend() {}, onPanel() {} }));
+  const html = renderToStaticMarkup(createElement(AgentComposer, { primary, onControl() {}, session: 'one', draft: 'Next task', busy: true, running: true, disabled: true, canSend: true, canSendNow: true, onSendNow() {}, caption: 'Running', inputRef: createRef<HTMLTextAreaElement>(), onDraft() {}, onSend() {} }));
   const button = html.match(/<button[^>]*class="agent-send"[^>]*>(.*?)<\/button>/)?.[1];
   assert.match(button ?? '', /loading-spinner/);
   assert.doesNotMatch(button ?? '', /<svg/);
@@ -89,4 +89,13 @@ test('missing pricing is not displayed as free usage and partial totals are labe
   const partial = renderToStaticMarkup(createElement(UsageFacts, { usage: { ...usage, missing_cost_calls: 1 } }));
   assert.match(partial, /Recorded cost \(USD\)/);
   assert.match(partial, /cost shown is partial/);
+});
+
+
+test('failed and interrupted tasks never expose resume even when generic controls allow it', () => {
+  for (const lifecycle of ['failed', 'cancelled', 'interrupted']) {
+    const result = composerAction({ ...defaults, lifecycle, canResume: true });
+    assert.notEqual(result.kind, 'recover');
+  }
+  assert.equal(composerAction({ ...defaults, pending: 'cancel' }).label, 'Cancelling task');
 });

@@ -9,11 +9,10 @@ import json
 from typing import Literal, Protocol
 from weakref import WeakKeyDictionary
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field
 
 from .models._base import Model, NonEmpty
 from .tools.permissions import ToolDecision
-from .tools.operations import ToolOperationRule
 from .workspace import Workspace, WorkspaceBinding
 
 
@@ -27,25 +26,20 @@ class AgentModelSettings(Model):
     streaming: bool = False
     max_output_tokens: int | None = Field(default=None, gt=0)
     temperature: float | None = Field(default=None, ge=0, le=2)
+    reasoning_effort: NonEmpty | None = None
 
 
 class AgentAccess(Model):
-    """Host startup rules restrict, rather than replace, application Tool policies."""
+    """Explicit Agent access rules constrain its registered Tool policies."""
 
     default: ToolAction = "allow"
     rules: dict[NonEmpty, ToolAction] = Field(default_factory=dict)
     allowed_tools: tuple[NonEmpty, ...] | None = None
     policy: NonEmpty | None = None
-    operation_rules: tuple[ToolOperationRule, ...] = ()
-
-    @field_validator("operation_rules", mode="before")
-    @classmethod
-    def _operation_rules_from_json(cls, value):
-        return tuple(value) if isinstance(value, list) else value
 
 
 class AgentHostSettings(Model):
-    """Startup generation defaults and application-wide access boundaries."""
+    """Agent generation defaults and explicit access boundaries."""
 
     model: AgentModelSettings = Field(default_factory=AgentModelSettings)
     approval_mode: ApprovalMode = "policy"
@@ -53,13 +47,15 @@ class AgentHostSettings(Model):
     workspace: WorkspaceBinding | None = None
 
     def session_defaults(self):
-        return AgentSessionSettings(model=AgentModelSelection(provider=self.model.provider, model=self.model.model),
+        return AgentSessionSettings(model=AgentModelSelection(provider=self.model.provider, model=self.model.model,
+            reasoning_effort=self.model.reasoning_effort),
             approval_mode=self.approval_mode)
 
 
 class AgentModelSelection(Model):
     provider: NonEmpty = "default"
     model: NonEmpty | None = None
+    reasoning_effort: NonEmpty | None = None
 
 
 class AgentSessionSettings(Model):
@@ -79,7 +75,7 @@ class AgentSettingsRecord(Model):
 class AgentExecutionSnapshot(Model):
     """Derived call context; only its model binding is immutable and durable.
 
-    Approval and access are read from live Session preferences and Host
+    Approval and access are read from Session preferences and Agent
     defaults. This object is not a persisted Invocation settings snapshot.
     """
 
@@ -129,9 +125,7 @@ def restore(annotation, value):
 
 
 class AgentContextProvider(Protocol):
-    """Agent Operators borrow this service; Core never imports Host resources."""
-
-    resources: object
+    """Runtime services borrowed by Agent Operators through a portable interface."""
 
     async def snapshot(self) -> AgentExecutionSnapshot: ...
     async def execution_snapshot(self, invocation_id: str) -> AgentExecutionSnapshot: ...

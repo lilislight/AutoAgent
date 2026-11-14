@@ -15,7 +15,7 @@ class HistoryProjectionError(ValueError):
     """A historical resource needs application-owned media resolution."""
 
 
-PROJECTION_VERSION = "1"
+PROJECTION_VERSION = "2"
 
 
 def _text(value):
@@ -101,6 +101,9 @@ def project_history(conversation, target, *, start=0):
                 cursor += 1
             origin = origins[cursor] if cursor < len(origins) and origins[cursor].start <= index else None
             result.extend(project_item(conversation.items[index], target, origin.route if origin else None))
+            if (timestamp := conversation.runtime_times.get(str(index + 1))) is not None:
+                from .runtime_context import time_message
+                result.append(time_message(timestamp, target))
     return tuple(result)
 
 

@@ -25,6 +25,104 @@ def policy(**options):
 class MCPRecoveryTests(unittest.IsolatedAsyncioTestCase):
     client = mcp_tests.MCPHTTPTests.client
 
+    async def test_unsubscribable_catalog_polls_changes_and_removals(self):
+        """Peers without list-change support stay usable and refresh without subscription RPCs."""
+        server = WireServer()
+        client, _ = self.client(server)
+        async with client:
+            registry = MCPToolRegistry(client)
+            watch = registry.watch(poll_interval_seconds=0.01)
+            try:
+                self.assertEqual((await anext(watch)).type, "connected")
+                server.tool = {**server.tool, "description": "Updated by polling"}
+                update = await asyncio.wait_for(anext(watch), 2)
+                self.assertEqual(update.type, "notification")
+                self.assertEqual(registry.definitions[0].description, "Updated by polling")
+                server.rpc_override = lambda message: {"result": {"tools": [], "resultType": "complete"}} if message["method"] == "tools/list" else None
+                await asyncio.wait_for(anext(watch), 2)
+                self.assertEqual(registry.definitions, ())
+                methods = [json.loads(request.content)["method"] for request in server.requests if request.method == "POST"]
+                self.assertNotIn("subscriptions/listen", methods)
+                self.assertEqual(server.calls, [])
+            finally:
+                await watch.aclose()
+            self.assertFalse(client._message_observers)
+
+    async def test_missing_subscription_method_falls_back_but_other_errors_fail(self):
+        """Only unsupported subscriptions fall back; other server failures remain visible."""
+        from mcp.shared.exceptions import MCPError
+        for code in (-32601, -32603):
+            with self.subTest(code=code):
+                server = WireServer(list_changed=True)
+                server.rpc_override = lambda message: {"error": {"code": code, "message": "Listen unavailable"}} if message["method"] == "subscriptions/listen" else None
+                client, _ = self.client(server)
+                async with client:
+                    registry = MCPToolRegistry(client)
+                    watch = registry.watch(poll_interval_seconds=0.01)
+                    try:
+                        if code == -32603:
+                            with self.assertRaises(MCPError):
+                                await anext(watch)
+                        else:
+                            self.assertEqual((await anext(watch)).type, "connected")
+                            server.tool = {**server.tool, "description": "Fallback refresh"}
+                            await asyncio.wait_for(anext(watch), 2)
+                            self.assertEqual(registry.definitions[0].description, "Fallback refresh")
+                    finally:
+                        await watch.aclose()
+                    self.assertEqual(client._active, 0)
+                    self.assertFalse(client._message_observers)
+
+    async def test_unhonored_subscription_polls_instead_of_stalling(self):
+        """A subscription that omits Tools changes cannot silently disable catalog updates."""
+        from mcp_types import SubscriptionFilter
+        class Unhonored:
+            honored = SubscriptionFilter()
+        @asynccontextmanager
+        async def listen(sdk, **options):
+            yield Unhonored()
+        server = WireServer(list_changed=True)
+        client, _ = self.client(server)
+        async with client:
+            registry = MCPToolRegistry(client)
+            with patch("mcp.Client.listen", new=listen):
+                watch = registry.watch(poll_interval_seconds=0.01)
+                try:
+                    self.assertEqual((await anext(watch)).type, "connected")
+                    server.tool = {**server.tool, "description": "Unhonored fallback"}
+                    await asyncio.wait_for(anext(watch), 2)
+                    self.assertEqual(registry.definitions[0].description, "Unhonored fallback")
+                finally:
+                    await watch.aclose()
+            self.assertEqual(client._active, 0)
+
+    async def test_polling_catalog_recovers_connection_without_tool_replay(self):
+        """A polling discovery failure reconnects and publishes a resync without executing Tools."""
+        server = WireServer()
+        client, _ = self.client(server, reconnect_policy=policy())
+        async with client:
+            registry = MCPToolRegistry(client)
+            watch = registry.watch(poll_interval_seconds=0.01)
+            try:
+                await anext(watch)
+                failed = False
+                def fail_once(message):
+                    nonlocal failed
+                    if message["method"] == "tools/list" and not failed:
+                        failed = True
+                        return {"error": {"code": -32000, "message": "Connection closed"}}
+                server.rpc_override = fail_once
+                server.tool = {**server.tool, "description": "Reconnected"}
+                update = await asyncio.wait_for(anext(watch), 2)
+                self.assertEqual(update.type, "connected")
+                self.assertTrue(update.resync_required)
+                self.assertEqual(client.generation, 2)
+                self.assertEqual(registry.definitions[0].description, "Reconnected")
+                self.assertEqual(server.calls, [])
+            finally:
+                await watch.aclose()
+
+
     async def test_reconnect_rediscovery_replaces_registry_and_rejects_old_tool_snapshots(self):
         """A new session rediscoveries Tools before dispatch, while old schemas cannot execute."""
         server = WireServer()
@@ -341,7 +439,7 @@ class MCPSubscriptionRecoveryTests(unittest.IsolatedAsyncioTestCase):
         """Watch consumers see an already refreshed catalog when change notifications arrive."""
         from mcp_types import SubscriptionFilter
         from mcp.shared.subscriptions import ToolsListChanged
-        server = WireServer()
+        server = WireServer(list_changed=True)
         class Changes:
             honored = SubscriptionFilter(toolsListChanged=True)
             def __aiter__(self):

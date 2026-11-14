@@ -3,18 +3,21 @@
 from autoagent.agent.workflow.builder import agent_workflow
 from autoagent.agent.workflow.policy import ContextPolicy
 from autoagent.agent.workflow.subagents import SubagentsConfig, SubagentTarget
+from .tool_defaults import execution_defaults
 
 BUILTIN_AGENT_WORKFLOW_ID = "autoagent.agent"
 
 
-def builtin_agent_workflow(*, execution=True):
+def builtin_agent_workflow(*, resources=None, execution=True):
     """Construct the product Agent; project resources require explicit grants."""
     workflow = agent_workflow(
         workflow_id=BUILTIN_AGENT_WORKFLOW_ID,
+        resources=resources,
+        max_rounds=None,
         context_policy=ContextPolicy(context_window=200_000),
-        execution=execution,
         user_events=True,
         include_ask_user=True,
+        inject_current_time=True,
         subagents=SubagentsConfig(enabled=True, targets={
             "agent": SubagentTarget(workflow_id=BUILTIN_AGENT_WORKFLOW_ID,
                 description="Delegate a task to another instance of this Agent."),
@@ -22,6 +25,9 @@ def builtin_agent_workflow(*, execution=True):
     )
     start = next(node for node in workflow.nodes if node.id == "start")
     start.executable.handler.__autoagent_builtin_chat__ = True
+    start.executable.handler.__agent_app_execution__ = execution_defaults(None if execution is True else execution) if execution is not False else None
+    from .application import AgentApplication
+    start.executable.handler.__runtime_application__ = AgentApplication
     return workflow
 
 

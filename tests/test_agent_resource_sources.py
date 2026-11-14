@@ -185,7 +185,7 @@ class MCPSourceTests(unittest.IsolatedAsyncioTestCase):
         @asynccontextmanager
         async def changes(sdk, **options):
             yield Changes()
-        server = WireServer()
+        server = WireServer(list_changed=True)
         client, http = self.client(server, reconnect_policy=policy())
         resources = AgentResourceRegistry()
         async with client:

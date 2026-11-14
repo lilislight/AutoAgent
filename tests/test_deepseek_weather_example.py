@@ -20,8 +20,8 @@ from unittest.mock import patch
 from autoagent.agent import LLMMessage, LLMReasoning, LLMResponse, LLMStreamChunk, LLMToolCall, TextContent
 from examples.deepseek_weather_assistant.weather_app.assistant import Question
 from examples.deepseek_weather_assistant.weather_app.project import weather_workflow
-from autoagent.agent import LLM_CALL, llm_call_operator
-from autoagent.host import AgentSettings, AutoAgentHost, HostSettings
+from autoagent.agent import LLM_CALL, LLMSelection, llm_call_operator
+from autoagent.host import AutoAgentHost, HostSettings
 from examples.deepseek_weather_assistant.weather_app.tools import weather_tools
 
 
@@ -54,13 +54,14 @@ class WeatherLoopTests(unittest.IsolatedAsyncioTestCase):
 
         @asynccontextmanager
         async def lifespan(setup):
-            setup.register_operator(llm_call_operator(provider), capability_id=LLM_CALL.id, default=True)
+            setup.register_operator(llm_call_operator(resolver=lambda request: LLMSelection(provider, "deepseek-flash")),
+                capability_id=LLM_CALL.id, default=True)
             yield
 
         with tempfile.TemporaryDirectory() as directory:
             async with AutoAgentHost(workflows=[weather_workflow()], lifespan=lifespan,
                 settings=HostSettings(database_url="sqlite+aiosqlite:///" + str(Path(directory) / "runtime.db")),
-                environment={"AUTOAGENT_LLM_PROVIDER": "deepseek", "AUTOAGENT_LLM_MODEL": "deepseek-flash"}) as host:
+                environment={"DEEPSEEK_API_KEY": "offline"}) as host:
                 return await host.join(await host.execute("weather-assistant", Question(question="北京天气？")))
 
     async def test_tool_errors_and_complete_output_survive_graph_round_trips(self):
@@ -171,12 +172,14 @@ class WeatherCliTests(unittest.TestCase):
     def environment(self, directory, backend="openai", base_url=None, streaming=False):
         env = {key: value for key, value in os.environ.items()
                if not key.startswith(("AUTOAGENT_", "DEEPSEEK_", "WEATHER_"))}
-        env.update(AUTOAGENT_LLM_API_KEY="test-key-not-a-credential", AUTOAGENT_LLM_BACKEND=backend,
-                   AUTOAGENT_LLM_PROVIDER="deepseek", AUTOAGENT_LLM_MODEL="deepseek-flash",
-                   AUTOAGENT_LLM_STREAMING=str(streaming).lower(), LITELLM_LOCAL_MODEL_COST_MAP="True",
-                   AUTOAGENT_DATABASE_URL="sqlite+aiosqlite:///" + str(Path(directory) / "runtime.db"))
-        if base_url:
-            env["AUTOAGENT_LLM_BASE_URL"] = base_url
+        model = 'deepseek/deepseek-flash' if backend == 'litellm' else 'deepseek-flash'
+        config = {'default_model': {'provider':'deepseek', 'model':model},
+            'providers':{'deepseek':{'backend':backend, 'api_key':'${DEEPSEEK_API_KEY}',
+            'base_url':base_url or 'https://api.deepseek.com', 'models':[{'id':model}]}}}
+        path = Path(directory) / 'providers.json'
+        path.write_text(json.dumps(config))
+        env.update(DEEPSEEK_API_KEY="test-key-not-a-credential", AUTOAGENT_PROVIDERS_FILE=str(path),
+            LITELLM_LOCAL_MODEL_COST_MAP="True", AUTOAGENT_DATABASE_URL="sqlite+aiosqlite:///" + str(Path(directory) / "runtime.db"))
         return env
 
     def test_static_project_check_needs_neither_credentials_nor_optional_sdks(self):

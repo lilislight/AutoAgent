@@ -24,9 +24,10 @@ class AgentWorkflowOptions(Model):
     instructions: str = "You are a helpful assistant. Use the available tools when needed."
     llm_options: dict[str, JsonValue] = Field(default_factory=dict)
     runtime: AgentHostSettings | None = None
-    max_rounds: int | None = Field(default=20, ge=1)
+    max_rounds: int | None = Field(default=10_000, ge=1)
     max_parallelism: int | None = Field(default=None, ge=1)
     include_ask_user: bool = False
+    inject_current_time: bool = False
     user_events: bool = False
     user_signal_endpoint: NonEmpty = "agent.user"
     subagents: SubagentsConfig = Field(default_factory=SubagentsConfig)
@@ -54,9 +55,12 @@ class ContextPreparation(Model):
     settings: dict[str, JsonValue] = Field(default_factory=dict)
     generation_options: dict[str, JsonValue] = Field(default_factory=dict)
     compaction_model: NonEmpty | None = None
+    compaction_provider: NonEmpty | None = None
+    compaction_reasoning_effort: NonEmpty | None = None
     fingerprint: NonEmpty
     snapshot_id: NonEmpty
     replay_target: HistoryRoute | None = None
+    inject_current_time: bool = False
 
     @property
     def model_input(self) -> tuple[LLMItem, ...]:
@@ -89,6 +93,7 @@ class PreparedRequest(Model):
     fixed_input: tuple[LLMItem, ...] = ()
     replay_target: HistoryRoute | None = None
     estimated_input_tokens: int | None = Field(default=None, ge=0)
+    runtime_time: NonEmpty | None = None
 
 
 class CompactionChunk(Model):

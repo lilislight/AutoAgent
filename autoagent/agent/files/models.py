@@ -3,29 +3,11 @@
 from typing import Annotated, Literal
 from pydantic import Field
 from ..models._base import Model, NonEmpty
-
-
-class FileRule(Model):
-    """Paths inside the Workspace are root-relative; outside paths are absolute."""
-
-    pattern: NonEmpty
-    actions: tuple[str, ...] = ("read", "write", "delete")
-    decision: Literal["allow", "ask", "deny"] = "ask"
-    reason: str | None = None
-
-
-def secret_rules():
-    return tuple(FileRule(pattern=pattern, reason="Sensitive file") for pattern in
-        (".env", "**/.env", ".env.*", "**/.env.*", "*.key", "**/*.key", "*.pem", "**/*.pem",
-         "id_rsa", "**/id_rsa", "id_ed25519", "**/id_ed25519")) + tuple(
-        FileRule(pattern=pattern, decision="allow") for pattern in
-        (".env.example", "**/.env.example", ".env.sample", "**/.env.sample"))
+from ..tools.tool_policy import ToolPolicy
 
 
 class FileToolsConfig(Model):
-    workspace_default: Literal["allow", "ask", "deny"] = "allow"
-    external_default: Literal["allow", "ask", "deny"] = "ask"
-    rules: tuple[FileRule, ...] = Field(default_factory=secret_rules)
+    policy: ToolPolicy = Field(default_factory=ToolPolicy)
     max_file_bytes: int = Field(default=8 * 1024 * 1024, gt=0)
     max_output_bytes: int = Field(default=64 * 1024, gt=0)
     max_entries: int = Field(default=10000, gt=0)
@@ -57,15 +39,15 @@ class FileTransfer(Model):
     operation: Literal["move", "copy"]
     path: NonEmpty
     destination: NonEmpty
-    expected_version: str | None = Field(default=None, description="For move, supply the source version or first read the source in this Session. Copy does not require a prior read. Destination is never overwritten.")
+    expected_version: str | None = Field(default=None, description="Optional source version for move. When supplied it must match. Destination is never overwritten.")
 
 
 class FileDelete(Model):
     operation: Literal["delete"]
     path: NonEmpty
-    expected_version: str | None = Field(default=None, description="For files, supply their version or first read them in this Session. Only empty directories can be deleted; this operation is never recursive.")
+    expected_version: str | None = Field(default=None, description="Optional file version; when supplied it must match. Only empty directories can be deleted; this operation is never recursive.")
 
 
 FileManagement = Annotated[FileStat | FileMkdir | FileTransfer | FileDelete, Field(discriminator="operation")]
 
-__all__ = ["FileRule", "FileToolsConfig", "FileEdit", "FileManagement"]
+__all__ = ["FileToolsConfig", "FileEdit", "FileManagement"]

@@ -3,7 +3,7 @@
 import time
 from autoagent.agent.context import AgentSettingsRecord, AgentSessionSettings, restore
 from autoagent.agent.workspace import WorkspaceBinding
-from .persistence.models import ConflictError
+from .errors import AgentStateConflict as ConflictError
 
 
 class AgentRuntimeState:
@@ -58,7 +58,7 @@ class AgentRuntimeState:
         with self.service._lock:
             if iid in self.bindings:
                 return self.bindings[iid]
-        persistence = self.service.host._persistence
+        persistence = self.service.services.persistence
         row = await persistence.get_invocation(iid, view="accepted")
         if row is None:
             return None

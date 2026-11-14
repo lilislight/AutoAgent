@@ -16,8 +16,7 @@ class ProjectHostFactory:
     def evaluation_conditions(self):
         # Only non-secret dependency identities are automatic. Application-specific
         # services/data remain the Suite's explicit conditions declaration.
-        keys = ('AUTOAGENT_LLM_PROVIDER', 'AUTOAGENT_LLM_MODEL', 'AUTOAGENT_LLM_BACKEND',
-                'AUTOAGENT_EMBEDDING_PROVIDER', 'AUTOAGENT_EMBEDDING_MODEL')
+        keys = ('AUTOAGENT_PROVIDERS_FILE',)
         return {key: self.environment[key] for key in keys if key in self.environment}
 
     def __call__(self, environment):

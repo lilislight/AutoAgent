@@ -88,7 +88,7 @@ def resource_locks(paths):
 
 
 class LocalFileService:
-    """One Workspace binding; observations are scoped by Session, not globally."""
+    """One Workspace binding with explicit optional version preconditions."""
 
     def __init__(self, root, *, working_directory=".", config=None):
         self.root = Path(root).expanduser().resolve(strict=True)
@@ -97,8 +97,6 @@ class LocalFileService:
             raise ValueError("File service working directory must be inside its Workspace.")
         self.config = FileToolsConfig.model_validate(config or FileToolsConfig())
         self._root_identity = fingerprint(self.root)
-        self._observed = {}
-        self._guard = threading.RLock()
         self.version = version(json.dumps(dict(config=self.config.model_dump(mode="json"),
             root=str(self.root), cwd=str(self.cwd), identity=self._root_identity), sort_keys=True).encode())
 
@@ -143,10 +141,6 @@ class LocalFileService:
         pinned = context.authorization.get("tool_binding", {}).get("operations")
         if pinned:
             expected = pinned[0]["attributes"].get("expected_version")
-        elif expected is None and (name == "edit_file" or name == "write_file" and values.get("overwrite")
-                                 or operation in {"move", "delete"}):
-            with self._guard:
-                expected = self._observed.get((context.session_id, str(self._resolve(values["path"]))))
         result = [self._operation(action, values["path"], expected=expected)]
         if name == "search_files" and Path(result[0].resource).is_file():
             result.append(self._operation("read", values["path"]))
@@ -173,29 +167,8 @@ class LocalFileService:
             selected = override(operation, context)
             if selected is not None:
                 return selected
-        action = operation.action.removeprefix("file.")
-        inside = operation.attributes["scope"] == "workspace"
-        value = self.config.workspace_default if inside else self.config.external_default
-        decision = ToolDecision(action=value, reason=None if value == "allow" else
-            ("Workspace file access" if inside else "Access outside the current Workspace"))
-        for rule in self.config.rules:
-            if action in rule.actions and glob_match(operation.attributes["path"], rule.pattern):
-                decision = ToolDecision(action=rule.decision, reason=rule.reason or "File access rule")
-        snapshot = context.services.get("agent_snapshot")
-        if snapshot is not None:
-            access = snapshot.settings.access
-            checks = [decision]
-            target_tool = {"read": "read_file", "write": "edit_file", "list": "list_files",
-                "search": "search_files", "stat": "manage_files", "delete": "manage_files"}.get(action)
-            checks.append(ToolDecision(action=access.rules.get(target_tool, access.default),
-                reason="Session Tool access rule"))
-            selected = ToolDecision(action="allow")
-            for rule in access.operation_rules:
-                if rule.matches(operation):
-                    selected = rule.evaluate(operation)
-            checks.append(selected)
-            decision = combine_decisions(checks)
-        return decision
+        policies = (self.config.policy, *context.services.get("tool_operation_policies", ()))
+        return combine_decisions(policy.evaluate_operation(None, context, operation) for policy in policies)
 
     def _permissions(self, path, context):
         permissions = {}
@@ -309,19 +282,12 @@ class LocalFileService:
                 "or a format-specific execution command rather than retrying read_file.")
         return text, encoding
 
-    def _remember(self, path, data, context):
-        with self._guard:
-            # Bound runtime-only observations; restart requires a fresh read.
-            if len(self._observed) >= 10000:
-                self._observed.pop(next(iter(self._observed)))
-            self._observed[context.session_id, str(path)] = version(data)
-
     def _expected(self, plan, data):
         expected = plan.attributes.get("expected_version")
         if expected is None:
-            fail("read_required", "Read this file before modifying it, or supply expected_version.")
+            return
         if version(data) != expected:
-            fail("version_conflict", "File changed since it was read; read it again before modifying.")
+            fail("version_conflict", "File does not match expected_version; inspect the latest contents before retrying.")
 
     def _output(self, record, text=None, **metadata):
         return ToolOutput(structured_content=record, content=() if text is None else (TextContent(text=text),),
@@ -363,7 +329,6 @@ class LocalFileService:
         else:
             if end < len(lines):
                 next_line, next_column = end + 1, 1
-        self._remember(path, data, context)
         record = dict(path=str(path), version=version(data), start_line=start, end_line=end,
             total_lines=len(lines), next_line=next_line, truncated=next_line is not None,
             size_bytes=len(data), modified_at_ns=info.st_mtime_ns)
@@ -374,7 +339,12 @@ class LocalFileService:
     def _change(self, path, before, after, *, create_parents=False):
         if len(after) > self.config.max_file_bytes:
             fail("limit_exceeded", "New content exceeds the configured byte limit.")
-        old_text = self._decode(before)[0] if before is not None else ""
+        try:
+            old_text = self._decode(before)[0] if before is not None else ""
+        except ToolBusinessError as error:
+            if error.code not in {"unsupported_file", "unsupported_encoding"}:
+                raise
+            old_text = None
         new_text = self._decode(after)[0]
         with self._parent(path, create=create_parents) as (directory, name):
             temporary = ".autoagent-" + uuid4().hex
@@ -406,18 +376,20 @@ class LocalFileService:
                 except FileNotFoundError:
                     pass
         diff = "".join(difflib.unified_diff(old_text.splitlines(True), new_text.splitlines(True),
-            fromfile=str(path), tofile=str(path)))
+            fromfile=str(path), tofile=str(path))) if old_text is not None else None
         limit = self.config.max_output_bytes
-        rendered = diff.encode()[:limit].decode("utf-8", errors="ignore")
+        rendered = diff.encode()[:limit].decode("utf-8", errors="ignore") if diff is not None else None
         return self._output(dict(path=str(path), version=version(after), change="created" if before is None else "updated"),
-            diff=rendered, diff_truncated=len(diff.encode()) > limit,
+            diff=rendered, diff_truncated=diff is not None and len(diff.encode()) > limit,
             path=str(path), operation="create" if before is None else "edit")
 
     def _write(self, path, args, plan):
         before = None
+        if not path.exists() and plan.attributes.get("expected_version") is not None:
+            fail("version_conflict", "expected_version requires an existing file, but the file is missing.")
         if path.exists():
             if not args["overwrite"]:
-                fail("already_exists", "File already exists; use edit_file or explicitly overwrite with its version.")
+                fail("already_exists", "File already exists; use overwrite=true to replace all content, or edit_file for exact changes.")
             before, _ = self._bytes(path)
             self._expected(plan, before)
         return self._change(path, before, args["content"].encode(), create_parents=args["create_parents"])

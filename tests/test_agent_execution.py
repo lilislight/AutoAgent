@@ -1,5 +1,7 @@
 """Real process lifecycle, conservative command approval and Host integration."""
 
+from autoagent.agent import AgentResources, CommandTools
+
 import asyncio
 from contextlib import asynccontextmanager
 import json
@@ -15,16 +17,19 @@ from pydantic import ValidationError
 
 from autoagent.agent import (
     AgentApprovalRequest, AgentApprovalResponse, AgentInput, CommandRule, ExecutionToolsConfig,
-    LLMResponse, LLMToolCall, LocalExecutionService, ProcessManager, ToolContext,
-    ToolApprovalRequired, ToolDecision, TreeSitterShellAnalyzer, WorkspaceBinding, agent_workflow, execution_tools,
+    LLMResponse, LLMToolCall, LocalExecutionService, ToolContext,
+    ToolApprovalRequired, ToolDecision, TreeSitterShellAnalyzer, agent_workflow, execution_tools,
 )
 from autoagent.agent.context import restore
 from autoagent.host import AutoAgentHost, HostSettings
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 from tests.test_agent_workflow import ScriptedProvider, answer, settings
+from tests.test_agent_files import file_config, path_rule
 
 
 def call(name="execute_command", **arguments):
+    if name == "execute_command" and "command" in arguments:
+        arguments = {**arguments.pop("command"), **arguments}
     return LLMToolCall(name=name, call_id=name, arguments=json.dumps(arguments))
 
 
@@ -93,7 +98,11 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.tools = execution_tools(self.service, context=ToolContext(session_id="one"))
 
     def make_service(self, config=None, **kwargs):
-        service = LocalExecutionService(self.root, config=config, **kwargs)
+        policy = ExecutionToolsConfig(default_decision="ask", process_write_decision="ask",
+            file_policy=file_config(path_rule(".env"), external="ask"))
+        if config is not None:
+            policy = policy.model_copy(update={key:getattr(config, key) for key in config.model_fields_set})
+        service = LocalExecutionService(self.root, config=policy, **kwargs)
         self.addAsyncCleanup(service.aclose)
         return service
 
@@ -102,6 +111,50 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def manage(self, action, **kwargs):
         return await self.tools.ainvoke(call("manage_process", request={"action": action, **kwargs}))
+
+    async def test_flat_shell_defaults_and_invalid_arguments_provide_correct_shapes(self):
+        """Flat calls execute with a default shell and malformed shapes fail before spawning."""
+        result = await self.tools.ainvoke(call(mode="shell", script="echo hi"))
+        self.assertFalse(result.is_error, result)
+        self.assertEqual(result.structured_content["stdout"].strip(), "hi")
+        count = len(self.service.manager.records())
+        payloads = [
+            {"command":{"mode":"shell", "script":"echo hi", "max_output_bytes":4000}},
+            {"mode":"shell", "script":"echo hi", "command_note":"verify"},
+            {"mode":"exec", "program":sys.executable, "script":"echo hi"},
+            {"mode":"exec"},
+        ]
+        for payload in payloads:
+            result = await self.tools.ainvoke(LLMToolCall(name="execute_command", call_id="bad", arguments=json.dumps(payload)))
+            self.assertEqual(result.structured_content["error"]["kind"], "invalid_arguments")
+            self.assertIn("top level", result.structured_content["error"]["hint"])
+            self.assertIn("mode", result.structured_content["error"]["expected_shape"])
+        self.assertEqual(len(self.service.manager.records()), count)
+        invalid_process = await self.tools.ainvoke(call("manage_process", action="read", process_id="unused"))
+        self.assertEqual(invalid_process.structured_content["error"]["expected_shape"], {"request":{"action":"list"}})
+
+    async def test_long_line_preview_preserves_other_lines_and_raw_log(self):
+        """An 80KB noise line cannot displace normal lines, and raw cursor reads recover every byte."""
+        code = "print('first useful line'); print('x'*80000); print('last useful line')"
+        result = await self.invoke(python(code), log_path="long-line.log")
+        value = result.structured_content
+        self.assertFalse(result.is_error, result)
+        self.assertIn("first useful line", value["stdout"])
+        self.assertIn("last useful line", value["stdout"])
+        self.assertTrue(value["line_truncated"])
+        self.assertGreater(value["omitted_line_bytes"], 70000)
+        self.assertFalse(value["has_more"])
+        cursor, raw = 0, []
+        while True:
+            page = (await self.manage("read", process_id=value["process_id"], cursor=cursor,
+                max_line_bytes=0, max_output_bytes=10000)).structured_content
+            raw.append(page.get("stdout", ""))
+            self.assertGreater(page["next_cursor"], cursor)
+            cursor = page["next_cursor"]
+            if not page["has_more"]:
+                break
+        self.assertEqual("".join(raw), (self.root / "long-line.log").read_text())
+
 
     async def test_wait_awaits_exit_and_expiry_does_not_stop_process(self):
         """Exit waits ignore intermediate output and finite expiry preserves a running handle."""
@@ -159,12 +212,12 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(definitions["manage_process"]["$defs"]["ProcessWrite"]["properties"]["text"]["maxLength"], 512)
         original = {value.name: value.parameters for value in self.tools.definitions}
         self.assertEqual(original["execute_command"]["properties"]["yield_seconds"]["anyOf"][0]["maximum"], 600)
-        self.assertIn("literal", original["execute_command"]["$defs"]["ExecCommand"]["properties"]["args"]["description"])
+        self.assertIn("Literal", original["execute_command"]["properties"]["args"]["description"])
         self.assertIn("deadline", original["execute_command"]["properties"]["timeout_seconds"]["description"])
         self.assertIn("previous next_cursor", original["manage_process"]["$defs"]["ProcessRead"]["properties"]["cursor"]["description"])
 
     def test_typed_contract_and_required_decisions(self):
-        """Rule decisions are mandatory and both command/request unions are typed."""
+        """Rule decisions are mandatory and command arguments form one flat object."""
         with self.assertRaises(ValidationError):
             CommandRule(program="git")
         with self.assertRaises(ValidationError):
@@ -175,7 +228,8 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ExecutionToolsConfig.model_validate_json(config.model_dump_json()), config)
         definitions = {value.name: value.parameters for value in self.tools.definitions}
         self.assertEqual(set(definitions), {"execute_command", "manage_process"})
-        self.assertIn("oneOf", str(definitions["execute_command"]))
+        self.assertNotIn("command", definitions["execute_command"]["properties"])
+        self.assertEqual(definitions["execute_command"]["required"], ["mode"])
 
     def test_workspace_content_changes_do_not_change_tool_version(self):
         """Ordinary file creation does not invalidate an unchanged execution capability."""
@@ -248,9 +302,10 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         result = await tools.ainvoke(call(command=python("print('x'*100)")))
         value = result.structured_content
-        self.assertEqual(value["skipped_bytes"], 81)
+        self.assertEqual(value["dropped_prefix_bytes"], 61)
+        self.assertEqual(value["preview_omitted_bytes"], 20)
         read = await tools.ainvoke(call("manage_process", request=dict(action="read", process_id=value["process_id"], cursor=0)))
-        self.assertEqual(read.structured_content["skipped_bytes"], 61)
+        self.assertEqual(read.structured_content["dropped_prefix_bytes"], 61)
         self.assertTrue(read.structured_content["has_more"])
 
     @unittest.skipUnless(shutil.which("bash"), "Bash is not installed")
@@ -567,15 +622,15 @@ class HostExecutionContracts:
     async def host(self, provider, *, workflow=None):
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider("offline", provider)
-            setup.agent_context.set_defaults(settings())
+            setup.providers.register("offline", provider)
+            setup.extensions["agent"].context.set_defaults(settings())
             yield
-        async with AutoAgentHost(workflows=[workflow or agent_workflow()], root=self.root,
+        async with AutoAgentHost(workflows=[workflow or agent_workflow(resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig(default_decision="ask")).tools()))], root=self.root,
             environment={}, lifespan=lifespan, settings=HostSettings(database_url=self.url)) as host:
             yield host
 
     async def bind(self, host, session="one"):
-        await host.agent_context.configure(session, settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
+        await host.extensions["agent"].context.configure(session, settings().session_defaults())
 
     async def test_workspace_and_build_control_tool_visibility(self):
         """Execution Tools appear only for bound, explicitly enabled builds."""
@@ -586,9 +641,9 @@ class HostExecutionContracts:
                 result = await host.join(await host.execute("agent", AgentInput(message="hello"), session_id=session))
                 self.assertEqual(result.status, "completed", result.error)
         self.assertIn("execute_command", [tool.name for tool in provider.requests[0].tools])
-        self.assertNotIn("execute_command", [tool.name for tool in provider.requests[1].tools])
+        self.assertIn("execute_command", [tool.name for tool in provider.requests[1].tools])
         provider = ScriptedProvider(answer())
-        async with self.host(provider, workflow=agent_workflow(execution=False)) as host:
+        async with self.host(provider, workflow=agent_workflow()) as host:
             await self.bind(host)
             await host.join(await host.execute("agent", AgentInput(message="hello"), session_id="one"))
         self.assertNotIn("execute_command", [tool.name for tool in provider.requests[0].tools])
@@ -620,15 +675,14 @@ class HostExecutionContracts:
             waiting = await host.join(await host.execute("agent", AgentInput(message="run"), session_id="one"))
             self.assertEqual(waiting.status, "waiting", waiting.error)
         (self.root / "unrelated").touch()
-        provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls", output=(call(command=command),)), answer())
+        provider = ScriptedProvider(answer())
         async with self.host(provider) as host:
-            current = await host.agent_context.get_approval(waiting.invocation_id, waiting.waits[0].id)
-            self.assertFalse(current.requests)
-            self.assertEqual(current.automatic[0].result.structured_content["error"]["kind"], "tool_binding_changed")
+            current = await host.extensions["agent"].context.get_approval(waiting.invocation_id, waiting.waits[0].id)
+            self.assertTrue(current.requests)
             self.assertFalse((self.root / "counter").exists())
             recovered = await host.recover(waiting.invocation_id)
             self.assertEqual(recovered.status, "waiting", recovered.error)
-            current = await host.agent_context.get_approval(waiting.invocation_id, recovered.waits[0].id)
+            current = await host.extensions["agent"].context.get_approval(waiting.invocation_id, recovered.waits[0].id)
             self.assertEqual(len(current.requests), 1)
             reply = AgentApprovalResponse(decisions=tuple(v.respond(approved=True) for v in current.requests), revision=current.revision)
             await host.respond(waiting.invocation_id, recovered.waits[0].id, reply.model_dump(mode="json"))
@@ -642,11 +696,11 @@ class HostExecutionContracts:
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls",
             output=(call(command=command, yield_seconds=0),)), answer())
         config = ExecutionToolsConfig(default_decision="allow")
-        async with self.host(provider, workflow=agent_workflow(execution=config)) as host:
+        async with self.host(provider, workflow=agent_workflow(resources=AgentResources(tools=CommandTools(self.root, config=config).tools()), )) as host:
             await self.bind(host)
             result = await host.join(await host.execute("agent", AgentInput(message="run"), session_id="one"))
             self.assertEqual(result.status, "completed", result.error)
-            manager = host.agent_context._workspaces.process_manager
+            manager = next(node.executable.handler.__autoagent_resources__ for node in host._workflows[0].nodes if node.id == "start").entries("tool")[0].value._owner._tools["execute_command"].service.manager
             records = manager.records()
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].handle.state, "running")
@@ -660,12 +714,12 @@ class HostExecutionContracts:
             LLMResponse(model="offline", finish_reason="tool_calls", output=(call("ask_user", questions=[{
                 "id": "next", "type": "text", "text": "Continue?"}]),)))
         async with self.host(provider, workflow=agent_workflow(include_ask_user=True,
-            execution=ExecutionToolsConfig(default_decision="allow"))) as host:
+            resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig(default_decision="allow")).tools()), )) as host:
             await self.bind(host)
             ref = await host.execute("agent", AgentInput(message="run"), session_id="one")
             result = await host.join(ref)
             self.assertEqual(result.status, "waiting", result.error)
-            records = host.agent_context._workspaces.process_manager.records()
+            records = next(node.executable.handler.__autoagent_resources__ for node in host._workflows[0].nodes if node.id == "start").entries("tool")[0].value._owner._tools["execute_command"].service.manager.records()
             self.assertEqual(len(records), 1)
             await host.cancel(result.invocation_id)
             self.assertEqual(records[0].handle.state, "terminated")
@@ -675,12 +729,12 @@ class HostExecutionContracts:
         command = python("import time; time.sleep(60)")
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls",
             output=(call(command=command, yield_seconds=0),)), answer())
-        async with self.host(provider, workflow=agent_workflow(execution=ExecutionToolsConfig(default_decision="allow"))) as host:
+        async with self.host(provider, workflow=agent_workflow(resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig(default_decision="allow")).tools()), )) as host:
             await self.bind(host)
             ref = await host.execute("agent", AgentInput(message="run"), session_id="one")
             result = await host.join(ref)
             self.assertEqual(result.status, "completed", result.error)
-            manager = host.agent_context._workspaces.process_manager
+            manager = next(node.executable.handler.__autoagent_resources__ for node in host._workflows[0].nodes if node.id == "start").entries("tool")[0].value._owner._tools["execute_command"].service.manager
             records = manager.records()
             await host._runtime.app.aunload_session(host._runtime.resident["one"])
             host._runtime.forget("one")

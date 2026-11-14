@@ -1,6 +1,5 @@
-"""Complete Agent graph, Host settings and protected Tool effects."""
+"""Complete Agent graph, SDK settings and protected Tool effects."""
 
-import asyncio
 from contextlib import asynccontextmanager
 import inspect
 from pathlib import Path
@@ -8,15 +7,15 @@ import tempfile
 import unittest
 
 from autoagent.agent import (
-    ContextPolicy, always_compact, AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput,
-    AgentModelSettings, AgentResourceRegistry, AgentHostSettings, AgentSessionSettings, LLM_CALL, LLMMessage, LLMSelection,
+    AgentResources, ContextPolicy, always_compact, AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput,
+    AgentModelSettings, AgentResourceRegistry, AgentHostSettings, LLM_CALL, LLMMessage, LLMSelection,
     LLMReasoning, LLMResponse, LLMStreamChunk, LLMToolCall, LLMToolResult,
     LLMUsage, MemorySkillSource, Skill, TextContent, Tool, ToolDecision, ToolSet, agent_workflow, llm_call_operator,
 )
 from autoagent.agent.context import restore
 from autoagent.core import WorkflowCompiler
 from autoagent.host import AutoAgentHost, HostSettings
-from autoagent.host.persistence import ConflictError
+from autoagent.agent.runtime.errors import AgentStateConflict as ConflictError
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 
 
@@ -81,17 +80,17 @@ class AgentWorkflowContracts:
 
     @asynccontextmanager
     async def host(self, provider, *, defaults=None, tools=(), policies=(), url=None, **options):
+        resources = options.pop("resources", None) or AgentResources(tools=tools)
+        self.resources = resources
         @asynccontextmanager
         async def lifespan(setup):
-            service = setup.agent_context
-            service.resources.register_provider("offline", provider)
+            service = setup.extensions["agent"].context
+            service.services.providers.register("offline", provider)
             service.set_defaults(defaults or settings())
-            for tool in tools:
-                service.resources.register_tool(tool, workflows={"agent"})
             for name, policy in policies:
-                service.resources.register_policy(name, policy)
+                resources.register_policy(name, policy)
             yield
-        async with AutoAgentHost(workflows=[agent_workflow(**options)], lifespan=lifespan,
+        async with AutoAgentHost(workflows=[agent_workflow(resources=resources, **options)], lifespan=lifespan,
             settings=HostSettings(database_url=url or await self.database_url()), environment={}) as host:
             yield host
 
@@ -118,7 +117,7 @@ class AgentWorkflowContracts:
             self.assertEqual(response.usage.total_tokens, 15)
             self.assertEqual(provider.streams, 1)
             self.assertEqual(provider.requests[0].max_output_tokens, 77)
-            snapshot = await host.agent_context.get_snapshot(result.invocation_id)
+            snapshot = await host.extensions["agent"].context.get_snapshot(result.invocation_id)
             self.assertEqual(snapshot.settings.model.max_output_tokens, 512)
 
     async def test_custom_capability_and_llm_resolvers_remain_available(self):
@@ -129,7 +128,7 @@ class AgentWorkflowContracts:
             return LLMSelection(provider, "resolver-selected")
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.set_defaults(AgentHostSettings())
+            setup.extensions["agent"].context.set_defaults(AgentHostSettings())
             operator = llm_call_operator(resolver=selection, id="application.model")
             setup.register_operator(operator, capability_id=LLM_CALL.id)
             async def resolver(capability, request):
@@ -211,18 +210,18 @@ class AgentWorkflowContracts:
         async with self.host(provider, defaults=settings(access=AgentAccess(rules={"publish": "ask"})),
             tools=(self.publish(effects),)) as host:
             waiting = await self.run_agent(host, session_id="conversation")
-            old = await host.agent_context.get_snapshot(waiting.invocation_id)
-            record = await host.agent_context.configure("conversation", settings(model="model-b").session_defaults(), expected_version=1)
+            old = await host.extensions["agent"].context.get_snapshot(waiting.invocation_id)
+            record = await host.extensions["agent"].context.configure("conversation", settings(model="model-b").session_defaults(), expected_version=1)
             self.assertEqual(record.version, 2)
             with self.assertRaises(ConflictError):
-                await host.agent_context.configure("conversation", settings().session_defaults(), expected_version=0)
+                await host.extensions["agent"].context.configure("conversation", settings().session_defaults(), expected_version=0)
             request = restore(AgentApprovalRequest, waiting.waits[0].request)
             reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in request.requests))
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
             result = await host.join(waiting.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual([request.model for request in provider.requests], ["model-a", "model-a"])
-            self.assertEqual((await host.agent_context.get_snapshot(waiting.invocation_id)).snapshot_id, old.snapshot_id)
+            self.assertEqual((await host.extensions["agent"].context.get_snapshot(waiting.invocation_id)).snapshot_id, old.snapshot_id)
             next_turn = await self.run_agent(host, session_id="conversation")
             self.assertEqual(next_turn.status, "completed", next_turn.error)
             self.assertEqual(provider.requests[-1].model, "model-b")
@@ -238,15 +237,11 @@ class AgentWorkflowContracts:
                 tools=(self.publish(effects),)) as host:
                 waiting = await self.run_agent(host)
                 if replace:
-                    host.agent_context.resources.register_tool(self.publish(effects), version="2", replace=True, workflows={"agent"})
+                    self.resources.register_tool(self.publish(effects), version="2", replace=True, workflows={"agent"})
                 else:
-                    host.agent_context.resources.unregister("tool", "publish")
-                async with asyncio.timeout(10):
-                    while True:
-                        result = await host.join(waiting.invocation_id)
-                        if result.status == "completed":
-                            break
-                        await asyncio.sleep(.02)
+                    self.resources.unregister("tool", "publish")
+                await host.pause(waiting.invocation_id)
+                result = await host.recover(waiting.invocation_id)
                 self.assertEqual(result.status, "completed", result.error)
                 self.assertEqual(effects, [])
                 observed = next(item for item in provider.requests[-1].input if isinstance(item, LLMToolResult))
@@ -259,18 +254,18 @@ class AgentWorkflowContracts:
         async with self.host(ScriptedProvider(calls("publish")), url=url,
             defaults=settings(access=AgentAccess(rules={"publish": "ask"})), tools=(self.publish(effects),)) as host:
             waiting = await self.run_agent(host)
-            original = await host.agent_context.get_snapshot(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(model="model-b").session_defaults())
+            original = await host.extensions["agent"].context.get_snapshot(waiting.invocation_id)
+            await host.extensions["agent"].context.configure(waiting.session_id, settings(model="model-b").session_defaults())
             # Reopening an Invocation cannot create another settings stage
             # or replace its original model binding.
-            staged = await host.agent_context.activate(waiting.session_id, waiting.invocation_id,
+            staged = await host.extensions["agent"].context.activate(waiting.session_id, waiting.invocation_id,
                 reason="resume", activation_id="unaccepted-resume")
             self.assertEqual(staged["model"]["model"], original.settings.model.model)
         provider = ScriptedProvider(answer(), answer())
         async with self.host(provider, url=url, defaults=settings(access=AgentAccess(rules={"publish": "ask"})), tools=(self.publish(effects),)) as host:
-            await host.agent_context.configure(waiting.session_id, settings(model="model-b").session_defaults())
-            self.assertEqual((await host.agent_context.get_settings(waiting.session_id)).settings.model.model, "model-b")
-            self.assertEqual((await host.agent_context.get_snapshot(waiting.invocation_id)).snapshot_id, original.snapshot_id)
+            await host.extensions["agent"].context.configure(waiting.session_id, settings(model="model-b").session_defaults())
+            self.assertEqual((await host.extensions["agent"].context.get_settings(waiting.session_id)).settings.model.model, "model-b")
+            self.assertEqual((await host.extensions["agent"].context.get_snapshot(waiting.invocation_id)).snapshot_id, original.snapshot_id)
             request = restore(AgentApprovalRequest, waiting.waits[0].request)
             reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in request.requests))
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
@@ -290,9 +285,9 @@ class AgentWorkflowContracts:
             tools=(self.publish(effects),)) as host:
             waiting = await self.run_agent(host)
             await host.pause(waiting.invocation_id)
-            await host.agent_context.configure(waiting.session_id, settings(model="model-b", mode="bypass").session_defaults())
+            await host.extensions["agent"].context.configure(waiting.session_id, settings(model="model-b", mode="bypass").session_defaults())
             resumed = await host.recover(waiting.invocation_id)
-            self.assertEqual((await host.agent_context.get_snapshot(waiting.invocation_id)).epoch, 1)
+            self.assertEqual((await host.extensions["agent"].context.get_snapshot(waiting.invocation_id)).epoch, 1)
             if resumed.waits:
                 request = restore(AgentApprovalRequest, resumed.waits[0].request)
                 reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in request.requests))
@@ -329,13 +324,13 @@ class AgentWorkflowContracts:
             waiting = await self.run_agent(host)
             def lookup(text: str) -> str:
                 return text
-            host.agent_context.resources.register_tool(Tool(lookup), workflows={"agent"})
+            self.resources.register_tool(Tool(lookup), workflows={"agent"})
             skill = Skill.from_source(MemorySkillSource("research", {"SKILL.md":
                 "---\nname: research\ndescription: Research helper\n---\nRead sources carefully.\n"}))
-            host.agent_context.resources.register_skill(skill, workflows={"agent"})
-            host.agent_context.resources.set_enabled("skill", "research", False)
-            self.assertEqual(host.agent_context.resources.entries("skill"), ())
-            host.agent_context.resources.set_enabled("skill", "research", True)
+            self.resources.register_skill(skill, workflows={"agent"})
+            self.resources.set_enabled("skill", "research", False)
+            self.assertEqual(self.resources.entries("skill"), ())
+            self.resources.set_enabled("skill", "research", True)
             request = restore(AgentApprovalRequest, waiting.waits[0].request)
             reply = AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in request.requests))
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
@@ -349,15 +344,13 @@ class AgentWorkflowContracts:
         """A replacement while an async permission check yields is rejected before effects."""
         effects, checked = [], [0]
         provider = ScriptedProvider(calls("publish"), answer())
-        holder = {}
         async def policy(call, context):
             checked[0] += 1
             if checked[0] == 2:
-                holder["host"].agent_context.resources.register_tool(self.publish(effects), version="2", replace=True, workflows={"agent"})
+                self.resources.register_tool(self.publish(effects), version="2", replace=True, workflows={"agent"})
             return ToolDecision(action="allow")
         async with self.host(provider, defaults=settings(access=AgentAccess(policy="guard")),
             tools=(self.publish(effects),), policies=(("guard", policy),)) as host:
-            holder["host"] = host
             result = await self.run_agent(host)
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(effects, [])

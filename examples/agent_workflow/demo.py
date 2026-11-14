@@ -13,7 +13,7 @@ from pathlib import Path
 import tempfile
 
 from autoagent.agent import (
-    AgentModelSelection,
+    AgentResources, AgentModelSelection,
     AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput, AgentResult,
     AgentModelSettings, AgentHostSettings, AgentSessionSettings, LLMMessage, LLMResponse,
     LLMStreamChunk, LLMToolCall, LLMToolResult, TextContent, Tool,
@@ -46,24 +46,23 @@ def publish(text: str) -> str:
 
 @asynccontextmanager
 async def lifespan(setup):
-    context = setup.agent_context
-    context.resources.register_provider("demo", DemoProvider(), version="1")
-    context.resources.register_tool(Tool(publish), version="1", workflows={"agent"})
+    context = setup.extensions["agent"].context
+    context.services.providers.register("demo", DemoProvider(), version="1")
     # Providers and Tools remain application-owned runtime instances.
     yield
 
 
 async def main(*, approve=False):
     with tempfile.TemporaryDirectory() as directory:
-        async with AutoAgentHost(workflows=[agent_workflow()], lifespan=lifespan,
+        async with AutoAgentHost(workflows=[agent_workflow(resources=AgentResources(tools=[publish]))], lifespan=lifespan,
             settings=HostSettings(database_url="sqlite+aiosqlite:///" + str(Path(directory) / "runtime.db")),
             environment={}) as host:
-            # Generation and resource policy are Host-owned. Sessions select
+            # Generation and resource policy belong to this Agent. Sessions select
             # only their model and approval mode.
-            host.agent_context.set_defaults(AgentHostSettings(
+            host.extensions["agent"].context.set_defaults(AgentHostSettings(
                 model=AgentModelSettings(provider="demo", model="demo-model", streaming=True),
                 access=AgentAccess(rules={"publish": "ask"})))
-            await host.agent_context.configure("demo-session", AgentSessionSettings(
+            await host.extensions["agent"].context.configure("demo-session", AgentSessionSettings(
                 model=AgentModelSelection(provider="demo", model="demo-model")))
             execution = await host.execute("agent", AgentInput(message="Publish a greeting."), session_id="demo-session")
             result = await host.join(execution)

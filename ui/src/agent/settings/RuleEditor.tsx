@@ -1,38 +1,97 @@
-import { useEffect, useId, useRef, useState } from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { BusyLabel } from '../../components/LoadingState';
 import { AgentIcon } from '../AgentIcon';
-import { settingsApi } from './api';
+import { newId } from '../ids';
+import { settingsApi, type PolicyPreview } from './api';
 import { DecisionSelect, FormActions, FormError, errorText } from './Controls';
-import type { Condition, Operator, Policy, Rule } from './types';
-import { parsePolicy, schemaPaths } from './policyState';
+import type { Operator, Policy, Rule } from './types';
+import { buildCondition, draftCondition, fieldOperators, newCondition, schemaFields, schemaPaths, type DraftCondition } from './policyState';
 
-type DraftCondition = Omit<Condition, 'value'> & { valueText: string };
-type DraftRule = Omit<Rule, 'conditions'> & { conditions: DraftCondition[] };
-const operators: Operator[] = ['equals', 'not_equals', 'in', 'not_in', 'glob', 'exists', 'prefix', 'contains', 'lt', 'lte', 'gt', 'gte', 'regex'];
-const toDraft = (rules: Rule[]): DraftRule[] => rules.map(rule => ({ ...rule, conditions: rule.conditions.map(condition => ({ ...condition, valueText: JSON.stringify(condition.value) ?? 'null' })) }));
-const valueOf = (text: string) => { try { return JSON.parse(text); } catch { return text; } };
-export function RuleEditor({ name, initial, schema, dynamic, onSave, onCancel }: { name: string; initial: Policy; schema?: Record<string, unknown>; dynamic?: boolean; onSave: (policy: Policy) => Promise<void>; onCancel: () => void }) {
-  const [fallback, setFallback] = useState(initial.default), [rules, setRules] = useState(() => toDraft(initial.rules));
-  const [jsonMode, setJsonMode] = useState(false), [json, setJson] = useState('');
-  const [args, setArgs] = useState('{}'), [operations, setOperations] = useState('[]');
-  const [toolName, setToolName] = useState(name);
-  const [busy, setBusy] = useState(false), [previewBusy, setPreviewBusy] = useState(false), [error, setError] = useState<string | null>(null), [preview, setPreview] = useState<{ action: string; reason: string | null } | null>(null);
-  const operation = useRef<AbortController | null>(null), id = useId();
-  useEffect(() => () => operation.current?.abort(), []);
-  const build = (): Policy => jsonMode ? parsePolicy(json) : { default: fallback, rules: rules.map(rule => ({ ...rule, conditions: rule.conditions.map(({ valueText, ...condition }) => ({ ...condition, value: valueOf(valueText) })) })) };
+interface DraftRule extends Omit<Rule, 'when'> { key: string; when: DraftCondition }
+const draftRules = (rules: Rule[]): DraftRule[] => rules.map(rule => ({ ...rule, key: newId(), when: draftCondition(rule.when) }));
+
+function ConditionEditor({ value, onChange, paths, fields, relative = false, depth = 0, label }: { value: DraftCondition; onChange: (value: DraftCondition) => void; paths: string; fields: Record<string, Record<string, unknown>>; relative?: boolean; depth?: number; label: string }) {
+  const patch = (update: Partial<DraftCondition>) => onChange({ ...value, ...update });
+  const child = (index: number, next: DraftCondition) => patch({ children: value.children.map((item, position) => position === index ? next : item) });
+  const items = value.kind === 'field' && (value.op === 'any_item' || value.op === 'all_items');
+  const choices = fieldOperators(relative ? undefined : fields[value.field]);
+  return <div className="settings-expression">
+    <div className="settings-expression-heading"><label>Condition<select aria-label={`${label} type`} value={value.kind} onChange={event => {
+      const kind = event.target.value as DraftCondition['kind'];
+      if (kind === 'field') patch({ kind });
+      else patch({ kind, children: value.kind === 'field' ? [{ ...value }] : value.children.slice(0, kind === 'not' ? 1 : undefined) });
+    }}><option value="field">Field</option><option value="all">All of</option><option value="any">Any of</option><option value="not">Not</option></select></label></div>
+    {value.kind === 'field' ? <div className="settings-condition-fields">
+      <label>Field<input aria-label={`${label} field`} list={relative ? undefined : paths} value={value.field} onChange={event => patch({ field: event.target.value })} placeholder={relative ? '$ or item field' : 'args.path'} /></label>
+      <label>Operator<select aria-label={`${label} operator`} value={value.op} onChange={event => {
+        const op = event.target.value as Operator;
+        patch({ op, children: value.children.length ? value.children : [newCondition('$')] });
+      }}>{[...new Set([...choices, value.op])].map(op => <option value={op} key={op}>{op}</option>)}</select></label>
+      {!items ? <label>Value · JSON or text{value.op === 'exists' ? <select aria-label={`${label} value`} value={value.valueText} onChange={event => patch({ valueText: event.target.value })}><option value="true">true</option><option value="false">false</option>{!['true', 'false'].includes(value.valueText) ? <option value={value.valueText}>Choose a value</option> : null}</select> : <input aria-label={`${label} value`} value={value.valueText} onChange={event => patch({ valueText: event.target.value })} spellCheck={false} />}</label> : null}
+      {value.op === 'regex' ? <label>Flags<input aria-label={`${label} regex flags`} value={value.flags} onChange={event => patch({ flags: event.target.value })} placeholder="ims" title="i: ignore case; m: multiline; s: dot matches newlines" /></label> : null}
+    </div> : null}
+    {value.kind !== 'field' || items ? <div className="settings-expression-children">{value.children.map((item, index) => <div className="settings-expression-child" key={index}>
+      <ConditionEditor value={item} onChange={next => child(index, next)} paths={paths} fields={fields} relative={relative || items} depth={depth + 1} label={`${label} condition ${index + 1}`} />
+      {(value.kind === 'all' || value.kind === 'any') && value.children.length > 1 ? <button className="settings-icon" type="button" aria-label={`Remove ${label} condition ${index + 1}`} onClick={() => patch({ children: value.children.filter((_, i) => i !== index) })}><AgentIcon name="close" /></button> : null}
+    </div>)}{(value.kind === 'all' || value.kind === 'any') && depth < 30 ? <button type="button" onClick={() => patch({ children: [...value.children, newCondition(relative ? '$' : 'args.path')] })}>Add condition</button> : null}</div> : null}
+  </div>;
+}
+
+export function RuleEditor({ name, initial, schema, operationSchema, onSave, onCancel }: { name: string; initial: Policy; schema?: Record<string, unknown>; operationSchema?: Record<string, unknown> | null; onSave: (policy: Policy) => Promise<void>; onCancel: () => void }) {
+  const [fallback, setFallback] = useState(initial.default), [rules, setRules] = useState(() => draftRules(initial.rules));
+  const [mode, setMode] = useState<'form' | 'json' | 'yaml'>('form'), [text, setText] = useState('');
+  const [args, setArgs] = useState('{}'), [operations, setOperations] = useState('[]'), [context, setContext] = useState('{}');
+  const [toolName, setToolName] = useState(name), [busy, setBusy] = useState(false), [switchingTo, setSwitchingTo] = useState<typeof mode | null>(null), [previewBusy, setPreviewBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null), [preview, setPreview] = useState<PolicyPreview | null>(null);
+  const request = useRef<AbortController | null>(null), id = useId();
+  const fields = useMemo(() => ({ ...schemaFields(schema), ...schemaFields(operationSchema ?? undefined, 'operation'),
+    'context.user_id': { type: 'string' }, 'context.session_id': { type: 'string' }, 'context.tool_name': { type: 'string' },
+    'context.call_id': { type: 'string' }, 'context.attributes': { type: 'object' } }), [schema, operationSchema]);
+  useEffect(() => () => request.current?.abort(), []);
+  const signal = () => { request.current?.abort(); request.current = new AbortController(); return request.current.signal; };
+  const formPolicy = (): Policy => ({ default: fallback, rules: rules.map(({ key: _key, when, ...rule }) => ({ ...rule, when: buildCondition(when) })) });
+  const normalize = async () => {
+    const result = await settingsApi.parsePolicy(mode === 'form' ? JSON.stringify(formPolicy()) : text, mode === 'yaml' ? 'yaml' : 'json', signal());
+    setFallback(result.policy.default);
+    return result;
+  };
   const updateRule = (index: number, patch: Partial<DraftRule>) => { setRules(values => values.map((rule, i) => i === index ? { ...rule, ...patch } : rule)); setPreview(null); };
-  const condition = (ruleIndex: number, index: number, patch: Partial<DraftCondition>) => updateRule(ruleIndex, { conditions: rules[ruleIndex].conditions.map((value, i) => i === index ? { ...value, ...patch } : value) });
-  const move = (index: number, by: number) => setRules(values => { const next = [...values]; [next[index], next[index + by]] = [next[index + by], next[index]]; return next; });
-  const test = async () => { setPreviewBusy(true); setError(null); operation.current = new AbortController(); try { const result = await settingsApi.preview(build(), toolName, JSON.parse(args), JSON.parse(operations), operation.current.signal); setPreview(result.decision); } catch (error) { if (!operation.current.signal.aborted) setError(errorText(error)); } finally { setPreviewBusy(false); } };
-  return <form className="settings-form settings-policy-form" onSubmit={async event => { event.preventDefault(); if (busy || previewBusy) return; setBusy(true); setError(null); try { await onSave(build()); } catch (error) { setError(errorText(error)); } finally { setBusy(false); } }}>
-    <p className="settings-description">Rules use validated Tool arguments or normalized operations. The last matching rule wins. Every operation in a call must be permitted.</p>
-    {dynamic ? <p className="settings-help">This Tool currently uses a code-defined policy. Saving here replaces that policy for the Agent application. Other Workflows keep their original policy.</p> : null}
-    <fieldset disabled={busy || previewBusy}>{schema ? <details className="settings-input-schema"><summary>Tool input schema</summary><pre>{JSON.stringify(schema, null, 2)}</pre></details> : null}<div className="settings-subheading"><label>Default decision<DecisionSelect label="Default decision" value={fallback} disabled={jsonMode} onChange={setFallback} /></label><button type="button" onClick={() => { if (!jsonMode) { setJson(JSON.stringify(build(), null, 2)); setJsonMode(true); } else { try { const parsed = parsePolicy(json); setFallback(parsed.default); setRules(toDraft(parsed.rules)); setJsonMode(false); setError(null); } catch (error) { setError(errorText(error)); } } }}>{jsonMode ? 'Use rule builder' : 'Edit policy JSON'}</button></div>
-    {jsonMode ? <label>Policy JSON<textarea className="settings-code-input" rows={14} value={json} onChange={event => { setJson(event.target.value); setPreview(null); }} spellCheck={false} /></label> : <><datalist id={`${id}-paths`}>{schemaPaths(schema).map(path => <option value={path} key={path} />)}</datalist>{rules.map((rule, index) => <section className="settings-policy-rule" key={index}><div className="settings-rule-heading"><strong>Rule {index + 1}</strong><DecisionSelect label={`Rule ${index + 1} decision`} value={rule.decision} onChange={decision => updateRule(index, { decision })} /><label className="settings-match">Match<select aria-label={`Rule ${index + 1} match`} value={rule.match} onChange={event => updateRule(index, { match: event.target.value as Rule['match'] })}><option value="all">All conditions</option><option value="any">Any condition</option></select></label><div className="settings-row-actions"><button type="button" className="settings-icon" disabled={index === 0} aria-label={`Move rule ${index + 1} up`} onClick={() => move(index, -1)}><span className="settings-up"><AgentIcon name="down" /></span></button><button type="button" className="settings-icon" disabled={index === rules.length - 1} aria-label={`Move rule ${index + 1} down`} onClick={() => move(index, 1)}><AgentIcon name="down" /></button><button type="button" className="settings-icon" aria-label={`Delete rule ${index + 1}`} onClick={() => setRules(values => values.filter((_, i) => i !== index))}><AgentIcon name="close" /></button></div></div>
-      {rule.conditions.map((value, i) => <div className="settings-condition" key={i}><label>Source<select aria-label={`Rule ${index + 1} condition ${i + 1} source`} value={value.source} onChange={event => condition(index, i, { source: event.target.value as Condition['source'] })}><option value="arguments">Arguments</option><option value="operation">Operation</option><option value="call">Tool call</option></select></label><label>Field · JSON Pointer<input aria-label={`Rule ${index + 1} condition ${i + 1} field`} list={value.source === 'arguments' ? `${id}-paths` : undefined} value={value.path} onChange={event => condition(index, i, { path: event.target.value })} placeholder={value.source === 'operation' ? '/resource' : '/path'} /></label><label>Operator<select aria-label={`Rule ${index + 1} condition ${i + 1} operator`} value={value.operator} onChange={event => condition(index, i, { operator: event.target.value as Operator })}>{operators.map(operator => <option key={operator}>{operator}</option>)}</select></label><label>Value · JSON or text<input aria-label={`Rule ${index + 1} condition ${i + 1} value`} value={value.valueText} onChange={event => condition(index, i, { valueText: event.target.value })} placeholder={'"*.env"'} spellCheck={false} /></label><button type="button" className="settings-icon" aria-label={`Remove rule ${index + 1} condition ${i + 1}`} onClick={() => updateRule(index, { conditions: rule.conditions.filter((_, position) => position !== i) })}><AgentIcon name="close" /></button></div>)}
-      {!rule.conditions.length ? <p className="settings-help">No conditions: this rule matches every call.</p> : null}<div className="settings-rule-bottom"><button type="button" onClick={() => updateRule(index, { conditions: [...rule.conditions, { source: 'arguments', path: '', operator: 'equals', valueText: 'null' }] })}>Add condition</button><input aria-label={`Rule ${index + 1} explanation`} value={rule.reason ?? ''} onChange={event => updateRule(index, { reason: event.target.value || null })} placeholder="Optional explanation for the Agent" /></div>
-    </section>)}<button type="button" disabled={rules.length >= 256} onClick={() => setRules(values => [...values, { decision: 'ask', match: 'all', conditions: [{ source: 'arguments', path: '', operator: 'equals', valueText: 'null' }] }])}>Add rule</button></>}
-    <section className="settings-policy-preview"><h4>Try an example</h4><p className="settings-help">Preview only. This does not execute the Tool or grant approval.</p><label>Tool name for this example<input value={toolName} onChange={event => { setToolName(event.target.value); setPreview(null); }} /></label><label>Arguments JSON<textarea rows={3} value={args} onChange={event => { setArgs(event.target.value); setPreview(null); }} spellCheck={false} /></label><details><summary>Normalized operations JSON · optional</summary><textarea aria-label="Normalized operations JSON" rows={3} value={operations} onChange={event => { setOperations(event.target.value); setPreview(null); }} spellCheck={false} placeholder={'[{"action":"file.read","resource":"/project/.env"}]'} /></details><div className="settings-connection-test"><button type="button" onClick={() => void test()}><BusyLabel busy={previewBusy} label="Checking">Preview decision</BusyLabel></button>{preview ? <output className={`settings-policy-result ${preview.action}`}>{preview.action}{preview.reason ? ` · ${preview.reason}` : ''}</output> : null}</div></section>
-    </fieldset><FormError message={error} /><FormActions busy={busy} disabled={previewBusy} onCancel={onCancel} />
+  const changeMode = async (next: typeof mode) => {
+    if (next === mode) return;
+    setSwitchingTo(next); setError(null);
+    try { const normalized = await normalize(); setFallback(normalized.policy.default); setRules(draftRules(normalized.policy.rules)); setText(next === 'yaml' ? normalized.yaml : JSON.stringify(normalized.policy, null, 2)); setMode(next); }
+    catch (error) { if (!request.current?.signal.aborted) setError(errorText(error)); }
+    finally { setSwitchingTo(null); }
+  };
+  const test = async () => {
+    setPreviewBusy(true); setError(null); setPreview(null);
+    try { const normalized = await normalize(); const result = await settingsApi.preview(normalized.policy, toolName, JSON.parse(args), operationSchema ? JSON.parse(operations) : [], JSON.parse(context), signal()); setPreview(result); }
+    catch (error) { if (!request.current?.signal.aborted) setError(errorText(error)); }
+    finally { setPreviewBusy(false); }
+  };
+  const switching = switchingTo !== null;
+  const locked = busy || previewBusy || switching;
+  return <form className="settings-form settings-policy-form" aria-busy={locked} onSubmit={async event => {
+    event.preventDefault(); if (locked) return; setBusy(true); setError(null);
+    try { const normalized = await normalize(); await onSave(normalized.policy); }
+    catch (error) { if (!request.current?.signal.aborted) setError(errorText(error)); }
+    finally { setBusy(false); }
+  }}>
+    <fieldset disabled={locked}><div className="settings-subheading"><label>Default decision<DecisionSelect label="Default decision" value={fallback} disabled={mode !== 'form'} onChange={value => { setFallback(value); setPreview(null); }} /></label><div className="settings-policy-modes" role="group" aria-label="Policy format">{(['form', 'json', 'yaml'] as const).map(value => <button type="button" key={value} aria-pressed={mode === value} onClick={() => void changeMode(value)}><BusyLabel busy={switchingTo === value} label={value === 'form' ? 'Builder' : value.toUpperCase()}>{value === 'form' ? 'Builder' : value.toUpperCase()}</BusyLabel></button>)}</div></div>
+    <span className="settings-origin">Deny &gt; Ask &gt; Allow</span>
+    {mode !== 'form' ? <label>Policy {mode.toUpperCase()}<textarea className="settings-code-input" rows={14} value={text} onChange={event => { setText(event.target.value); setPreview(null); }} spellCheck={false} /></label> : <>
+      <datalist id={`${id}-paths`}>{Object.keys(fields).map(path => <option value={path} key={path} />)}</datalist>
+      {rules.map((rule, index) => <section className="settings-policy-rule" key={rule.key}><div className="settings-rule-heading"><strong>Rule {index + 1}</strong><DecisionSelect label={`Rule ${index + 1} decision`} value={rule.decision} onChange={decision => updateRule(index, { decision })} /><button className="settings-icon" type="button" aria-label={`Delete rule ${index + 1}`} onClick={() => { setRules(values => values.filter((_, i) => i !== index)); setPreview(null); }}><AgentIcon name="close" /></button></div>
+        <ConditionEditor value={rule.when} onChange={when => updateRule(index, { when })} paths={`${id}-paths`} fields={fields} label={`Rule ${index + 1}`} />
+        <div className="settings-rule-bottom"><label>Rule ID<input value={rule.id ?? ''} onChange={event => updateRule(index, { id: event.target.value || null })} /></label><label>Reason<input value={rule.reason ?? ''} onChange={event => updateRule(index, { reason: event.target.value || null })} /></label></div>
+      </section>)}<button type="button" disabled={rules.length >= 256} onClick={() => { setRules(values => [...values, { key: newId(), id: newId(), decision: 'ask', when: newCondition(schemaPaths(schema)[0] ?? 'args') }]); setPreview(null); }}>Add rule</button>
+    </>}
+    {schema ? <details className="settings-input-schema"><summary>Tool input schema</summary><pre>{JSON.stringify(schema, null, 2)}</pre></details> : null}
+    <section className="settings-policy-preview"><h4>Try an example</h4><label>Tool name<input value={toolName} onChange={event => { setToolName(event.target.value); setPreview(null); }} /></label><label>Arguments JSON<textarea rows={3} value={args} onChange={event => { setArgs(event.target.value); setPreview(null); }} spellCheck={false} /></label>
+      {operationSchema ? <details><summary>Operations JSON</summary><textarea aria-label="Operations JSON" rows={4} value={operations} onChange={event => { setOperations(event.target.value); setPreview(null); }} spellCheck={false} /></details> : null}
+      <details><summary>Context JSON</summary><textarea aria-label="Context JSON" rows={3} value={context} onChange={event => { setContext(event.target.value); setPreview(null); }} spellCheck={false} placeholder={'{"user_id":"alice","attributes":{"role":"reviewer"}}'} /></details>
+      <div className="settings-connection-test"><button type="button" onClick={() => void test()}><BusyLabel busy={previewBusy} label="Checking">Preview decision</BusyLabel></button>{preview ? <output className={`settings-policy-result ${preview.decision.action}`}>{preview.decision.action}{preview.decision.reason ? ` · ${preview.decision.reason}` : ''}</output> : null}</div>
+      {preview ? <ul className="settings-policy-matches">{preview.operations.map((operation, index) => <li key={index}>{operation.default_used ? 'Default decision' : operation.matched_rules.map(rule => rule.id ?? `Rule ${rule.index + 1}`).join(', ')}</li>)}</ul> : null}
+    </section></fieldset><FormError message={error} /><FormActions busy={busy} disabled={previewBusy || switching} onCancel={onCancel} />
   </form>;
 }

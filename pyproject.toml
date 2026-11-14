@@ -34,6 +34,7 @@ skills = [
   "PyYAML>=6,<7",
 ]
 agent = [
+  "PyYAML>=6,<7",
   "tree-sitter>=0.25,<0.26",
   "tree-sitter-bash>=0.25,<0.26",
   "tree-sitter-powershell>=0.26,<0.27",

@@ -89,8 +89,9 @@ class SSEStream(httpx2.AsyncByteStream if httpx2 is not None else object):
 
 class WireServer:
     """A JSON-RPC wire peer; transports and sessions are the actual MCP SDK."""
-    def __init__(self, *, legacy=False, bearer=None, result=None):
+    def __init__(self, *, legacy=False, bearer=None, result=None, list_changed=False):
         self.legacy = legacy
+        self.list_changed = list_changed
         self.bearer = bearer
         self.requests = []
         self.calls = []
@@ -114,7 +115,7 @@ class WireServer:
         if method == "server/discover":
             if self.legacy:
                 return {"jsonrpc": "2.0", "id": message["id"], "error": {"code": -32601, "message": "Method not found"}}
-            result = {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "resultType": "complete"}
+            result = {"supportedVersions": ["2026-07-28"], "capabilities": {"tools": {"listChanged": self.list_changed}, "resources": {}, "prompts": {}}, "resultType": "complete"}
         elif method == "initialize":
             result = {"protocolVersion": "2025-11-25", "capabilities": {"tools": {}, "resources": {}, "prompts": {}}, "serverInfo": {"name": "test", "version": "1"}}
         elif method == "tools/list":

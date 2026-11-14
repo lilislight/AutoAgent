@@ -84,7 +84,7 @@ entrypoint="{self.module}:review"
         self.assertEqual(code, 0, stderr)
         self.assertTrue(report["ok"])
         self.assertEqual(report["source"]["name"], "cli-example")
-        self.assertEqual(report["data"]["summary"]["workflows"], 2)
+        self.assertEqual(report["data"]["summary"]["workflows"], 1)
         self.assertIn("project import log", stderr)
         self.assertIn("project factory log", stderr)
         self.assertFalse((self.root / ".autoagent").exists())

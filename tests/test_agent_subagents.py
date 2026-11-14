@@ -10,6 +10,7 @@ import threading
 import unittest
 
 from autoagent.agent import (
+    AgentResources,
     AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentInput, AgentSignalMessage, LLMMessage, LLMResponse, LLMToolCall,
     LLMToolResult, SubagentsConfig, SubagentTarget, Tool, agent_workflow,
     LLMStreamChunk,
@@ -97,17 +98,16 @@ class SubagentContracts:
 
     @asynccontextmanager
     async def host(self, provider, *, url=None, root_config=None, child_config=None, defaults=None, tools=()):
+        resources = AgentResources(tools=tools)
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider("offline", provider)
-            setup.agent_context.set_defaults(defaults or settings())
-            for tool in tools:
-                setup.agent_context.resources.register_tool(tool, workflows={"agent", "worker"})
+            setup.providers.register("offline", provider)
+            setup.extensions["agent"].context.set_defaults(defaults or settings())
             yield
         config = root_config or SubagentsConfig(enabled=True, targets={"worker": SubagentTarget(workflow_id="worker")})
         child = child_config or SubagentsConfig(enabled=True)
-        async with AutoAgentHost(workflows=[agent_workflow(subagents=config),
-            agent_workflow(workflow_id="worker", subagents=child)], lifespan=lifespan,
+        async with AutoAgentHost(workflows=[agent_workflow(subagents=config, resources=resources),
+            agent_workflow(workflow_id="worker", subagents=child, resources=resources)], lifespan=lifespan,
             settings=HostSettings(database_url=url or await self.database_url()), environment={}) as host:
             yield host
 
@@ -141,10 +141,10 @@ class SubagentContracts:
             return answer("child result")
         provider = RoutedProvider([response(call("spawn_agent", {"type": "worker", "task": "child task"})), query, done], child)
         async with self.host(provider) as host:
-            await host.agent_context.configure("session", settings(model="chosen-model").session_defaults())
+            await host.extensions["agent"].context.configure("session", settings(model="chosen-model").session_defaults())
             result = await self.run_agent(host, session_id="session")
             self.assertEqual(result.status, "completed", result.error)
-            snapshot = await host.agent_context.get_snapshot(child_ids[0])
+            snapshot = await host.extensions["agent"].context.get_snapshot(child_ids[0])
             self.assertEqual(snapshot.settings.model.model, "chosen-model")
 
     async def test_run_agent_joins_result_through_native_select(self):

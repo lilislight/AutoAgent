@@ -12,3 +12,6 @@ __all__ = ["CommandRule", "ExecutionToolsConfig", "ExecCommand", "ShellCommand",
     "ExecutionOutputLog", "ExecutionBackend", "ExecutionCapabilities", "ProcessHandle", "ResolvedExecution", "ShellAnalysis",
     "ShellCommandAnalyzer", "TreeSitterShellAnalyzer", "LocalExecutionBackend", "ProcessManager",
     "ExecutionService", "LocalExecutionService", "execution_tools"]
+
+from .group import CommandTools
+__all__ += ["CommandTools"]

@@ -210,7 +210,7 @@ class LiteLLMContractTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_optional_sdk_has_actionable_install_error(self):
         """Using the optional backend fails lazily with the correct extra name."""
         provider = LiteLLMProvider()
-        with patch("autoagent.agent.providers.litellm.importlib.import_module", side_effect=ImportError("absent")):
+        with patch("autoagent.agent.providers.litellm.load_litellm_sdk", side_effect=ImportError("absent")):
             with self.assertRaisesRegex(ImportError, r"autoagent\[litellm\]"):
                 await provider.ainvoke(request())
         await provider.aclose()

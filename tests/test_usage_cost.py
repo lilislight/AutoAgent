@@ -28,28 +28,24 @@ class CostCalculatorTests(unittest.TestCase):
     def test_decimal_costs_split_cache_and_reasoning_without_double_counting(self):
         """Cache and reasoning replace their portions of ordinary input/output charges."""
         pricing = self.price(input_per_million_usd="1", output_per_million_usd="3",
-                             cached_input_per_million_usd="0.2", cache_creation_per_million_usd="2")
+                             cached_input_per_million_usd="0.2")
         record = completed(running(), input_tokens=100, output_tokens=2, total_tokens=102,
                            cache_read_tokens=60, billing_details={"usage": {"cache_creation_input_tokens": 10}})
-        self.assertEqual(pricing.calculate(record).units, usd_units("0.000068"))
+        self.assertEqual(pricing.calculate(record).units, usd_units("0.000058"))
         exclusive = completed(running(), input_tokens=30, output_tokens=2, total_tokens=32,
                               cache_read_tokens=60, billing_details={"input_excludes_cache": True,
                                                                   "usage": {"cache_creation_input_tokens": 10}})
         self.assertEqual(pricing.calculate(exclusive).units, pricing.calculate(record).units)
-        reasoning = self.price(input_per_million_usd="1", output_per_million_usd="3", reasoning_per_million_usd="10")
+        reasoning = self.price(input_per_million_usd="1", output_per_million_usd="3")
         result = reasoning.calculate(completed(running(), output_tokens=5, reasoning_tokens=2))
-        self.assertEqual(result.units, usd_units("0.000032"))
+        self.assertEqual(result.units, usd_units("0.000018"))
 
-    def test_missing_rates_or_billing_details_remain_unknown_and_explicit_zero_is_zero(self):
-        """Unknown pricing is not free; explicit local zero overrides can be free without usage."""
-        self.assertIsNone(LocalTokenPricing(use_litellm_catalog=False).calculate(completed(running())).units)
-        zero = self.price(input_per_million_usd="0", output_per_million_usd="0")
-        self.assertEqual(zero.calculate(completed(running(), input_tokens=None, output_tokens=None, total_tokens=None)).units, 0)
-        cache = self.price(input_per_million_usd="1", output_per_million_usd="3", cached_input_per_million_usd="0.2")
-        self.assertEqual(cache.calculate(completed(running())).metadata["reason"], "cache_read_usage_missing")
-        plain = self.price(input_per_million_usd="1", output_per_million_usd="3")
-        self.assertIsNone(plain.calculate(completed(running(), billing_details={"unsupported_modalities": True})).units)
-        self.assertIsNone(plain.calculate(completed(running(), billing_details={"billable_tools": True})).units)
+    def test_missing_prices_are_zero_and_only_three_token_categories_are_charged(self):
+        """Missing prices are free and unsupported billing dimensions never create extra charges."""
+        self.assertEqual(LocalTokenPricing().calculate(completed(running())).units, 0)
+        price = self.price(input_per_million_usd="1", output_per_million_usd="3")
+        for details in ({"unsupported_modalities":True}, {"billable_tools":True}, {"service_tier":"priority"}):
+            self.assertEqual(price.calculate(completed(running(), billing_details=details)).units, usd_units("0.000009"))
 
     def test_fixed_point_rounding_and_policy_validation_are_exact(self):
         """Round computed charges once to pico-USD and reject ambiguous budget representations."""
@@ -71,9 +67,9 @@ class CostCalculatorTests(unittest.TestCase):
             old = LocalTokenPricing(catalog_path=path)
             ordinary = old.calculate(completed(running()))
             priority = old.calculate(completed(running(), billing_details={"service_tier": "priority"}))
-            self.assertEqual(priority.units, usd_units("0.000014"))
+            self.assertEqual(priority.units, ordinary.units)
             long = old.calculate(completed(running(), input_tokens=32_001))
-            self.assertEqual(long.units, usd_units("0.160017"))
+            self.assertEqual(long.units, usd_units("0.032007"))
             entry["input_cost_per_token"] = "0.000010"
             path.write_text(json.dumps({"model": entry}))
             new = LocalTokenPricing(catalog_path=path).calculate(completed(running()))
@@ -85,13 +81,13 @@ class CostCalculatorTests(unittest.TestCase):
         """Reading the installed rate catalog neither imports LiteLLM nor issues HTTP."""
         before = sys.modules.get("litellm")
         with patch("httpx.get", side_effect=AssertionError("Unexpected HTTP")):
-            pricing = LocalTokenPricing()
+            pricing = LocalTokenPricing(use_litellm_catalog=True)
             info = pricing.catalog_info
             self.assertGreater(info["model_count"], 100)
             result = pricing.calculate(completed(running(provider_id="openai", requested_model="gpt-4o-mini"), cache_read_tokens=0))
         self.assertIs(sys.modules.get("litellm"), before)
         self.assertIsNotNone(result.units)
-        self.assertEqual(result.metadata["source"], "litellm_local_catalog")
+        self.assertEqual(result.metadata["source"], "local_catalog")
 
 
 class CostStorageContracts:
@@ -159,17 +155,13 @@ class CostStorageContracts:
         rows = await read_rows(self.url, select(llm_calls).where(llm_calls.c.llm_call_id == "one"))
         self.assertEqual(rows[0]["cost_metadata"], before)
 
-    async def test_missing_price_blocks_cost_limits_without_breaking_token_only_usage(self):
-        """Unknown costs remain unknown and obey the same explicit unknown policy as tokens."""
+    async def test_missing_price_is_zero_and_does_not_block_cost_limits(self):
+        """Unpriced usage settles to zero while token budgets still account for every token."""
         await self.sink.record_llm_call(completed(running(requested_model="unpriced")))
         summary = await self.sink.token_usage()
-        self.assertIsNone(summary.cost_usd)
-        self.assertEqual((summary.total_tokens, summary.missing_cost_calls), (5, 1))
-        with self.assertRaises(UsageAccountingError):
-            await self.sink.admit_llm_call(running(llm_call_id="blocked"),
-                (TokenUsageCheck("cost", UsagePolicy(max_cost_usd="1"), TokenUsageQuery()),))
-        await self.sink.admit_llm_call(running(llm_call_id="token-only"),
-            (TokenUsageCheck("tokens", UsagePolicy(max_total_tokens=10), TokenUsageQuery()),))
+        self.assertEqual((summary.cost_usd, summary.missing_cost_calls, summary.total_tokens), ("0", 0, 5))
+        await self.sink.admit_llm_call(running(llm_call_id="allowed"),
+            (TokenUsageCheck("cost", UsagePolicy(max_cost_usd="1"), TokenUsageQuery()),))
 
     async def test_calculator_failure_retains_tokens_and_persists_unknown_cost(self):
         """A broken price calculation cannot discard settled tokens or record free usage."""

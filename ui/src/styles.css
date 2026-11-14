@@ -184,6 +184,8 @@ a {
   letter-spacing:-.4px;
 }
 
+.topbar-leading { display:flex; align-items:center; gap:10px; flex-shrink:0; min-width:0; }
+
 .brand-symbol { display:block; width:36px; height:36px; flex-shrink:0; }
 
 .local-badge {
@@ -2127,6 +2129,8 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .tool-button[aria-pressed="true"],.tool-button[aria-expanded="true"] { color:var(--accent); background:var(--selected); }
 .ui-tooltip { position:fixed; inset:auto; margin:0; z-index:10000; pointer-events:none; max-width:min(420px,calc(100vw - 16px)); max-height:min(260px,calc(100vh - 16px)); overflow:auto; overscroll-behavior:contain; padding:9px 12px; border:1px solid var(--line-strong); border-radius:7px; color:var(--text); background:var(--surface); box-shadow:var(--shadow); font-family:inherit; font-size:12px; line-height:1.5; white-space:pre-wrap; overflow-wrap:anywhere; transform-origin:left center; animation:tooltip-enter-right 80ms var(--popup-enter-easing); }
 .ui-tooltip[data-side="left"] { transform-origin:right center; animation-name:tooltip-enter-left; }
+.ui-tooltip[data-side="top"] { transform-origin:center bottom; animation-name:tooltip-enter-top; }
+.ui-tooltip[data-side="bottom"] { transform-origin:center top; animation-name:tooltip-enter-bottom; }
 .value-tip { display:block; margin:0 0 6px; }
 .value-tip:last-child { margin-bottom:0; }
 .value-tip>strong { display:block; color:var(--muted); font-size:11px; font-weight:500; }
@@ -2146,6 +2150,8 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
 .execution-actions-menu>button.is-danger { color:var(--edge-fail); }
 @keyframes tooltip-enter-right { from { opacity:0; transform:translateX(-3px); } to { opacity:1; transform:translateX(0); } }
 @keyframes tooltip-enter-left { from { opacity:0; transform:translateX(3px); } to { opacity:1; transform:translateX(0); } }
+@keyframes tooltip-enter-top { from { opacity:0; transform:translateY(3px); } to { opacity:1; transform:translateY(0); } }
+@keyframes tooltip-enter-bottom { from { opacity:0; transform:translateY(-3px); } to { opacity:1; transform:translateY(0); } }
 @media(prefers-reduced-motion:reduce) { .ui-tooltip { animation:none; } }
 
 /* JSON search reads the loaded value; tree windows remain bounded to 50 fields. */

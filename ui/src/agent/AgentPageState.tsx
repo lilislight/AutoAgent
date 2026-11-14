@@ -3,13 +3,13 @@ import { BusyLabel, ConversationSkeleton } from '../components/LoadingState.js';
 import { AgentComposer } from './AgentComposer.js';
 
 interface Props {
-  title: string; sidebar: boolean; onSidebar: () => void;
+  title: string;
   loading?: boolean; error?: Error | null; retrying?: boolean; onRetry?: () => void;
 }
 const noop = () => {};
 
 /** Keep navigation and the two-line composer in their final positions during reads. */
-export function AgentPageState({ sidebar, onSidebar, loading, error, retrying, onRetry }: Props) {
+export function AgentPageState({ loading, error, retrying, onRetry }: Props) {
   const inputRef = useRef<HTMLTextAreaElement>(null), id = useId();
   return <main className="agent-chat" aria-label="Agent conversation">
     <div className="agent-feed-shell"><div className="agent-chat-scroll">
@@ -19,8 +19,8 @@ export function AgentPageState({ sidebar, onSidebar, loading, error, retrying, o
       {error && onRetry ? <button disabled={retrying} onClick={onRetry}><BusyLabel busy={retrying} label="Retrying">Retry</BusyLabel></button> : null}
     </div>}
     <div className="agent-composer-dock"><div className="agent-composer-area"><AgentComposer session={id} draft="" busy={false} running={false} disabled canSend={false} controlsDisabled
-      primary={{ kind: 'send', label: 'Send message', disabled: true, working: false }} onControl={noop} inputRef={inputRef} sidebar={sidebar} onSidebar={onSidebar}
-      onDraft={noop} onSend={noop} onPanel={noop} model={loading ? 'Loading model' : 'Unavailable'} caption={loading ? 'Loading chat…' : 'Chat unavailable'} /></div></div>
+      primary={{ kind: 'send', label: 'Send message', disabled: true, working: false }} onControl={noop} inputRef={inputRef}
+      onDraft={noop} onSend={noop} contextLoading={loading} caption={loading ? 'Loading chat…' : 'Chat unavailable'} /></div></div>
     </div></div>
   </main>;
 }

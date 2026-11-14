@@ -48,8 +48,8 @@ class OfflineProvider:
 
 @asynccontextmanager
 async def lifespan(setup):
-    setup.agent_context.resources.register_provider("offline", OfflineProvider())
-    setup.agent_context.set_defaults(AgentHostSettings(
+    setup.providers.register("offline", OfflineProvider())
+    setup.extensions["agent"].context.set_defaults(AgentHostSettings(
         model=AgentModelSettings(provider="offline", model="demo-model")))
     yield
 

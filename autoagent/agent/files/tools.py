@@ -7,6 +7,7 @@ from ..tools import Tool, ToolContext, ToolSet, ToolBusinessError
 from ..tools.operations import ToolOperationPolicy
 from .models import FileEdit, FileManagement
 from .service import FileService
+from .operations import FILE_OPERATION_SCHEMA
 
 Positive = Annotated[int, Field(gt=0)]
 PageSize = Annotated[int, Field(gt=0, le=1000)]
@@ -29,8 +30,8 @@ class _FileTool(Tool):
             "exclude": "Glob patterns excluded from traversal; matching directories are pruned. Explicit path selection is better than scanning a large tree.",
             "cursor": "Opaque continuation from this tool. Keep path, filters and search options unchanged; limit may change. On a changed query or directory, restart without cursor. Never synthesize a cursor.",
             "limit": "Maximum result rows on this page, not total entries scanned or total matches. May change while continuing with cursor.",
-            "expected_version": "Optional version from a previous read or mutation. If omitted, use this Session's last read version. After a successful edit, pass its returned version for another edit or re-read; a stale version never authorizes overwrite.",
-            "overwrite": "False creates only and rejects an existing path. True requires a previous read or expected_version; it does not bypass conflict or permission checks.",
+            "expected_version": "Optional version precondition from a read or mutation. Omit for ordinary writes and edits. If supplied, the current file must match it; stale versions are rejected.",
+            "overwrite": "False creates only and rejects an existing path. True replaces the entire file. Neither a prior read nor expected_version is required; access permissions still apply.",
             "max_bytes": "Maximum returned UTF-8 text bytes including line labels, not the maximum file size. Continue long lines using next_line and next_column.",
             "case_sensitive": "True by default. Set false explicitly for case-insensitive content search; path glob matching stays case-sensitive.",
             "regex": "False by default: query is literal text. Set true for a regular expression; do not escape literal searches as regexes.",
@@ -90,21 +91,21 @@ def file_tools(service: FileService, *, context: ToolContext | None = None) -> T
     def read_file(path: str, start_line: Positive = 1, start_column: Positive = 1,
                   max_lines: Annotated[int, Field(gt=0, le=2000)] = 200,
                   max_bytes: Positive = min(32768, service.config.max_output_bytes)) -> ToolOutput:
-        """Read numbered text lines and internally remember its version for safe edits. Continue with next_line/next_column as start_line/start_column (columns count Unicode characters). Supported images return image content; other binary files are rejected."""
+        """Read numbered text lines and return an optional version precondition for later mutations. Continue with next_line/next_column as start_line/start_column (columns count Unicode characters). Supported images return image content; other binary files are rejected."""
         return execute("read_file")
 
     def write_file(path: str, content: str, overwrite: bool = False,
                    expected_version: str | None = None, create_parents: bool = False) -> ToolOutput:
-        """Create a UTF-8 text file; existing files require overwrite and a prior read or expected_version. Returns confirmation and a version for subsequent operations; diff stays in execution metadata."""
+        """Create a UTF-8 file, or replace its entire contents with overwrite=true. No prior read is required. Use edit_file for partial changes. Returns confirmation and a version; diff stays in execution metadata."""
         return execute("write_file")
 
     def edit_file(path: str, edits: Annotated[list[FileEdit], Field(min_length=1, max_length=100)],
                   expected_version: str | None = None) -> ToolOutput:
-        """Apply unique non-overlapping exact replacements to one previously read file. All edits use the same original version and commit together. Re-read on version_conflict."""
+        """Edit an existing file using exact text replacements. No prior read or version is required. All replacements use the same original content and commit together. Matches must be unique unless replace_all=true."""
         return execute("edit_file")
 
     def manage_files(request: FileManagement) -> ToolOutput:
-        """Stat, mkdir, copy/move a regular file, or delete an explicit path. Transfers never overwrite. Move/delete files require a prior read or version. Delete removes only files or empty directories."""
+        """Stat, mkdir, copy/move a regular file, or delete an explicit path. Transfers never overwrite. expected_version is optional for move/delete. Delete removes only files or empty directories."""
         return execute("manage_files")
 
     handlers = (list_files, search_files, read_file, write_file, edit_file, manage_files)
@@ -116,5 +117,5 @@ def file_tools(service: FileService, *, context: ToolContext | None = None) -> T
                 return service.operations(name, arguments, current)
             except OSError as error:
                 raise ToolBusinessError("File target is unavailable: " + str(error), code="file_target_unavailable") from error
-        tools.append(_FileTool(handler, service, operations=resolve))
+        tools.append(_FileTool(handler, service, operations=resolve, operation_schema=FILE_OPERATION_SCHEMA))
     return ToolSet(tools, context=context, policy=ToolOperationPolicy(service.evaluate))

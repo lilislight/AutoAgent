@@ -106,6 +106,12 @@ def common_parameters(request: LLMRequest, protocol: str, provider_id: str) -> d
         if values.get("background"):
             unsupported("Background jobs are not bounded LLM calls.", provider_id, protocol)
         result["extra_body"] = values
+    if request.reasoning_effort is not None:
+        extra = result.setdefault("extra_body", {})
+        if protocol == "openai.responses":
+            extra["reasoning"] = {**extra.get("reasoning", {}), "effort": request.reasoning_effort}
+        else:
+            extra["reasoning_effort"] = request.reasoning_effort
     return result
 
 

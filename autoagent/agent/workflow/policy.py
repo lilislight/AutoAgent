@@ -33,9 +33,10 @@ def item_characters(item):
 
 def fixed_characters(preparation):
     from .projection import project_items
+    from .runtime_context import time_characters
     return sum(item_characters(item) for item in project_items(preparation.fixed_input, preparation.replay_target)) + (
         len(json.dumps([tool.model_dump(mode="json", exclude_none=True) for tool in preparation.tools],
-                       ensure_ascii=False, separators=(",", ":"))) if preparation.tools else 0)
+                       ensure_ascii=False, separators=(",", ":"))) if preparation.tools else 0) + time_characters(preparation)
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,8 @@ class UsagePlusCharacters:
                 and anchor.view_generation == history.view.generation):
             trailing = sum(item_characters(item) for item in project_history(
                 history, preparation.replay_target, start=anchor.source_count))
+            from .runtime_context import time_characters
+            trailing += time_characters(preparation)
             return TokenEstimate(input_tokens=anchor.input_tokens + math.ceil(trailing / self.chars_per_token), anchored=True)
         size = fixed_characters(preparation) + sum(item_characters(item) for item in project_history(history, preparation.replay_target))
         return TokenEstimate(input_tokens=math.ceil(size / self.chars_per_token))
@@ -105,7 +108,8 @@ class CompactionInput:
 
     async def estimate(self, view: ContextView) -> TokenEstimate:
         from .history import Conversation
-        candidate = Conversation(items=self.conversation.items, view=view, origins=self.conversation.origins)
+        candidate = Conversation(items=self.conversation.items, view=view, origins=self.conversation.origins,
+            runtime_times=self.conversation.runtime_times if view == self.view else {})
         return await self.policy.estimate_input(self.preparation.model_copy(update={"conversation": candidate}))
 
     def over_limit(self, estimate: TokenEstimate) -> bool:
@@ -116,7 +120,8 @@ class CompactionInput:
         from .compaction import LLMHistoryCompactor
         from .history import Conversation
         preparation = self.preparation.model_copy(update={"conversation": Conversation(
-            items=self.conversation.items, view=view, origins=self.conversation.origins)})
+            items=self.conversation.items, view=view, origins=self.conversation.origins,
+            runtime_times=self.conversation.runtime_times if view == self.view else {})})
         return await LLMHistoryCompactor()(CompactionInput(preparation, self.policy, self.budget,
                                                         await self.policy.estimate_input(preparation)))
 

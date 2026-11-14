@@ -43,6 +43,14 @@ class LLMUnsupportedRequest(LLMProviderError):
 
 
 class LLMProvider(ABC):
+    def context_message_role(self, model: str | None = None) -> str:
+        """Select a safe carrier for late, application-authored runtime facts.
+
+        Compatible endpoints may reject or hoist late system messages. Providers
+        can opt into that role when their model transport preserves its position.
+        """
+        return "user"
+
     @abstractmethod
     async def ainvoke(self, request: LLMRequest) -> LLMResponse:
         """Return one terminal model response."""

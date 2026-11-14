@@ -38,6 +38,9 @@ class ExecutionControls:
             respond=action(active and not stopping and bool(data['waits']),'There are no pending external responses.'),
             signal=action(selected['status'] in ('running','waiting') and not stopping and bool(endpoints),'No declared Signal Endpoint is currently available.'),
             run_again=dict(available=selected['workflow_revision_id'] in self._runtime.revisions,reason=None if selected['workflow_revision_id'] in self._runtime.revisions else 'This exact Revision is not registered in this Host.'))
+        from types import SimpleNamespace
+        if not self._extensions.allows_recovery(root["workflow_revision_id"], SimpleNamespace(status=root["status"], control_state=control), interrupted=interrupted):
+            actions["recover"] = dict(available=False, reason="This task ended or was interrupted. Send a new message to continue.")
         return data,dict(invocation_id=iid,root_invocation_id=root['invocation_id'],root_session_id=root['session_id'],
             status=root['status'],control_state=control,recovery_reason='paused' if control=='paused' else 'interrupted' if interrupted else root['status'] if root['status'] in ('failed','cancelled') else None,
             expected_version=root['last_sequence'],recovery_count=root.get('recovery_count') or 0,
@@ -60,6 +63,8 @@ class ExecutionControls:
             raise ValueError('Unknown execution action.')
         permission=controls['actions'][key]
         duplicate=action=='recover' and request_id and request_id==data['root'].get('last_recovery_id')
+        if action == 'respond' and wait_id is not None and (data['wait'] is None or data['wait']['status'] != 'waiting'):
+            raise HostRunConflict('wait_unavailable', 'The external Wait is no longer pending.')
         if not permission['available'] and not duplicate:
             raise HostRunConflict('action_unavailable',permission['reason'])
         contract=None
@@ -85,7 +90,7 @@ class ExecutionControls:
             view = dict(request=None, response_example=None)
             if action == 'respond':
                 async with self._execution(controls['root_invocation_id'], load=True) as ref:
-                    view = await self.agent_context.approvals.action_view(ref, data['wait']['wait_id'])
+                    view = await self._extensions.action_view(ref, data['wait']['wait_id'])
             return dict(root_invocation_id=controls['root_invocation_id'],action=action,
                 input_schema=json.loads(contract.schema) if contract else None,
                 endpoints=controls['endpoints'],next_sequence=data['source_sequence']+1, **view)
@@ -125,7 +130,7 @@ class ExecutionControls:
                 elif action=='respond':
                     value=decode_input(contract,payload)
                     await self._runtime.activate(ref)
-                    await self.agent_context.approvals.respond(ref,wait_id,value)
+                    await self._extensions.respond(ref,wait_id,value)
                     return dict(root_invocation_id=root_id,accepted=True)
                 elif action=='signal':
                     if contract is None or not source_id or type(sequence) is not int:

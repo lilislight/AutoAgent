@@ -6,8 +6,8 @@ from autoagent.agent import AgentApprovalResponse
 
 
 @asynccontextmanager
-async def synchronized_resources(setup, *, mcp_client=None, skill_roots=()):
-    """Use inside the project lifespan; Provider registration remains there too.
+async def synchronized_resources(resources, *, mcp_client=None, skill_roots=()):
+    """Pass the AgentResources instance also supplied to agent_workflow.
 
     MCP clients must be created/entered on the Host Runtime loop. Sources own
     only their listeners and published bindings, and close before the client.
@@ -18,16 +18,16 @@ async def synchronized_resources(setup, *, mcp_client=None, skill_roots=()):
         if mcp_client is not None:
             await stack.enter_async_context(mcp_client)
             sources["mcp"] = await stack.enter_async_context(
-                setup.agent_context.mcp_tools(mcp_client, prefix="mcp_", workflows={"agent"}))
+                resources.mcp_tools(mcp_client, prefix="mcp_"))
         if skill_roots:
             sources["skills"] = await stack.enter_async_context(
-                setup.agent_context.skill_directories(skill_roots, workflows={"agent"}))
+                resources.skill_directories(skill_roots))
         yield sources
 
 
 async def approve_current_batch(host, execution, wait_id, *, approved):
     """Read the refreshed Ask subset and echo its revision when replying."""
-    batch = await host.agent_context.get_approval(execution, wait_id)
+    batch = await host.extensions["agent"].context.get_approval(execution, wait_id)
     reply = AgentApprovalResponse(revision=batch.revision,
         decisions=tuple(request.respond(approved=approved) for request in batch.requests))
     await host.respond(execution, wait_id, reply.model_dump(mode="json"))

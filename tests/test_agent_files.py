@@ -1,6 +1,5 @@
 """File permission boundaries, real mutations and independently concurrent callers."""
 
-import asyncio
 import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -9,12 +8,11 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
-from types import SimpleNamespace
 
 from autoagent.agent import (
-    AgentAccess, AgentInput, FileRule, FileToolsConfig, LLMToolCall, LocalFileService,
+    AgentResources, FileTools, AgentInput, FileToolsConfig, LLMToolCall, LocalFileService,
     Tool, ToolApprovalRequired, ToolContext, ToolDecision, ToolOperation, ToolOperationPolicy,
-    ToolOperationRule, ToolSet, WorkspaceBinding, agent_workflow, file_tools,
+    ToolPolicy, ToolSet, agent_workflow, file_tools,
     AgentApprovalRequest, AgentApprovalResponse, LLMResponse, LLMToolResult,
 )
 from autoagent.agent.context import restore
@@ -27,13 +25,25 @@ def call(name, **arguments):
     return LLMToolCall(name=name, call_id=name, arguments=json.dumps(arguments))
 
 
+def path_rule(pattern, decision="ask", actions=("read", "write", "delete")):
+    return dict(when={"all": [dict(field="operation.attributes.path", op="glob", value=pattern),
+        dict(field="operation.action", op="in", value=["file." + action for action in actions])]}, decision=decision)
+
+
+def file_config(*rules, external=None):
+    selected = list(rules)
+    if external is not None:
+        selected.append(dict(when=dict(field="operation.attributes.scope", op="equals", value="external"), decision=external))
+    return FileToolsConfig(policy=ToolPolicy(rules=selected))
+
+
 class FileToolsTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "workspace"
         self.root.mkdir()
-        self.service = LocalFileService(self.root)
+        self.service = LocalFileService(self.root, config=file_config(path_rule(".env"), external="ask"))
         self.tools = file_tools(self.service, context=ToolContext(session_id="one"))
 
     def invoke(self, name, **arguments):
@@ -44,6 +54,23 @@ class FileToolsTests(unittest.TestCase):
         definitions = {value.name: value for value in self.tools.definitions}
         self.assertEqual(set(definitions), {"list_files", "search_files", "read_file", "write_file", "edit_file", "manage_files"})
         self.assertIn("oneOf", str(definitions["manage_files"].parameters))
+
+    def test_file_operation_contract_is_normalized_and_transfers_have_independent_targets(self):
+        """File Tools declare consistent Operation facts without advertising them as model arguments."""
+        from jsonschema import validate
+        from autoagent.agent import FILE_OPERATION_SCHEMA
+        (self.root / 'source').write_text('content')
+        proposal = call('manage_files', request={'operation': 'copy', 'path': 'source', 'destination': 'target'})
+        operations = self.tools._prepare(proposal, None).context.operations
+        self.assertEqual([op.action for op in operations], ['file.read', 'file.write'])
+        self.assertEqual([op.attributes['path'] for op in operations], ['source', 'target'])
+        for operation in operations:
+            validate(operation.model_dump(mode='json'), FILE_OPERATION_SCHEMA)
+            self.assertTrue(Path(operation.resource).is_absolute())
+            self.assertEqual(operation.attributes['scope'], 'workspace')
+        for tool in self.tools._tools.values():
+            self.assertEqual(tool.operation_schema, FILE_OPERATION_SCHEMA)
+            self.assertNotIn('operation_schema', tool.definition.parameters['properties'])
 
     def test_pages_allow_new_limit_and_report_exact_search_totals_only_when_known(self):
         """Changing page size preserves cursors while partial counts never pretend to be totals."""
@@ -109,8 +136,7 @@ class FileToolsTests(unittest.TestCase):
         """An unreadable subtree is labelled without claiming its contents were searched."""
         (self.root / "locked").mkdir()
         (self.root / "locked" / "hidden.txt").write_text("needle")
-        tools = file_tools(LocalFileService(self.root, config=FileToolsConfig(rules=(
-            FileRule(pattern="locked", actions=("list",), decision="deny"),))), context=ToolContext(session_id="one"))
+        tools = file_tools(LocalFileService(self.root, config=file_config(path_rule("locked", actions=("list",), decision="deny"))), context=ToolContext(session_id="one"))
         value = tools.invoke(call("search_files", query="needle")).structured_content
         self.assertEqual(value["match_count"], 0)
         self.assertNotIn("total_count", value)
@@ -120,8 +146,7 @@ class FileToolsTests(unittest.TestCase):
         """Ask and deny files remain visible with access labels, never content."""
         (self.root / ".env").write_text("SECRET_VALUE")
         (self.root / "denied.txt").write_text("DENIED_VALUE")
-        service = LocalFileService(self.root, config=FileToolsConfig(rules=(
-            FileRule(pattern=".env"), FileRule(pattern="denied.txt", decision="deny"))))
+        service = LocalFileService(self.root, config=file_config(path_rule(".env"), path_rule("denied.txt", decision="deny")))
         result = file_tools(service).invoke(call("list_files", include_hidden=True))
         rows = {value["path"]: value for value in result.structured_content["entries"]}
         self.assertEqual(rows[".env"]["permissions"]["read"], "ask")
@@ -166,7 +191,7 @@ class FileToolsTests(unittest.TestCase):
 
     def test_deny_cannot_be_overridden_by_bypass(self):
         """Bypass may skip ask but cannot override file policy deny."""
-        service = LocalFileService(self.root, config=FileToolsConfig(rules=(FileRule(pattern="blocked", decision="deny"),)))
+        service = LocalFileService(self.root, config=file_config(path_rule("blocked", decision="deny")))
         tools = file_tools(service)
         tools.approval_mode = "bypass"
         self.assertEqual(tools.check(call("read_file", path="blocked")).action, "deny")
@@ -183,12 +208,14 @@ class FileToolsTests(unittest.TestCase):
         next_page = self.invoke("read_file", path="text", start_line=2, max_lines=2)
         self.assertIsNone(next_page.structured_content["next_line"])
 
-    def test_create_and_overwrite_preserve_existing_files_without_version(self):
-        """Creation never clobbers and overwriting requires an observed version."""
+    def test_create_overwrite_and_repeated_edit_need_no_read_or_version(self):
+        """Creation is non-clobbering while explicit replacement and exact edits need no read round-trip."""
         self.assertFalse(self.invoke("write_file", path="a", content="old").is_error)
         self.assertTrue(self.invoke("write_file", path="a", content="new").is_error)
-        self.assertTrue(self.invoke("write_file", path="a", content="new", overwrite=True).is_error)
-        self.invoke("read_file", path="a")
+        self.assertFalse(self.invoke("write_file", path="a", content="new", overwrite=True).is_error)
+        self.assertFalse(self.invoke("write_file", path="a", content="one two", overwrite=True).is_error)
+        self.assertFalse(self.invoke("edit_file", path="a", edits=[{"old_text":"one", "new_text":"ONE"}]).is_error)
+        self.assertFalse(self.invoke("edit_file", path="a", edits=[{"old_text":"two", "new_text":"TWO"}]).is_error)
         self.assertFalse(self.invoke("write_file", path="a", content="new", overwrite=True).is_error)
         self.assertEqual((self.root / "a").read_text(), "new")
 
@@ -208,6 +235,20 @@ class FileToolsTests(unittest.TestCase):
         self.assertEqual(set(result.structured_content), {"path", "version", "change"})
         self.assertIn("+one beta three", result.tool_metadata["file"]["diff"])
 
+    def test_explicit_version_does_not_create_a_missing_file(self):
+        """An explicit existing-content precondition cannot silently turn into file creation."""
+        result = self.invoke("write_file", path="missing", content="new", expected_version="stale", overwrite=True)
+        self.assertEqual(result.structured_content["error"]["kind"], "version_conflict")
+        self.assertFalse((self.root / "missing").exists())
+
+    def test_full_overwrite_does_not_require_old_content_to_be_text(self):
+        """Replacing a regular file with UTF-8 content does not attempt to edit or decode its old bytes."""
+        (self.root / "a").write_bytes(b"\x00\xff\x00")
+        result = self.invoke("write_file", path="a", content="replacement", overwrite=True)
+        self.assertFalse(result.is_error, result)
+        self.assertEqual((self.root / "a").read_text(), "replacement")
+        self.assertIsNone(result.tool_metadata["file"]["diff"])
+
     def test_ambiguous_and_absent_matches_are_distinct(self):
         """Ambiguity and absence return actionable errors without partial writes."""
         (self.root / "a").write_text("same same")
@@ -220,9 +261,9 @@ class FileToolsTests(unittest.TestCase):
         """Concurrent callers that read the same version produce one conflict."""
         (self.root / "a").write_text("original")
         second = file_tools(LocalFileService(self.root), context=ToolContext(session_id="two"))
-        self.invoke("read_file", path="a")
+        observed = self.invoke("read_file", path="a").structured_content["version"]
         second.invoke(call("read_file", path="a"))
-        request = call("edit_file", path="a", edits=[{"old_text": "original", "new_text": "changed"}])
+        request = call("edit_file", path="a", edits=[{"old_text": "original", "new_text": "changed"}], expected_version=observed)
         with ThreadPoolExecutor(2) as executor:
             futures = [executor.submit(tools.invoke, request) for tools in (self.tools, second)]
             results = [value.result(timeout=10) for value in futures]
@@ -230,13 +271,14 @@ class FileToolsTests(unittest.TestCase):
         error = next(value for value in results if value.is_error)
         self.assertEqual(error.structured_content["error"]["kind"], "version_conflict")
 
-    def test_edit_does_not_advance_read_observation(self):
-        """A later edit cannot automatically rebase onto an earlier committed edit."""
+    def test_explicit_stale_version_fails_but_omitted_version_has_no_hidden_read_precondition(self):
+        """Only an explicitly supplied version constrains later edits after a successful mutation."""
         (self.root / "a").write_text("one two")
-        self.invoke("read_file", path="a")
+        observed = self.invoke("read_file", path="a").structured_content["version"]
         self.invoke("edit_file", path="a", edits=[{"old_text": "one", "new_text": "ONE"}])
-        result = self.invoke("edit_file", path="a", edits=[{"old_text": "two", "new_text": "TWO"}])
+        result = self.invoke("edit_file", path="a", edits=[{"old_text": "two", "new_text": "TWO"}], expected_version=observed)
         self.assertEqual(result.structured_content["error"]["kind"], "version_conflict")
+        self.assertFalse(self.invoke("edit_file", path="a", edits=[{"old_text": "two", "new_text": "TWO"}]).is_error)
 
     def test_big_endian_utf16_and_crlf_are_preserved(self):
         """Precise edits preserve the original BOM, byte order and untouched newlines."""
@@ -298,8 +340,7 @@ class FileToolsTests(unittest.TestCase):
     def test_write_cannot_leak_original_content_when_read_is_denied(self):
         """Overwrite diff generation requires read permission as well as write permission."""
         (self.root / "secret").write_text("SECRET")
-        service = LocalFileService(self.root, config=FileToolsConfig(rules=(
-            FileRule(pattern="secret", actions=("read",), decision="deny"),)))
+        service = LocalFileService(self.root, config=file_config(path_rule("secret", actions=("read",), decision="deny")))
         result = file_tools(service).invoke(call("write_file", path="secret", content="new",
             overwrite=True, expected_version="anything"))
         self.assertTrue(result.is_error)
@@ -313,13 +354,11 @@ class FileToolsTests(unittest.TestCase):
         result = self.invoke("search_files", path="sub", query="needle")
         self.assertEqual(result.structured_content["results"], [])
 
-    def test_session_operation_rules_label_and_block_search_content(self):
+    def test_declarative_rules_label_and_block_discovered_search_content(self):
         """Session argument rules are applied to each discovered file, not only the search root."""
         (self.root / "secret.txt").write_text("SECRET")
-        access = AgentAccess(operation_rules=(ToolOperationRule(action="file.read",
-            attributes={"path": "secret.txt"}, decision="deny"),))
-        tools = file_tools(self.service, context=ToolContext(session_id="one", services={
-            "agent_snapshot": SimpleNamespace(settings=SimpleNamespace(access=access))}))
+        tools = ToolSet(FileTools(service=self.service).tools(), policy=ToolPolicy(rules=[path_rule("secret.txt", "deny", ("read",))]),
+                        context=ToolContext(session_id="one"))
         result = tools.invoke(call("search_files", query="SECRET"))
         self.assertEqual(result.structured_content["protected_files"][0]["read"], "deny")
         self.assertEqual(result.structured_content["results"], [])
@@ -361,8 +400,8 @@ class FileToolsTests(unittest.TestCase):
         """An execution plan pins the preflight version even if Session observations advance."""
         path = self.root / "a"
         path.write_text("one two")
-        self.invoke("read_file", path="a")
-        request = call("edit_file", path="a", edits=[{"old_text": "two", "new_text": "TWO"}])
+        observed = self.invoke("read_file", path="a").structured_content["version"]
+        request = call("edit_file", path="a", edits=[{"old_text": "two", "new_text": "TWO"}], expected_version=observed)
         prepared = self.tools._prepare(request, None)
         operations = [value.model_dump(mode="json") for value in prepared.context.operations]
         path.write_text("ONE two")
@@ -381,12 +420,11 @@ class FileToolsTests(unittest.TestCase):
         result = tools.invoke(call("search_files", query="(a|aa)+$", regex=True))
         self.assertEqual(result.structured_content["error"]["kind"], "regex_timeout")
 
-    def test_json_array_rules_and_approval_records_validate_from_plain_dicts(self):
+    def test_policy_and_approval_records_validate_from_plain_dicts(self):
         """HTTP-style dictionaries accept new tuple fields represented as JSON arrays."""
         from autoagent.agent import ToolApprovalRequest
-        access = AgentAccess.model_validate({"operation_rules": [
-            {"action": "file.read", "decision": "ask", "attributes": {"path": "*.secret"}}]})
-        self.assertEqual(access.operation_rules[0].decision, "ask")
+        policy = ToolPolicy.from_dict({"rules": [path_rule("*.secret")]})
+        self.assertEqual(policy.rules[0].decision, "ask")
         (self.root / ".env").write_text("secret")
         approval = self.tools.check(call("read_file", path=".env")).approval_request
         self.assertEqual(ToolApprovalRequest.model_validate(approval.model_dump(mode="json")), approval)
@@ -645,37 +683,37 @@ class HostFileContracts:
     async def host(self, provider, *, workflow=None):
         @asynccontextmanager
         async def lifespan(setup):
-            setup.agent_context.resources.register_provider("offline", provider)
-            setup.agent_context.set_defaults(settings())
+            setup.providers.register("offline", provider)
+            setup.extensions["agent"].context.set_defaults(settings())
             yield
-        async with AutoAgentHost(workflows=[workflow or agent_workflow()], root=self.root,
+        async with AutoAgentHost(workflows=[workflow or agent_workflow(resources=AgentResources(tools=FileTools(self.root, config=file_config(path_rule(".env"))).tools()))], root=self.root,
             environment={}, lifespan=lifespan, settings=HostSettings(database_url=self.url)) as host:
             yield host
 
     async def test_bound_workspace_advertises_files_and_unbound_does_not(self):
-        """File tools appear only for an enabled Agent with an execution-capable Workspace."""
+        """Explicit SDK file Tools are bound to their directory, independently of App Workspaces."""
         provider = ScriptedProvider(answer(), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("bound", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
+            await host.extensions["agent"].context.configure("bound", settings().session_defaults())
             for session in ("bound", "unbound"):
                 ref = await host.execute("agent", AgentInput(message="hello"), session_id=session)
                 result = await host.join(ref)
                 self.assertEqual(result.status, "completed", result.error)
         self.assertIn("edit_file", [value.name for value in provider.requests[0].tools])
-        self.assertNotIn("edit_file", [value.name for value in provider.requests[1].tools])
+        self.assertIn("edit_file", [value.name for value in provider.requests[1].tools])
 
-    async def test_session_preferences_reject_host_operation_rules(self):
+    async def test_session_preferences_reject_tool_policy_overrides(self):
         """Parameter rules belong to shared resources or Host startup, never Session preferences."""
         from pydantic import ValidationError
         from autoagent.agent import AgentSessionSettings
         with self.assertRaises(ValidationError):
-            AgentSessionSettings.model_validate_json('{"access":{"operation_rules":[]}}')
+            AgentSessionSettings.model_validate_json('{"access":{"policy":{}}}')
 
     async def test_files_can_be_disabled_per_workflow(self):
-        """An explicit files=False build keeps a bound Workspace without file tools."""
+        """Omitting the file Tool group leaves the Agent without file Tools."""
         provider = ScriptedProvider(answer())
-        async with self.host(provider, workflow=agent_workflow(files=False)) as host:
-            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
+        async with self.host(provider, workflow=agent_workflow()) as host:
+            await host.extensions["agent"].context.configure("one", settings().session_defaults())
             result = await host.join(await host.execute("agent", AgentInput(message="hello"), session_id="one"))
             self.assertEqual(result.status, "completed", result.error)
         self.assertNotIn("read_file", [value.name for value in provider.requests[0].tools])
@@ -686,7 +724,7 @@ class HostFileContracts:
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls",
             output=(call("read_file", path=".env"),)), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
+            await host.extensions["agent"].context.configure("one", settings().session_defaults())
             ref = await host.execute("agent", AgentInput(message="read the env"), session_id="one")
             waiting = await host.join(ref)
             self.assertEqual(waiting.status, "waiting", waiting.error)
@@ -707,7 +745,7 @@ class HostFileContracts:
             create_parents=True).model_copy(update={"call_id": f"write-{index}"}) for index in range(3))
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls", output=proposals), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
+            await host.extensions["agent"].context.configure("one", settings().session_defaults())
             result = await host.join(await host.execute("agent", AgentInput(message="create sibling files"), session_id="one"))
             self.assertEqual(result.status, "completed", result.error)
             results = [item for item in provider.requests[-1].input if isinstance(item, LLMToolResult)]
@@ -724,7 +762,7 @@ class HostFileContracts:
             LLMResponse(model="offline", finish_reason="tool_calls", output=(call("edit_file", path="code.py",
                 edits=[{"old_text": "old = 1", "new_text": "new = 2"}]),)), answer())
         async with self.host(provider) as host:
-            await host.agent_context.configure("one", settings().session_defaults(), workspace=WorkspaceBinding(workspace_id=host.agent_context.project_workspace_id))
+            await host.extensions["agent"].context.configure("one", settings().session_defaults())
             result = await host.join(await host.execute("agent", AgentInput(message="edit code"), session_id="one"))
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual((self.root / "code.py").read_text(), "new = 2\n")

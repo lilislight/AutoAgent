@@ -1,5 +1,6 @@
 import { approvalReply, requestSignature } from './replies.js';
 import type { ActionSpec, Json } from './types.js';
+import { requiresHumanResponse } from './approvalPresentation.js';
 
 export interface Question { id: string; type: 'text' | 'single_choice' | 'multiple_choice'; text: string; allow_custom_answer?: boolean; options: { id: string; label: string; description?: string }[] }
 export interface ReplyDraft { text: string; selected: string[]; skipped: boolean }
@@ -30,6 +31,7 @@ export async function submitInteraction(spec: ActionSpec, payload: unknown, port
   if (!fresh) return { state: 'resolved' };
   if (fresh === 'refresh') return { state: 'refresh' };
   if (!fresh.request) return { state: 'resolved' };
+  if (!requiresHumanResponse(fresh)) return { state: 'changed', spec: fresh };
   if (requestSignature(fresh) !== requestSignature(spec)) return { state: 'changed', spec: fresh };
   port.onSubmit();
   try { await port.respond(payload); }
@@ -39,6 +41,7 @@ export async function submitInteraction(spec: ActionSpec, payload: unknown, port
     const latest = await current();
     if (latest === 'refresh') return { state: 'refresh' };
     if (!latest?.request) return { state: 'resolved' };
+    if (!requiresHumanResponse(latest)) return { state: 'changed', spec: latest };
     if (requestSignature(latest) !== requestSignature(spec)) return { state: 'changed', spec: latest };
     throw error;
   }

@@ -30,6 +30,9 @@ class Service:
         self.state = AgentExecutionSnapshot(snapshot_id="stage-1", session_id="session", invocation_id="invocation",
             epoch=1, settings_version=0, settings=settings(), bindings={"provider": "1"}, reason="start", created_at_us=0)
 
+    async def prepare_workspace(self, snapshot):
+        return None
+
     async def snapshot(self):
         return self.state
 
@@ -324,7 +327,7 @@ class ContextHostContracts:
         return "sqlite+aiosqlite:///" + str(Path(temporary.name) / "runtime.db")
 
     async def test_compaction_model_priority_and_persistent_view_after_restart(self):
-        """Code overrides env overrides main model, and restarted Sessions keep their compacted view."""
+        """Explicit compaction models override code defaults and restarted Sessions keep their compacted view."""
         url = await self.database_url()
         for configured, environment, expected in (("code-model", "env-model", "code-model"),
                 (None, "env-model", "env-model"), (None, "", "model-a")):
@@ -332,8 +335,9 @@ class ContextHostContracts:
                 provider = ScriptedProvider(answer("PERSISTED_SUMMARY"), answer("first final"), answer("next final"))
                 @asynccontextmanager
                 async def lifespan(setup):
-                    setup.agent_context.resources.register_provider("offline", provider)
-                    setup.agent_context.set_defaults(settings())
+                    setup.providers.register("offline", provider)
+                    setup.extensions["agent"].context.set_defaults(settings())
+                    setup.extensions["agent"].context.compaction_model = environment or None
                     yield
                 # A low explicit threshold forces the first large history to compact;
                 # the next turn's real usage anchor prevents an unnecessary second summary.
@@ -341,7 +345,7 @@ class ContextHostContracts:
                     compact=LLMHistoryCompactor(model=configured, max_output_tokens=128))
                 workflow = agent_workflow(context_policy=policy, user_events=True)
                 options = dict(workflows=[workflow], lifespan=lifespan, settings=HostSettings(database_url=url),
-                    environment={"AUTOAGENT_COMPACTION_LLM_MODEL": environment})
+                    environment={})
                 old = Conversation(items=(message("user", "ORIGINAL_LONG " * 200), message("assistant", "old answer")))
                 async with AutoAgentHost(**options) as host:
                     first = await host.join(await host.execute("agent", AgentInput(message="now"),

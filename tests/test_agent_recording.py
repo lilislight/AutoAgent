@@ -74,9 +74,9 @@ class ProviderRecordingTests(unittest.IsolatedAsyncioTestCase):
         provider.config = OpenAIProviderConfig(provider_id="test", pricing_provider="vendor")
         await provider.ainvoke(providers.request())
         record = recorder.records[-1]
-        pricing = LocalTokenPricing(overrides={"vendor/model": TokenPrice("1", "3", "0.2", "2")},
+        pricing = LocalTokenPricing(overrides={"vendor/model": TokenPrice("1", "3", "0.2")},
                                     use_litellm_catalog=False)
-        self.assertEqual(pricing.calculate(record).units, 68_000_000)
+        self.assertEqual(pricing.calculate(record).units, 58_000_000)
         self.assertEqual(record.billing_details["pricing_provider"], "vendor")
         self.assertNotIn("unexpected_private_field", record.billing_details["usage"])
         self.assertNotIn("pricing_provider", captured[0][1])

@@ -28,15 +28,17 @@ def definition_hash(definition):
 def request_settings(snapshot, overrides, *, role, require_model=True):
     settings = snapshot.settings.model
     values = dict(model=settings.model, streaming=settings.streaming,
-        max_output_tokens=settings.max_output_tokens, temperature=settings.temperature)
-    allowed = {"model", "streaming", "max_output_tokens", "temperature", "top_p", "output_options", "provider_options"}
+        max_output_tokens=settings.max_output_tokens, temperature=settings.temperature, reasoning_effort=settings.reasoning_effort)
+    if role == "compaction":
+        values["reasoning_effort"] = None
+    allowed = {"model", "streaming", "max_output_tokens", "temperature", "top_p", "output_options", "provider_options", "reasoning_effort"}
     if set(overrides) - allowed:
         raise ValueError("Agent LLM options can only override generation settings.")
     values.update(overrides)
     if require_model and not values["model"] and snapshot.bindings.get("provider") != "@capability":
         raise ValueError("Configure an Agent model before starting generation.")
-    values["routing"] = dict(agent_snapshot_id=snapshot.snapshot_id, agent_role=role,
-        agent_managed_provider=snapshot.bindings.get("provider") != "@capability")
+    values["routing"] = dict(provider=settings.provider, agent_snapshot_id=snapshot.snapshot_id, agent_role=role,
+        agent_managed_provider=snapshot.bindings.get("provider") != "@capability", reasoning_effort_bound=True)
     return values
 
 
@@ -44,12 +46,13 @@ def message(role, text):
     return LLMMessage(role=role, content=(TextContent(text=text),))
 
 
-def request_fingerprint(fixed_input, tools, settings, snapshot, replay_target):
-    fields = {key: settings.get(key) for key in ("model", "provider_options", "output_options")}
+def request_fingerprint(fixed_input, tools, settings, snapshot, replay_target, *, inject_current_time=False):
+    fields = {key: settings.get(key) for key in ("model", "provider_options", "output_options", "reasoning_effort")}
     value = dict(projection_version=PROJECTION_VERSION, fixed=[item.model_dump(mode="json") for item in fixed_input],
         tools=[item.model_dump(mode="json") for item in tools], settings=fields,
         provider=snapshot.settings.model.provider, provider_version=snapshot.bindings.get("provider"),
         replay_target=replay_target.model_dump(mode="json") if replay_target else None)
+    value["inject_current_time"] = inject_current_time
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -59,7 +62,7 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
     from ..skills import SkillSet
     service = current_agent_context()
     snapshot = await service.snapshot()
-    workspace = await service.prepare_workspace(snapshot) if snapshot.settings.workspace is not None else None
+    workspace = await service.prepare_workspace(snapshot)
     from .builtins import workflow_catalog
     from .subagents import BUILTIN_NAMES
     catalog, skills = workflow_catalog(service, snapshot, options)
@@ -96,7 +99,11 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
     preparation = ContextPreparation(conversation=conversation, fixed_input=tuple(fixed), tools=definitions,
         bindings=bindings, settings=settings, generation_options=options.llm_options, snapshot_id=snapshot.snapshot_id,
         compaction_model=getattr(service, "compaction_model", None), replay_target=target,
-        fingerprint=request_fingerprint(fixed, definitions, settings, snapshot, target))
+        compaction_provider=getattr(service, "compaction_provider", None),
+        compaction_reasoning_effort=getattr(service, "compaction_reasoning_effort", None),
+        inject_current_time=options.inject_current_time,
+        fingerprint=request_fingerprint(fixed, definitions, settings, snapshot, target,
+            inject_current_time=options.inject_current_time))
     validate_tool_history(conversation.visible)
     estimate = await policy.estimate_input(preparation)
     budget = policy.budget(settings)
@@ -118,7 +125,8 @@ async def refresh_preparation(preparation: ContextPreparation) -> ContextPrepara
     return preparation.model_copy(update={"settings": settings, "snapshot_id": snapshot.snapshot_id,
         "compaction_model": getattr(current_agent_context(), "compaction_model", None),
         "replay_target": target,
-        "fingerprint": request_fingerprint(preparation.fixed_input, preparation.tools, settings, snapshot, target)})
+        "fingerprint": request_fingerprint(preparation.fixed_input, preparation.tools, settings, snapshot, target,
+            inject_current_time=preparation.inject_current_time)})
 
 
 async def compact_agent_context(plan: ContextPlan, policy: ContextPolicy):
@@ -136,7 +144,8 @@ async def compact_agent_context(plan: ContextPlan, policy: ContextPolicy):
     if view != previous.view and view.generation <= previous.view.generation:
         raise ValueError("A changed Context view must advance its generation.")
     conversation = Conversation(items=previous.items, view=view, origins=previous.origins,
-        token_anchor=previous.token_anchor if view == previous.view else None)
+        token_anchor=previous.token_anchor if view == previous.view else None,
+        runtime_times=previous.runtime_times if view == previous.view else {})
     validate_tool_history(conversation.visible)
     updated = preparation.model_copy(update={"conversation": conversation})
     estimate = await policy.estimate_input(updated)
@@ -154,10 +163,15 @@ async def build_agent_request(plan: ContextPlan, policy: ContextPolicy) -> Prepa
     validate_tool_history(preparation.conversation.visible)
     request = LLMRequest(input=preparation.model_input,
         tools=preparation.tools, **preparation.settings)
+    runtime_time = None
+    if preparation.inject_current_time:
+        from .runtime_context import append_time, TIME_KEY
+        request = append_time(request, preparation.replay_target)
+        runtime_time = request.routing[TIME_KEY]
     return PreparedRequest(request=request, tools=preparation.bindings, view=preparation.conversation.view,
         fingerprint=preparation.fingerprint, source_count=len(preparation.conversation.items),
         base_generation=plan.base_generation, fixed_input=preparation.fixed_input, replay_target=preparation.replay_target,
-        estimated_input_tokens=estimate.input_tokens)
+        estimated_input_tokens=estimate.input_tokens, runtime_time=runtime_time)
 
 
 class CompactionReducer:

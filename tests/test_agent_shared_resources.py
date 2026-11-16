@@ -21,6 +21,66 @@ class SharedResourceContracts:
     product = SessionControlContracts.product
     database_url = SessionControlContracts.database_url
 
+    async def test_mcp_catalog_survives_offline_restart_and_requires_schema_review(self):
+        """A reconnected tool keeps custom rules and stays unpublished until its changed schema is reviewed."""
+        from tests.test_agent_mcp import MCPHTTPTests, WireServer
+        from autoagent.agent import ToolPolicy
+
+        online = True
+        argument_type = "integer"
+        def factory(config, **options):
+            if not online:
+                raise RuntimeError("Offline fixture")
+            wire = WireServer(legacy=True)
+            wire.tool["inputSchema"]["properties"]["a"]["type"] = argument_type
+            client, _ = MCPHTTPTests.client(self, wire, sse=True)
+            return client
+
+        with tempfile.TemporaryDirectory() as directory, patch("autoagent.agent.MCPClient", side_effect=factory):
+            root = Path(directory)
+            url = await self.database_url(root)
+            options = dict(root=root, workflows=[builtin_agent_workflow(execution=False)],
+                settings=HostSettings(database_url=url), environment={})
+            async with AutoAgentHost(**options) as host:
+                app = host.applications["agent"]
+                managed = app.context.shared_resources
+                config = MCPResourceConfig(name="Wire", transport={
+                    "type": "sse", "server_id": "wire", "url": "https://server.test/sse"})
+                created = await managed.save(config)
+                inventory = await self.eventually(app.resource_configs, lambda value: any(
+                    row.get("mcp_status") == "ready" for row in value["resources"]))
+                tool = next(row for row in inventory["resources"] if row["origin"] == "mcp")
+                await managed.save(ResourceControl(name="Add", resource_id=tool["management_id"],
+                    permissions=ToolPolicy(default="deny")))
+                self.assertFalse(any(row["origin"] == "mcp" for row in (await app.resource_configs(scope="tools"))["resources"]))
+                original = tool["schema_version"]
+            online = False
+            async with AutoAgentHost(**options) as host:
+                app = host.applications["agent"]
+                managed = app.context.shared_resources
+                async def inventory():
+                    return await app.resource_configs(scope="mcp")
+                offline = await self.eventually(inventory, lambda value: any(
+                    row["id"] == created["id"] and row["state"] == "error" for row in value["items"]))
+                self.assertEqual(offline["resources"][0]["mcp_status"], "offline")
+                self.assertEqual(offline["resources"][0]["custom_policy"]["default"], "deny")
+                online, argument_type = True, "string"
+                await managed.save(config, resource_id=created["id"], expected_version=1)
+                review = await self.eventually(inventory, lambda value: any(
+                    row["mcp_status"] == "review" for row in value["resources"]))
+                changed = review["resources"][0]
+                self.assertEqual(changed["approved_schema"]["properties"]["a"]["type"], "integer")
+                self.assertEqual(changed["input_schema"]["properties"]["a"]["type"], "string")
+                self.assertFalse(changed["available"])
+                self.assertFalse(managed.catalog()[0])
+                from autoagent.host import HostRunConflict
+                with self.assertRaises(HostRunConflict):
+                    await app.accept_mcp_schema(created["id"], "add", original)
+                await app.accept_mcp_schema(created["id"], "add", changed["schema_version"])
+                restored = (await inventory())["resources"][0]
+                self.assertTrue(restored["available"])
+                self.assertEqual(restored["custom_policy"], ToolPolicy(default="deny").to_dict())
+
     async def test_policy_editor_parses_yaml_and_previews_real_matching_without_execution(self):
         """The product parser, preview and saved Policy share nested SDK semantics on both databases."""
         effects = []

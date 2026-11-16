@@ -71,7 +71,9 @@ class CreateWorkspace(BaseModel):
 class PolicyPreview(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     policy: ToolPolicy
-    tool_name: str = Field(min_length=1)
+    tool_name: str | None = Field(default=None, min_length=1)
+    tool_id: str | None = Field(default=None, min_length=1, max_length=512)
+    workspace_id: str | None = Field(default=None, min_length=1, max_length=512)
     arguments: dict = Field(default_factory=dict)
     operations: list[ToolOperation] = Field(default_factory=list)
     context: dict = Field(default_factory=dict)
@@ -81,6 +83,13 @@ class ParsePolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     format: Literal["json", "yaml"]
     text: str = Field(max_length=1_048_576)
+    editor: bool = False
+
+
+class AcceptMCPSchema(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    remote_name: str = Field(min_length=1, max_length=512)
+    schema_version: str = Field(pattern="^[0-9a-f]{64}$")
 
 
 class _AgentRoute(APIRoute):
@@ -116,8 +125,9 @@ def agent_router(application, settings, query, *, user_events):
         return await query(application.catalog(), settings)
 
     @router.get('/agent/resource-configs')
-    async def resource_configs(workspace_id: str | None = Query(None, min_length=1, max_length=512)):
-        return await agent_query(application.resource_configs(workspace_id))
+    async def resource_configs(workspace_id: str | None = Query(None, min_length=1, max_length=512),
+                               scope: Literal["tools", "mcp"] | None = None):
+        return await agent_query(application.resource_configs(workspace_id, scope=scope))
 
     @router.get('/agent/providers')
     async def providers():
@@ -126,15 +136,20 @@ def agent_router(application, settings, query, *, user_events):
     @router.post('/agent/policies/preview')
     async def preview_policy(body: PolicyPreview):
         return await agent_query(application.preview_policy(body.policy, tool_name=body.tool_name,
-            arguments=body.arguments, operations=body.operations, context=body.context))
+            arguments=body.arguments, operations=body.operations, context=body.context,
+            tool_id=body.tool_id, workspace_id=body.workspace_id))
 
     @router.post('/agent/policies/parse')
     async def parse_policy(body: ParsePolicy):
-        return await agent_query(application.parse_policy(body.text, format=body.format))
+        return await agent_query(application.parse_policy(body.text, format=body.format, editor=body.editor))
 
     @router.post('/agent/mcp/test')
     async def test_mcp(body: ConfigureResource):
         return await agent_query(application.test_mcp(body.configuration))
+
+    @router.post('/agent/mcp/{connection_id}/accept-schema', status_code=204)
+    async def accept_mcp_schema(connection_id: str, body: AcceptMCPSchema):
+        await agent_query(application.accept_mcp_schema(connection_id, body.remote_name, body.schema_version))
 
     @router.get('/agent/skills/document')
     async def skill_document(management_id: str = Query(min_length=1, max_length=4096),

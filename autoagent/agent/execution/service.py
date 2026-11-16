@@ -1,10 +1,8 @@
-"""Workspace execution plans, shared command policy and Tool observations."""
+"""Workspace execution and process observations."""
 
 import asyncio
 from dataclasses import replace
-from fnmatch import fnmatchcase
 import hashlib
-import inspect
 import json
 import os
 from pathlib import Path
@@ -14,9 +12,7 @@ import time
 from typing import Protocol, runtime_checkable
 
 from ..models import ToolOutput
-from ..tools import ToolBusinessError, ToolDecision
-from ..tools.operations import ToolOperation
-from .analyzer import TreeSitterShellAnalyzer
+from ..tools import ToolBusinessError
 from .backend import ResolvedExecution
 from .local import LocalExecutionBackend, settle
 from .manager import ProcessManager
@@ -27,33 +23,21 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
-def identity(path):
-    stat = path.stat()
-    return f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
-
-
 @runtime_checkable
 class ExecutionService(Protocol):
-    """Resolved operations are authorized by ToolSet before execute is called."""
+    """Execution backend for already authorized Tool calls."""
 
     config: ExecutionToolsConfig
     version: str
-    def operations(self, name, arguments, context) -> tuple[ToolOperation, ...]: ...
-    def evaluate(self, operation, context): ...
     async def execute(self, name, arguments, context) -> ToolOutput: ...
     async def aclose(self): ...
 
 
 class LocalExecutionService:
-    """Local execution with application-owned adapters and runtime environment.
-
-    policy(operation, context) may return a decision or None to use rules.
-    Custom adapters/policies must supply a new adapter_version when behavior
-    changes. No environment values or live handles enter persisted operations.
-    """
+    """Local execution with application-owned adapters and runtime environment."""
 
     def __init__(self, root, *, working_directory=".", config=None, backend=None,
-                 manager=None, analyzer=None, policy=None, environment=None, adapter_version="1"):
+                 manager=None, environment=None, adapter_version="1"):
         self.root = Path(root).resolve(strict=True)
         self.cwd = (self.root / working_directory).resolve(strict=True)
         if not self.root.is_dir() or not self.cwd.is_dir() or not self.cwd.is_relative_to(self.root):
@@ -61,10 +45,8 @@ class LocalExecutionService:
         self.config = ExecutionToolsConfig.model_validate(config or ExecutionToolsConfig())
         self.backend = backend or LocalExecutionBackend()
         self.manager = manager or ProcessManager()
-        self.analyzer = analyzer or TreeSitterShellAnalyzer()
-        self.policy = policy
         from ..files import LocalFileService
-        self.files = LocalFileService(self.root, working_directory=working_directory, config=self.config.file_policy)
+        self.files = LocalFileService(self.root, working_directory=working_directory)
         root_stat = self.root.stat()
         self._root_identity = f"{root_stat.st_dev}:{root_stat.st_ino}"
         # Runtime-only environment. Do not inherit arbitrary application tokens,
@@ -118,52 +100,11 @@ class LocalExecutionService:
         except OSError as error:
             raise ToolBusinessError(str(error), code="program_unavailable") from error
 
-    def _commands(self, argv, *, cwd, depth=0):
-        try:
-            argv = (str(self._binary(argv[0], cwd)), *argv[1:])
-        except ToolBusinessError:
-            pass  # A Shell builtin/cmdlet has no external executable.
-        name = Path(argv[0]).stem.lower()
-        if depth > 4:
-            return (argv,), False, "Nested Shell wrapper limit reached."
-        if name not in {"bash", "pwsh", "powershell", "sh", "zsh", "cmd"}:
-            return (argv,), True, None
-        # Only known, profile-free wrappers share command rules. Other options
-        # remain a whole-invocation policy check rather than an unsafe unwrap.
-        args = list(argv[1:])
-        shell = None
-        script = None
-        if name == "bash":
-            while args and args[0] in {"--noprofile", "--norc"}:
-                args.pop(0)
-            if len(args) == 2 and args[0] == "-c":
-                shell, script = "bash", args[1]
-        elif name in {"pwsh", "powershell"}:
-            lowered = [value.lower() for value in args]
-            if "-noprofile" in lowered and "-command" in lowered:
-                index = lowered.index("-command")
-                if index == len(args) - 2 and all(value in {"-nologo", "-noprofile", "-noninteractive"} for value in lowered[:index]):
-                    shell, script = "pwsh", args[-1]
-        if script is None:
-            return (argv,), False, "Shell invocation requires whole-command approval."
-        analysis = self.analyzer.analyze(script, shell)
-        if not analysis.complete or not analysis.commands:
-            return (argv,), False, analysis.reason
-        result = []
-        for child in analysis.commands:
-            nested, complete, reason = self._commands(child, cwd=cwd, depth=depth + 1)
-            if not complete:
-                return (argv,), False, reason
-            result.extend(nested)
-        return tuple(result), True, None
-
-    def _managed_operation(self, requested, context):
-        from ..tools import ToolContext
-        operations = self.files.operations("write_file", {"path": requested}, context or ToolContext())
-        value = operations[0]
-        if not Path(value.resource).is_relative_to(self.root):
+    def _managed_path(self, requested):
+        path = self.files._resolve(requested)
+        if not path.is_relative_to(self.root):
             raise ToolBusinessError("Logs, caches and temporary directories must be inside the Workspace.", code="invalid_output_path")
-        return value
+        return path
 
     def _wait_limit(self, value):
         if not 0 <= value <= self.config.max_wait_seconds:
@@ -178,7 +119,7 @@ class LocalExecutionService:
             raise ToolBusinessError(f"Output limit must be between 4 and {self.config.max_output_bytes} bytes.", code="invalid_output_limit")
         return maximum
 
-    def _plan(self, arguments, context=None):
+    def _plan(self, arguments):
         command = arguments
         cwd = self._directory(arguments.get("cwd", "."))
         timeout = arguments.get("timeout_seconds")
@@ -193,19 +134,19 @@ class LocalExecutionService:
             requested = arguments.get(name) if arguments.get(name) is not None else getattr(self.config, name)
             if requested is None:
                 continue
-            operation = self._managed_operation(requested, context)
-            managed.append(operation)
-            directory = operation.resource
+            path = self._managed_path(requested)
+            managed.append(path)
+            directory = str(path)
             if name == "cache_directory":
                 environment.update(XDG_CACHE_HOME=directory, PIP_CACHE_DIR=str(Path(directory) / "pip"),
                     HF_HOME=str(Path(directory) / "huggingface"), HF_HUB_CACHE=str(Path(directory) / "huggingface" / "hub"),
                     UV_CACHE_DIR=str(Path(directory) / "uv"))
             else:
                 environment.update(TMPDIR=directory, TMP=directory, TEMP=directory)
-        log = self._managed_operation(arguments["log_path"], context) if arguments.get("log_path") is not None else None
+        log = self._managed_path(arguments["log_path"]) if arguments.get("log_path") is not None else None
         if log is not None and not self.backend.capabilities.output_logs:
             raise ToolBusinessError("This execution backend does not support output logs.", code="logging_unavailable")
-        if log is not None and any(Path(value.resource).is_relative_to(Path(log.resource)) for value in managed):
+        if log is not None and any(value.is_relative_to(log) for value in managed):
             raise ToolBusinessError("The log file cannot be a cache/temp directory or its ancestor.", code="invalid_output_path")
         if command["mode"] == "exec":
             program, args = command["program"], tuple(command.get("args", ()))
@@ -229,120 +170,30 @@ class LocalExecutionService:
             raise ToolBusinessError("Initial stdin exceeds its size limit.", code="input_limit_exceeded")
         spec = ResolvedExecution((str(executable), *args), str(cwd), environment, timeout,
             self.config.max_retained_bytes, arguments.get("keep_stdin_open", False), data)
-        commands, complete, reason = self._commands(spec.argv, cwd=cwd)
-        stat = cwd.stat()
-        plan = digest(dict(argv=spec.argv, executable=identity(executable), cwd=str(cwd),
-            directory_identity=f"{stat.st_dev}:{stat.st_ino}", environment=digest(environment),
-            stdin=digest(stdin), log_path=log.resource if log is not None else None,
-            keep_stdin_open=spec.keep_stdin_open, timeout=timeout, service=self.version))
-        operations = []
-        for child in commands:
-            try:
-                target = self._binary(child[0], cwd)
-                resolved, stamp = str(target), identity(target)
-            except ToolBusinessError:
-                if command["mode"] != "shell" and child == spec.argv:
-                    raise
-                # Shell builtins/cmdlets need not be external executables.
-                resolved, stamp = child[0], "shell_command"
-            operations.append(ToolOperation(action="command.execute", resource=resolved,
-                attributes=dict(program=Path(child[0]).name, args=json.dumps(child[1:], ensure_ascii=False),
-                    cwd=str(cwd), executable_identity=stamp, plan_digest=plan,
-                    analysis_complete=str(complete).lower(), analysis_reason=reason or "")))
-        return spec, (*operations, *managed, *((log,) if log is not None else ()))
+        return spec, managed, log
 
     def _session(self, context):
         if not context.session_id:
             raise ToolBusinessError("Execution requires a Session identity in ToolContext.", code="session_required")
         return context.session_id
 
-    def operations(self, name, arguments, context):
-        self._session(context)
-        if name == "execute_command":
-            return self._plan(arguments, context)[1]
-        request = arguments["request"]
-        action = request["action"]
-        if action in {"read", "wait"}:
-            self._wait_limit(self.config.default_wait_seconds if request.get("wait_seconds") is None else request["wait_seconds"])
-            self._output_limit(request)
-        process_id = request.get("process_id")
-        if process_id:
-            self.manager.get(process_id, context.session_id, str(self.root))
-        return (ToolOperation(action="process." + action, resource=process_id or str(self.root),
-            attributes={"session_id": context.session_id, "root": str(self.root)}),)
-
-    def evaluate(self, operation, context):
-        override = context.services.get("operation_policy")
-        if override is not None:
-            selected = override(operation, context)
-            if selected is not None:
-                return selected
-        if operation.action.startswith("file."):
-            return self.files.evaluate(operation, context)
-        if self.policy is not None:
-            result = self.policy(operation, context)
-            if inspect.isawaitable(result):
-                async def finish():
-                    value = await result
-                    return self._rule(operation) if value is None else value
-                return finish()
-            if result is not None:
-                return result
-        return self._rule(operation)
-
-    def _rule(self, operation):
-        if operation.action.startswith("process."):
-            return ToolDecision(action=self.config.process_write_decision if operation.action == "process.write" else "allow")
-        attributes = operation.attributes
-        args = tuple(json.loads(attributes["args"]))
-        selected = ToolDecision(action=self.config.default_decision, reason=attributes.get("analysis_reason") or "Unmatched command")
-        for rule in self.config.rules:
-            actual = attributes["program"]
-            try:
-                expected = self._binary(rule.program, Path(attributes["cwd"]))
-                matched = os.path.normcase(str(expected)) == os.path.normcase(operation.resource)
-            except ToolBusinessError:
-                matched = attributes["executable_identity"] == "shell_command" and rule.program == actual
-                if os.name == "nt" and attributes["executable_identity"] == "shell_command":
-                    matched = rule.program.lower() == actual.lower()
-            if not matched or rule.cwd is not None and not fnmatchcase(attributes["cwd"], rule.cwd):
-                continue
-            if rule.args is not None and args != rule.args:
-                continue
-            if rule.args_prefix is not None and args[:len(rule.args_prefix)] != rule.args_prefix:
-                continue
-            if rule.args_regex is not None:
-                import regex
-                try:
-                    if regex.fullmatch(rule.args_regex, shlex.join(args), timeout=self.config.regex_timeout_seconds) is None:
-                        continue
-                except TimeoutError:
-                    return ToolDecision(action="deny", reason="Command regex exceeded its evaluation limit.")
-            selected = ToolDecision(action=rule.decision, reason=rule.reason or "Command rule")
-        return selected
-
     async def execute(self, name, arguments, context):
         session_id = self._session(context)
         if name != "execute_command":
             return await self._manage(arguments["request"], context)
-        spec, operations = self._plan(arguments, context)
-        if operations != context.operations:
-            raise ToolBusinessError("Execution target changed after authorization; request approval again.", code="execution_plan_changed")
+        spec, directories, log = self._plan(arguments)
         from autoagent.core import OperatorCallContext
         current = OperatorCallContext.current()
         invocation_id = current.invocation_id if current else (context.approval_scope or {}).get("invocation_id")
         sink = None
         def prepare(spec):
             nonlocal sink
-            for operation in operations:
-                if not operation.action.startswith("file."):
-                    continue
-                if arguments.get("log_path") is not None and operation.attributes["requested"] == arguments["log_path"]:
-                    from .logs import OutputLog
-                    sink = OutputLog(operation.resource, self.files.open_output(operation), self.config.max_log_bytes)
-                    spec = replace(spec, output_log=sink)
-                else:
-                    self.files.create_directory(operation)
+            for directory in directories:
+                self.files.create_directory(directory)
+            if log is not None:
+                from .logs import OutputLog
+                sink = OutputLog(str(log), self.files.open_output(log), self.config.max_log_bytes)
+                spec = replace(spec, output_log=sink)
             return spec
         try:
             record = await self.manager.start(self.backend, spec, session_id=session_id, invocation_id=invocation_id,
@@ -422,6 +273,12 @@ class LocalExecutionService:
         record = self.manager.get(request["process_id"], context.session_id, str(self.root))
         if record.handle is None:
             raise ToolBusinessError("Process has not finished starting.", code="process_starting")
+        if action in {"read", "wait"}:
+            seconds = request.get("wait_seconds")
+            if seconds is None:
+                seconds = self.config.default_wait_seconds
+            self._wait_limit(seconds)
+            self._output_limit(request)
         if action == "terminate":
             await record.stop()
         elif action == "wait":

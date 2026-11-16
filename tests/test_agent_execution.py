@@ -13,18 +13,15 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from pydantic import ValidationError
-
 from autoagent.agent import (
-    AgentApprovalRequest, AgentApprovalResponse, AgentInput, CommandRule, ExecutionToolsConfig,
+    AgentApprovalRequest, AgentApprovalResponse, AgentInput, ExecutionToolsConfig,
     LLMResponse, LLMToolCall, LocalExecutionService, ToolContext,
-    ToolApprovalRequired, ToolDecision, TreeSitterShellAnalyzer, agent_workflow, execution_tools,
+    ToolApprovalRequired, ToolOperation, ToolPolicy, agent_workflow, execution_tools,
 )
 from autoagent.agent.context import restore
 from autoagent.host import AutoAgentHost, HostSettings
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 from tests.test_agent_workflow import ScriptedProvider, answer, settings
-from tests.test_agent_files import file_config, path_rule
 
 
 def call(name="execute_command", **arguments):
@@ -66,43 +63,16 @@ class OutputLogTests(unittest.TestCase):
         self.assertEqual(log.summary()["log_error"], "disk full")
 
 
-class ShellAnalysisTests(unittest.TestCase):
-    def test_literal_chains_parse_in_both_languages(self):
-        """Both grammar adapters identify static commands and preserve quoting."""
-        analyzer = TreeSitterShellAnalyzer()
-        for shell in ("bash", "pwsh"):
-            with self.subTest(shell=shell):
-                result = analyzer.analyze("git status --short && git diff 'some file'", shell)
-                self.assertTrue(result.complete, result.reason)
-                self.assertEqual(result.commands, (("git", "status", "--short"), ("git", "diff", "some file")))
-
-    def test_dynamic_and_side_effecting_syntax_is_opaque(self):
-        """Partial command extraction never authorizes unsupported script effects."""
-        analyzer = TreeSitterShellAnalyzer()
-        scripts = ["git status > x", "git $(whoami)", "$CMD status", "git status &", "git status &&",
-            "git status; cd /tmp; git diff", "X=1; git status", "git *", "for x in a; do git status; done"]
-        for script in scripts:
-            with self.subTest(script=script):
-                self.assertFalse(analyzer.analyze(script, "bash").complete)
-        for script in ["git $env:SECRET", "git status > x", "git --% %SECRET%", "& $cmd status", "$x=1; git status"]:
-            with self.subTest(script=script):
-                self.assertFalse(analyzer.analyze(script, "pwsh").complete)
-
-
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.service = self.make_service(ExecutionToolsConfig(default_decision="allow"))
+        self.service = self.make_service(ExecutionToolsConfig())
         self.tools = execution_tools(self.service, context=ToolContext(session_id="one"))
 
     def make_service(self, config=None, **kwargs):
-        policy = ExecutionToolsConfig(default_decision="ask", process_write_decision="ask",
-            file_policy=file_config(path_rule(".env"), external="ask"))
-        if config is not None:
-            policy = policy.model_copy(update={key:getattr(config, key) for key in config.model_fields_set})
-        service = LocalExecutionService(self.root, config=policy, **kwargs)
+        service = LocalExecutionService(self.root, config=config, **kwargs)
         self.addAsyncCleanup(service.aclose)
         return service
 
@@ -183,7 +153,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_managed_directories_redirect_cache_and_temp_inside_workspace(self):
         """Optional cache/temp controls create authorized directories and set library conventions."""
-        self.service = self.make_service(ExecutionToolsConfig(default_decision="allow",
+        self.service = self.make_service(ExecutionToolsConfig(
             cache_directory=".cache", temp_directory=".tmp"))
         self.tools = execution_tools(self.service, context=ToolContext(session_id="one"))
         result = await self.invoke(python("import os,tempfile,json; print(json.dumps([os.environ['HF_HOME'],os.environ['PIP_CACHE_DIR'],tempfile.gettempdir()]))"))
@@ -195,12 +165,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         collision = await self.invoke(log_path="future", cache_directory="future/cache")
         self.assertEqual(collision.structured_content["error"]["kind"], "invalid_output_path")
         self.assertFalse((self.root / "future").exists())
-        sensitive = call(command=python("print('no')"), log_path=".env")
-        self.assertEqual((await self.tools.acheck(sensitive)).action, "ask")
-        with self.assertRaises(ToolApprovalRequired):
-            await self.tools.ainvoke(sensitive)
-        self.assertFalse((self.root / ".env").exists())
-
     def test_configured_limits_reach_model_schema_without_cross_instance_leakage(self):
         """Each Tool schema exposes its own runtime wait, timeout and preview bounds."""
         service = self.make_service(ExecutionToolsConfig(max_wait_seconds=80, default_wait_seconds=45, max_input_bytes=512))
@@ -217,14 +181,8 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("previous next_cursor", original["manage_process"]["$defs"]["ProcessRead"]["properties"]["cursor"]["description"])
 
     def test_typed_contract_and_required_decisions(self):
-        """Rule decisions are mandatory and command arguments form one flat object."""
-        with self.assertRaises(ValidationError):
-            CommandRule(program="git")
-        with self.assertRaises(ValidationError):
-            CommandRule(program="git", decision="allow", args=[], args_prefix=[])
-        with self.assertRaises(ValidationError):
-            CommandRule(program="git", decision="allow", args_regex="(")
-        config = ExecutionToolsConfig(rules=[CommandRule(program="git", decision="ask")])
+        """Command inputs stay flat and execution limits round-trip independently of policy."""
+        config = ExecutionToolsConfig()
         self.assertEqual(ExecutionToolsConfig.model_validate_json(config.model_dump_json()), config)
         definitions = {value.name: value.parameters for value in self.tools.definitions}
         self.assertEqual(set(definitions), {"execute_command", "manage_process"})
@@ -252,7 +210,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admission_rejection_does_not_create_log_or_cache_directories(self):
         """A rejected launch has no preparation side effects and its log path remains usable later."""
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow", max_running_processes=1))
+        service = self.make_service(ExecutionToolsConfig(max_running_processes=1))
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         first = await tools.ainvoke(call(command=python("import time; time.sleep(60)"), yield_seconds=0))
         process_id = first.structured_content["process_id"]
@@ -287,7 +245,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_failed_preparation_releases_reserved_process_capacity(self):
         """A log-open failure leaves no reserved handle and cannot block the next launch."""
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow", max_running_processes=1))
+        service = self.make_service(ExecutionToolsConfig(max_running_processes=1))
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         with patch.object(service.files, "open_output", side_effect=OSError("disk unavailable")):
             result = await tools.ainvoke(call(command=python("print('ready')"), log_path="run.txt"))
@@ -298,7 +256,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_trimmed_output_reports_skipped_bytes_without_replaying_it(self):
         """Preview truncation and expired cursors expose the missing byte count alongside continuation."""
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow", max_retained_bytes=40, max_output_bytes=20))
+        service = self.make_service(ExecutionToolsConfig(max_retained_bytes=40, max_output_bytes=20))
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         result = await tools.ainvoke(call(command=python("print('x'*100)")))
         value = result.structured_content
@@ -308,63 +266,26 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(read.structured_content["dropped_prefix_bytes"], 61)
         self.assertTrue(read.structured_content["has_more"])
 
-    @unittest.skipUnless(shutil.which("bash"), "Bash is not installed")
-    async def test_one_rule_authorizes_exec_shell_and_wrapper(self):
-        """A single program/argument rule is shared by static Shell entry points."""
-        config = ExecutionToolsConfig(default_decision="deny", rules=[
-            CommandRule(program="printf", args_prefix=["%s"], decision="allow")])
-        tools = execution_tools(self.make_service(config), context=ToolContext(session_id="one"))
-        commands = [{"mode": "exec", "program": "printf", "args": ["%s", "hello"]},
-            {"mode": "shell", "shell": "bash", "script": "printf '%s' hello"},
-            {"mode": "exec", "program": "bash", "args": ["-c", "printf '%s' hello"]}]
-        for command in commands:
-            with self.subTest(command=command):
-                self.assertEqual((await tools.acheck(call(command=command))).action, "allow")
-                result = await tools.ainvoke(call(command=command))
-                self.assertEqual(result.structured_content["stdout"], "hello", result)
+    async def test_command_policy_uses_inputs_and_context_without_operations(self):
+        """The SDK evaluates literal exec and shell inputs, and a matching Deny wins."""
+        policy = ToolPolicy.from_dict({"default": "ask", "rules": [
+            {"when": {"field": "context.tool_name", "op": "equals", "value": "execute_command"}, "decision": "allow"},
+            {"when": {"field": "args.args", "op": "prefix", "value": ["-u", "-c"]}, "decision": "deny"},
+            {"when": {"field": "args.script", "op": "regex", "value": "&&"}, "decision": "deny"},
+        ]})
+        context = ToolContext(session_id="one", operations=(ToolOperation(action="file.read", resource="prior.txt"),))
+        tools = execution_tools(self.service, policy=policy, context=context)
+        self.assertEqual((await tools.acheck(call(command=python("pass")))).action, "deny")
+        checked = await tools.apreflight(call(mode="shell", script="echo first && echo second"))
+        self.assertEqual(checked.decision.action, "deny")
+        self.assertEqual(checked.operations, ())
+        self.assertEqual((await tools.acheck(call(mode="exec", program=sys.executable, args=["--version"]))).action, "allow")
+        self.assertIsNone(tools._tools["execute_command"].operation_schema)
+        self.assertIsNone(tools._tools["manage_process"].operation_resolver)
 
-    @unittest.skipUnless(shutil.which("bash"), "Bash is not installed")
-    async def test_compound_deny_prevents_all_execution(self):
-        """A denied later command blocks even the allowed first command's effects."""
-        tools = execution_tools(self.make_service(ExecutionToolsConfig(rules=[
-            CommandRule(program=sys.executable, decision="allow"), CommandRule(program="false", decision="deny")])),
-            context=ToolContext(session_id="one"))
-        import shlex
-        first = shlex.join([sys.executable, "-c", "from pathlib import Path; Path('marker').touch()"])
-        result = await tools.ainvoke(call(command={"mode": "shell", "shell": "bash", "script": first + " && false"}))
-        self.assertTrue(result.is_error)
-        self.assertFalse((self.root / "marker").exists())
-
-    async def test_rules_support_program_prefix_regex_and_default(self):
-        """Ordered argument rules override program defaults; unmatched commands ask."""
-        tools = execution_tools(self.make_service(ExecutionToolsConfig(rules=[
-            CommandRule(program=sys.executable, decision="deny"),
-            CommandRule(program=sys.executable, args_prefix=["--version"], decision="allow"),
-            CommandRule(program=sys.executable, args_regex=r"-V", decision="ask")])) ,context=ToolContext(session_id="one"))
-        for args, expected in [([], "deny"), (["--version"], "allow"), (["-V"], "ask")]:
-            request = call(command={"mode": "exec", "program": sys.executable, "args": args})
-            self.assertEqual((await tools.acheck(request)).action, expected)
-
-    async def test_unconfigured_defaults_ask_and_deny_are_distinct(self):
-        """The configured default applies only when no command rule matched."""
-        for decision in ("ask", "deny"):
-            tools = execution_tools(self.make_service(ExecutionToolsConfig(default_decision=decision)),
-                context=ToolContext(session_id="one"))
-            self.assertEqual((await tools.acheck(call(command=python("pass")))).action, decision)
-
-    @unittest.skipUnless(shutil.which("bash"), "Bash is not installed")
-    async def test_opaque_shell_cannot_inherit_an_inner_allow(self):
-        """Redirection and expansion fall back to whole-script policy."""
-        tools = execution_tools(self.make_service(ExecutionToolsConfig(rules=[
-            CommandRule(program="printf", decision="allow")])), context=ToolContext(session_id="one"))
-        for script in ["printf hello > marker", "printf $HOME", "printf hello && eval 'false'"]:
-            checked = await tools.acheck(call(command={"mode": "shell", "shell": "bash", "script": script}))
-            self.assertEqual(checked.action, "ask")
-        self.assertFalse((self.root / "marker").exists())
-
-    async def test_approval_binds_arguments_and_executable_identity(self):
-        """An approval cannot authorize changed arguments or an executable swap."""
-        tools = execution_tools(self.make_service(), context=ToolContext(session_id="one"))
+    async def test_approval_binds_command_arguments(self):
+        """An approval cannot authorize a changed command input."""
+        tools = execution_tools(self.make_service(), policy=ToolPolicy(default="ask"), context=ToolContext(session_id="one"))
         request = call(command=python("print('first')"))
         decision = await tools.acheck(request)
         reply = decision.approval_request.respond(approved=True)
@@ -372,18 +293,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(mismatch.is_error)
         result = await tools.ainvoke(request, approval=reply)
         self.assertEqual(result.structured_content["stdout"], "first\n")
-
-    async def test_resolved_path_does_not_trust_another_same_named_executable(self):
-        """A bare program allow rule is tied to its PATH-resolved executable."""
-        if os.name != "posix":
-            self.skipTest("POSIX executable fixture")
-        fake = self.root / Path(sys.executable).name
-        fake.write_text("#!/bin/sh\nprintf fake")
-        fake.chmod(0o700)
-        tools = execution_tools(self.make_service(ExecutionToolsConfig(default_decision="deny",
-            rules=[CommandRule(program=Path(sys.executable).name, decision="allow")])), context=ToolContext(session_id="one"))
-        checked = await tools.acheck(call(command={"mode": "exec", "program": str(fake)}))
-        self.assertEqual(checked.action, "deny")
 
     async def test_unknown_program_and_invalid_timeout_are_observations(self):
         """Preflight errors return typed observations without spawning anything."""
@@ -421,7 +330,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bounded_output_marks_lost_history(self):
         """Large output cannot grow retained memory and expired cursors are explicit."""
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow", max_retained_bytes=100, max_output_bytes=40))
+        service = self.make_service(ExecutionToolsConfig(max_retained_bytes=100, max_output_bytes=40))
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         result = await tools.ainvoke(call(command=python("print('x'*10000)")))
         self.assertTrue(result.structured_content["truncated"])
@@ -435,7 +344,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_utf8_pagination_never_splits_a_character(self):
         """Small pages and OS byte splits preserve Unicode without replacement artifacts."""
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow", max_output_bytes=4))
+        service = self.make_service(ExecutionToolsConfig(max_output_bytes=4))
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         result = await tools.ainvoke(call(command=python("import os; data='你好世界'.encode(); [os.write(1,bytes([b])) for b in data]")))
         process_id = result.structured_content["process_id"]
@@ -450,30 +359,6 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 break
         self.assertEqual("".join(pieces), "你好世界")
 
-    async def test_executable_replacement_invalidates_approval(self):
-        """Approving a local executable does not approve a subsequently replaced file."""
-        if os.name != "posix":
-            self.skipTest("POSIX executable fixture")
-        path = self.root / "tool"
-        shutil.copyfile(shutil.which("printf"), path)
-        path.chmod(0o700)
-        tools = execution_tools(self.make_service(), context=ToolContext(session_id="one"))
-        request = call(command={"mode": "exec", "program": str(path), "args": ["%s", "approved"]})
-        decision = await tools.acheck(request)
-        path.write_bytes(path.read_bytes() + b" ")
-        result = await tools.ainvoke(request, approval=decision.approval_request.respond(approved=True))
-        self.assertEqual(result.structured_content["error"]["kind"], "tool_approval_mismatch")
-
-    async def test_regex_evaluation_is_bounded(self):
-        """Expensive user patterns cannot stall command preflight indefinitely."""
-        service = self.make_service(ExecutionToolsConfig(regex_timeout_seconds=.001, rules=[
-            CommandRule(program=sys.executable, args_regex=r"(?:a|aa)+", decision="allow")]))
-        tools = execution_tools(service, context=ToolContext(session_id="one"))
-        request = call(command={"mode": "exec", "program": sys.executable, "args": ["a" * 20000 + "b"]})
-        decision = await tools.acheck(request)
-        self.assertEqual(decision.action, "deny")
-        self.assertIn("regex", decision.reason)
-
     async def test_initial_input_and_default_eof(self):
         """Initial stdin is delivered and then closed unless explicitly kept open."""
         result = await self.invoke(python("import sys; print(sys.stdin.read())"), stdin="hello")
@@ -487,9 +372,11 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
         process_id = started.structured_content["process_id"]
         request = call("manage_process", request={"action": "write", "process_id": process_id,
             "text": "hello\n", "close_stdin": True})
-        decision = await self.tools.acheck(request)
+        from autoagent.agent_app.tool_defaults import execution_policy
+        tools = execution_tools(self.service, policy=execution_policy(), context=ToolContext(session_id="one"))
+        decision = await tools.acheck(request)
         self.assertEqual(decision.action, "ask")
-        await self.tools.ainvoke(request, approval=decision.approval_request.respond(approved=True))
+        await tools.ainvoke(request, approval=decision.approval_request.respond(approved=True))
         await self.service.manager.get(process_id, "one", str(self.root)).handle.wait()
         result = await self.manage("read", process_id=process_id, cursor=0)
         self.assertEqual(result.structured_content["stdout"], "hello\n")
@@ -506,18 +393,10 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_runtime_environment_does_not_inherit_application_secrets(self):
         """Only selected process environment fields are inherited by default."""
         with patch.dict(os.environ, {"AUTOAGENT_TEST_SECRET": "hidden", "BASH_ENV": "/evil/startup"}):
-            service = self.make_service(ExecutionToolsConfig(default_decision="allow"))
+            service = self.make_service(ExecutionToolsConfig())
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         result = await tools.ainvoke(call(command=python("import os; print(os.getenv('AUTOAGENT_TEST_SECRET')); print(os.getenv('BASH_ENV'))")))
         self.assertEqual(result.structured_content["stdout"], "None\nNone\n")
-
-    async def test_custom_async_policy_can_override_default(self):
-        """Applications can inspect resolved operations through an async policy."""
-        async def policy(operation, context):
-            return ToolDecision(action="allow")
-        tools = execution_tools(self.make_service(policy=policy), context=ToolContext(session_id="one"))
-        result = await tools.ainvoke(call(command=python("print('custom')")))
-        self.assertEqual(result.structured_content["stdout"], "custom\n")
 
     async def test_cancelled_launch_cleans_up_the_owned_process(self):
         """Cancellation during foreground waiting stops the command before propagating."""
@@ -541,7 +420,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
                 await release.wait()
                 return self.handle
         backend = Backend()
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow"), backend=backend)
+        service = self.make_service(ExecutionToolsConfig(), backend=backend)
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         task = asyncio.create_task(tools.ainvoke(call(command=python("import time; time.sleep(60)"))))
         await asyncio.wait_for(ready.wait(), 3)
@@ -564,7 +443,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_parallel_launches_respect_admission_limit(self):
         """Concurrent Map-like calls cannot oversubscribe the Session process cap."""
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow", max_running_processes=1))
+        service = self.make_service(ExecutionToolsConfig(max_running_processes=1))
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         results = await asyncio.gather(*(tools.ainvoke(call(command=python("import time; time.sleep(60)"), yield_seconds=0))
             for _ in range(8)))
@@ -573,7 +452,7 @@ class ExecutionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_limits_and_manager_close_are_effective(self):
         """Per-Session limits reject extra starts; close terminates and invalidates handles."""
-        service = self.make_service(ExecutionToolsConfig(default_decision="allow", max_running_processes=1))
+        service = self.make_service(ExecutionToolsConfig(max_running_processes=1))
         tools = execution_tools(service, context=ToolContext(session_id="one"))
         command = python("import time; time.sleep(60)")
         first = await tools.ainvoke(call(command=command, yield_seconds=0))
@@ -625,7 +504,7 @@ class HostExecutionContracts:
             setup.providers.register("offline", provider)
             setup.extensions["agent"].context.set_defaults(settings())
             yield
-        async with AutoAgentHost(workflows=[workflow or agent_workflow(resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig(default_decision="ask")).tools()))], root=self.root,
+        async with AutoAgentHost(workflows=[workflow or agent_workflow(resources=AgentResources(tools=CommandTools(self.root, policy=ToolPolicy(default="ask")).tools()))], root=self.root,
             environment={}, lifespan=lifespan, settings=HostSettings(database_url=self.url)) as host:
             yield host
 
@@ -658,7 +537,7 @@ class HostExecutionContracts:
             self.assertEqual(waiting.status, "waiting", waiting.error)
             self.assertFalse((self.root / "approved").exists())
             request = restore(AgentApprovalRequest, waiting.waits[0].request)
-            self.assertEqual(request.requests[0].operations[0]["action"], "command.execute")
+            self.assertEqual(request.requests[0].operations, ())
             reply = AgentApprovalResponse(decisions=tuple(v.respond(approved=True) for v in request.requests), revision=request.revision)
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply.model_dump(mode="json"))
             result = await host.join(waiting.invocation_id)
@@ -695,7 +574,7 @@ class HostExecutionContracts:
         command = python("import time; time.sleep(60)")
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls",
             output=(call(command=command, yield_seconds=0),)), answer())
-        config = ExecutionToolsConfig(default_decision="allow")
+        config = ExecutionToolsConfig()
         async with self.host(provider, workflow=agent_workflow(resources=AgentResources(tools=CommandTools(self.root, config=config).tools()), )) as host:
             await self.bind(host)
             result = await host.join(await host.execute("agent", AgentInput(message="run"), session_id="one"))
@@ -714,7 +593,7 @@ class HostExecutionContracts:
             LLMResponse(model="offline", finish_reason="tool_calls", output=(call("ask_user", questions=[{
                 "id": "next", "type": "text", "text": "Continue?"}]),)))
         async with self.host(provider, workflow=agent_workflow(include_ask_user=True,
-            resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig(default_decision="allow")).tools()), )) as host:
+            resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig()).tools()), )) as host:
             await self.bind(host)
             ref = await host.execute("agent", AgentInput(message="run"), session_id="one")
             result = await host.join(ref)
@@ -729,7 +608,7 @@ class HostExecutionContracts:
         command = python("import time; time.sleep(60)")
         provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls",
             output=(call(command=command, yield_seconds=0),)), answer())
-        async with self.host(provider, workflow=agent_workflow(resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig(default_decision="allow")).tools()), )) as host:
+        async with self.host(provider, workflow=agent_workflow(resources=AgentResources(tools=CommandTools(self.root, config=ExecutionToolsConfig()).tools()), )) as host:
             await self.bind(host)
             ref = await host.execute("agent", AgentInput(message="run"), session_id="one")
             result = await host.join(ref)

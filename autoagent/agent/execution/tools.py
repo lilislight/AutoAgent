@@ -7,7 +7,6 @@ from pydantic import Field, ValidationError
 
 from ..models import LLMToolResult, ToolOutput
 from ..tools import Tool, ToolContext, ToolSet
-from ..tools.operations import ToolOperationPolicy
 from .models import ExecCommand, ShellCommand, ProcessRequest
 from .service import ExecutionService
 
@@ -66,6 +65,7 @@ class _ExecutionTool(Tool):
         value = super().definition
         config = self.service.config
         if value.name == "execute_command":
+            value.parameters["examples"] = [{"mode": "exec", "program": "git", "args": ["status", "--short"]}]
             props = value.parameters["properties"]
             props["args"]["description"] = "Literal argument array for exec mode. Do not repeat program; no shell expansion or splitting."
             props["program"]["description"] = "Executable name or path for exec mode, not an entire command line."
@@ -90,6 +90,7 @@ class _ExecutionTool(Tool):
             description += (f" Command/program arguments together are capped at {config.max_command_bytes} UTF-8 bytes;"
                             f" stdin at {config.max_input_bytes} UTF-8 bytes. At most {config.max_running_processes} concurrent processes per Session; wait for or terminate existing handles before starting more.")
         else:
+            value.parameters["examples"] = [{"request": {"action": "list"}}]
             for name in ("ProcessRead", "ProcessWait"):
                 prop = value.parameters["$defs"][name]["properties"]["wait_seconds"]
                 (prop["anyOf"][0] if "anyOf" in prop else prop)["maximum"] = config.max_wait_seconds
@@ -105,7 +106,7 @@ class _ExecutionTool(Tool):
         return value.model_copy(update={"description": value.description + description})
 
 
-def execution_tools(service, *, context=None):
+def execution_tools(service, *, context=None, policy=None):
     if not isinstance(service, ExecutionService):
         raise TypeError("Execution Tools require an ExecutionService.")
     async def execute_command(mode: Literal["exec", "shell"], program: str | None = None,
@@ -127,17 +128,8 @@ def execution_tools(service, *, context=None):
         current = ToolContext.current()
         return await service.execute("manage_process", current.arguments, current)
 
-    tools = []
-    for handler in (execute_command, manage_process):
-        name = handler.__name__
-        def resolve(arguments, context, name=name):
-            from ..tools import ToolBusinessError
-            try:
-                return service.operations(name, arguments, context)
-            except OSError as error:
-                raise ToolBusinessError("Execution target is unavailable: " + str(error), code="execution_target_unavailable") from error
-        tools.append(_ExecutionTool(handler, service, operations=resolve))
-    return ToolSet(tools, context=context, policy=ToolOperationPolicy(service.evaluate))
+    return ToolSet((_ExecutionTool(handler, service) for handler in (execute_command, manage_process)),
+        context=context, policy=policy)
 
 
 __all__ = ["execution_tools"]

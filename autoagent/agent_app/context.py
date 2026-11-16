@@ -149,10 +149,9 @@ class ApplicationContext(AgentRuntime):
             entry = catalog.get(call.name)
             if entry is None:
                 return ToolDecision(action="deny", reason="Tool is outside the Agent application.")
-            selected = self.shared_resources.effective_permissions(entry)
-            if selected is not None:
-                return selected(call, context)
-            decisions = [await registered_policy(call, context)]
+            identity = self.shared_resources.resource_identity(entry)
+            configured = self.shared_resources.configured_policies(identity, entry.resource_id)
+            decisions = [await registered_policy(call, context), *(policy(call, context) for _, policy in configured)]
             value = entry.value
             while getattr(value, "_owner", None) is not None:
                 owner = value._owner
@@ -162,18 +161,17 @@ class ApplicationContext(AgentRuntime):
             return combine_decisions(decisions)
 
         def operation_policy(operation, context):
+            if operation in context.operations:
+                return None
             from autoagent.agent import LLMToolCall
             call = LLMToolCall(name=context.tool_name, call_id=context.call_id,
                 arguments=json.dumps(plain(context.arguments))) if context.tool_name and context.call_id else None
-            target = context.tool_name
-            if operation not in context.operations:
-                target = {"file.read":"read_file", "file.write":"write_file", "file.list":"list_files",
-                    "file.delete":"manage_files", "file.stat":"manage_files"}.get(operation.action, target)
-            entry = catalog.get(target)
-            selected = self.shared_resources.effective_permissions(entry) if entry is not None else None
-            if selected is None or call is None:
+            entry = catalog.get(context.tool_name)
+            if entry is None or call is None:
                 return None
-            return selected.evaluate_operation(call, context, operation)
+            identity = self.shared_resources.resource_identity(entry)
+            configured = self.shared_resources.configured_policies(identity, entry.resource_id)
+            return combine_decisions(policy.evaluate_operation(call, context, operation) for _, policy in configured)
 
         tools.policy = policy
         tools.replace_policies = True

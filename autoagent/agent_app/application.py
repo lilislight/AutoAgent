@@ -62,7 +62,8 @@ class AgentApplication:
             template = handler.__autoagent_resources__
             resources = ApplicationResources(self.context, tools=template.tools, mcp=template.mcp, skills=template.skills,
                 namespace=template.namespace)
-            fresh = builtin_agent_workflow(resources=resources, execution=getattr(handler, "__agent_app_execution__", None) or False)
+            fresh = builtin_agent_workflow(resources=resources, execution=getattr(handler, "__agent_app_execution__", None) or False,
+                command_policy=handler.__agent_app_command_policy__)
             workflows = tuple(fresh if workflow is selected else workflow for workflow in workflows)
         self._workflow = self.validate_workflows(workflows)
         if self._workflow is not None:
@@ -129,9 +130,9 @@ class AgentApplication:
         result['providers'] = [row['id'] for row in result['provider_options']]
         return result
 
-    async def resource_configs(self, workspace_id=None):
+    async def resource_configs(self, workspace_id=None, *, scope=None):
         self.require_enabled()
-        result = await self.context.shared_resources.describe(workspace_id)
+        result = await self.context.shared_resources.describe(workspace_id, scope=scope)
         from autoagent.agent import ToolPolicy
         return {**result, "policy_schema": ToolPolicy.model_json_schema(),
             "edit_code_permissions": self.edit_code_permissions}
@@ -144,25 +145,79 @@ class AgentApplication:
         self.require_enabled()
         return await self.context.shared_resources.skill_document(management_id, workspace_id)
 
-    async def preview_policy(self, policy, *, tool_name, arguments, operations=(), context=None):
+    async def accept_mcp_schema(self, connection_id, remote_name, version):
+        self.require_enabled()
+        await self.context.shared_resources.accept_mcp_schema(connection_id, remote_name, version)
+
+    async def preview_policy(self, policy, *, arguments, tool_name=None, operations=(), context=None,
+                             tool_id=None, workspace_id=None):
         """Evaluate an editor example without executing a Tool or issuing an approval."""
         self.require_enabled()
         import json
-        from autoagent.agent import LLMToolCall, ToolContext
-        call = LLMToolCall(name=tool_name, call_id="policy-preview", arguments=json.dumps(arguments))
+        from autoagent.agent import LLMToolCall, LLMToolResult, ToolContext, ToolSet
         supplied = context or {}
         if set(supplied) - {"user_id", "session_id", "attributes"}:
             raise ValueError("Preview Context accepts user_id, session_id and attributes only.")
-        current = ToolContext(operations=operations, **supplied).for_call(call, arguments)
-        return dict(preview_only=True, **policy.explain(call, current))
+        for field in ("user_id", "session_id"):
+            if supplied.get(field) is not None and not isinstance(supplied[field], str):
+                raise ValueError(f"Preview Context {field} must be a string or null.")
+        if "attributes" in supplied and not isinstance(supplied["attributes"], dict):
+            raise ValueError("Preview Context attributes must be an object.")
+        current = ToolContext(operations=operations, **supplied)
+        registered, callbacks = (), False
+        if tool_id is not None:
+            from autoagent.core.operators import run_sync
+            resources = self.context.shared_resources
+            entry = await resources.describe(workspace_id, tool_id=tool_id,
+                scope="mcp" if tool_id.startswith("mcp/") else None)
+            call = LLMToolCall(name=entry.name, call_id="policy-preview", arguments=json.dumps(arguments))
+            tool = resources._executable(entry.value)
+            prepared = await run_sync(ToolSet((tool,))._prepare, call, current)
+            if isinstance(prepared, LLMToolResult):
+                raise ValueError(prepared.structured_content["error"]["message"])
+            current = prepared.context
+            code, callbacks = resources.registered_policies(entry)
+            configured = resources.configured_policies(resources.resource_identity(entry), entry.resource_id)
+            registered = (*(("code", value) for value in code),
+                *((source, value) for source, value in configured if source != "tool"))
+        else:
+            if tool_name is None:
+                raise ValueError("Choose a Tool to test.")
+            call = LLMToolCall(name=tool_name, call_id="policy-preview", arguments=json.dumps(arguments))
+            current = current.for_call(call, arguments)
+        from autoagent.agent.tools.operations import combine_decisions
+        explanations = [(source, value.explain(call, current)) for source, value in (*registered, ("custom", policy))]
+        decision = combine_decisions(value["decision"] for _, value in explanations)
+        operations = []
+        for rows in zip(*(value["operations"] for _, value in explanations), strict=True):
+            matched_rules = []
+            defaults = []
+            for layer, ((source, _), operation) in enumerate(zip(explanations, rows, strict=True)):
+                matched_rules.extend({**rule, "source": source, "layer": layer} for rule in operation["matched_rules"])
+                if operation["default_used"]:
+                    defaults.append(dict(source=source, layer=layer, decision=operation["decision"]["action"]))
+            operations.append(dict(operation=rows[0]["operation"], matched_rules=matched_rules,
+                decision=combine_decisions(operation["decision"] for operation in rows).model_dump(mode="json"),
+                defaults=defaults, default_used=len(defaults) == len(rows)))
+        return dict(preview_only=True, decision=decision.model_dump(mode="json"), operations=operations,
+            includes_code_callbacks=not callbacks)
 
-    async def parse_policy(self, text, *, format):
+    async def parse_policy(self, text, *, format, editor=False):
         """Validate editor text using the SDK parser, without touching application settings."""
         self.require_enabled()
         from autoagent.agent import ToolPolicy
         if format not in {"json", "yaml"}:
             raise ValueError("Unsupported policy format.")
         policy = ToolPolicy.from_yaml(text) if format == "yaml" else ToolPolicy.from_json(text)
+        if editor:
+            import json
+            import yaml
+            value = policy.to_dict()
+            for rule in value["rules"]:
+                rule.pop("id")
+                rule.pop("reason")
+            return dict(policy=value, json=json.dumps(value, indent=2, ensure_ascii=False),
+                yaml=yaml.safe_dump(value, sort_keys=False, allow_unicode=True))
         return dict(policy=policy.to_dict(), json=policy.to_json(), yaml=policy.to_yaml())
 
     async def test_mcp(self, config):

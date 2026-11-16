@@ -9,7 +9,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 from ..models import LLMMessage
-from .errors import SkillAccessError, SkillError, SkillLimitError, SkillNotFoundError, SkillResourceError
+from .errors import SkillError, SkillLimitError, SkillNotFoundError, SkillResourceError
 from .models import (
     SkillDiagnostic, SkillDocument, SkillLimits, SkillMetadata,
     SkillResourceContent, SkillResourcePage, SkillTextContent,
@@ -146,14 +146,6 @@ class SkillSet:
     def freeze(self) -> SkillSet:
         """Freeze each Skill version before exposing model-facing tools."""
         return SkillSet((skill.freeze() for skill in self._skills.values()), diagnostics=self.diagnostics)
-
-    def require_model_access(self, name: str) -> Skill:
-        skill = self[name]
-        # Metadata edits cannot turn a stale catalog into new permissions.
-        document = skill.load()
-        if not document.metadata.model_invocation_enabled:
-            raise SkillAccessError("Skill is available only for application-directed use.")
-        return skill
 
     def catalog_message(self) -> LLMMessage | None:
         from .rendering import catalog_message

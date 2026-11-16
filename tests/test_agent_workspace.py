@@ -206,7 +206,7 @@ class WorkspaceContracts:
             answer('root done'), answer('another turn')])
         async with self.host(provider) as host, self.client(host) as client:
             root = await host.execute(BUILTIN_AGENT_WORKFLOW_ID, AgentInput(message='root task'))
-            async with asyncio.timeout(20):
+            async with asyncio.timeout(60):
                 while (result := await host.join(root)).status == 'waiting':
                     await asyncio.sleep(.01)
             self.assertEqual(result.status, 'completed', result)

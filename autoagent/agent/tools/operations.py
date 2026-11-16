@@ -21,6 +21,12 @@ class ToolOperation(Model):
     resource: NonEmpty | None = None
     attributes: dict[str, JsonValue] = Field(default_factory=dict)
 
+    def policy_facts(self):
+        """Expose the operation without its reserved execution binding."""
+        value = self.model_dump(mode="json")
+        value["attributes"].pop("_binding", None)
+        return value
+
 
 def combine_decisions(decisions):
     decisions = tuple(ToolDecision.model_validate(value) for value in decisions)

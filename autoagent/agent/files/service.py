@@ -44,6 +44,15 @@ def glob_match(path, pattern):
     return fnmatchcase(path, pattern) or (pattern.startswith("**/") and fnmatchcase(path, pattern[3:]))
 
 
+_FILE_ACTIONS = {
+    "list_files": "inspect", "read_file": "read", "search_files": "read",
+    "write_file": "write", "edit_file": "write",
+}
+_MANAGEMENT_ACTIONS = {
+    "stat": "inspect", "mkdir": "write", "copy": "read", "move": "delete", "delete": "delete",
+}
+
+
 @runtime_checkable
 class FileService(Protocol):
     """Backend resolves operations before authorization, then executes that plan."""
@@ -111,79 +120,56 @@ class LocalFileService:
         except (OSError, RuntimeError, ValueError):
             fail("invalid_path", "The file path cannot be resolved.")
 
-    def _operation(self, action, requested, *, expected=None, anchor=None):
-        path = self._resolve(requested)
-        parent = path.parent
-        while not parent.exists() and parent != parent.parent:
-            parent = parent.parent
-        if anchor is not None:
-            candidate = Path(anchor)
-            if not path.is_relative_to(candidate) or candidate == path:
-                fail("file_target_changed", "The authorized directory anchor no longer contains this target.")
-            parent = candidate
+    def _target(self, action, path):
         inside = path.is_relative_to(self.root)
         attributes = dict(scope="workspace" if inside else "external",
-            path=path.relative_to(self.root).as_posix() if inside else path.as_posix(),
-            requested=requested, parent=str(parent), parent_identity=fingerprint(parent),
-            root_identity=self._root_identity)
-        if expected is not None:
-            attributes["expected_version"] = expected
+            path=path.relative_to(self.root).as_posix() if inside else path.as_posix())
         return ToolOperation(action="file." + action, resource=str(path), attributes=attributes)
+
+    def _operation(self, action, requested, pinned):
+        path = self._resolve(requested)
+        operation = self._target(action, path)
+        parent = pinned.get((operation.action, operation.resource))
+        if parent is None:
+            parent = path.parent
+            while not parent.exists() and parent != parent.parent:
+                parent = parent.parent
+        elif not path.is_relative_to(parent) or parent == path:
+            fail("file_target_changed", "The authorized directory anchor no longer contains this target.")
+        return operation.model_copy(update={"attributes": {
+            **operation.attributes, "_binding": {"requested": requested, "parent": str(parent),
+                "parent_identity": fingerprint(parent), "root_identity": self._root_identity},
+        }})
 
     def operations(self, name, arguments, context):
         values = arguments.get("request", arguments)
-        operation = values.get("operation")
-        action = {"read_file": "read", "list_files": "list", "search_files": "search",
-            "write_file": "write", "edit_file": "write"}.get(name)
-        if name == "manage_files":
-            action = {"stat": "stat", "mkdir": "write", "move": "delete", "copy": "read", "delete": "delete"}[operation]
-        expected = values.get("expected_version")
-        pinned = context.authorization.get("tool_binding", {}).get("operations")
-        if pinned:
-            expected = pinned[0]["attributes"].get("expected_version")
-        result = [self._operation(action, values["path"], expected=expected)]
-        if name == "search_files" and Path(result[0].resource).is_file():
-            result.append(self._operation("read", values["path"]))
-        if name == "edit_file" or name == "write_file" and values.get("overwrite") and Path(result[0].resource).exists():
-            result.append(self._operation("read", values["path"]))
-        if operation == "move":
-            result.append(self._operation("read", values["path"]))
-        if operation in {"move", "copy"}:
-            # Destination is always second; subsequent operations are permission-only.
-            result.insert(1, self._operation("write", values["destination"]))
-        # A new ordinary directory may appear below an authorized ancestor.
-        # Keep that ancestor, recomputing its identity instead of changing the
-        # authorization merely because another call created a sibling's parent.
-        if pinned:
-            result = [self._operation(value.action.removeprefix("file."), value.attributes["requested"],
-                expected=value.attributes.get("expected_version"), anchor=prior["attributes"]["parent"])
-                if (prior := next((old for old in pinned if old["action"] == value.action
-                    and old["resource"] == value.resource), None)) is not None else value for value in result]
-        return tuple(result)
+        command = values["operation"] if name == "manage_files" else None
+        action = _FILE_ACTIONS[name] if command is None else _MANAGEMENT_ACTIONS[command]
+        path = values["path"]
+        targets = [(action, path)]
+        if command in {"copy", "move"}:
+            targets.append(("write", values["destination"]))
+        # Diffs and moves can expose old contents through a result or another path.
+        if name == "edit_file" or (name == "write_file" and values.get("overwrite")) or command == "move":
+            targets.append(("read", path))
+        # Reuse the authorized ancestor if a sibling call has since created a parent.
+        pinned = {(item["action"], item["resource"]): Path(item["attributes"]["_binding"]["parent"])
+            for item in context.authorization.get("tool_binding", {}).get("operations", ())
+            if "_binding" in item["attributes"]}
+        return tuple(self._operation(action, requested, pinned) for action, requested in targets)
 
     def evaluate(self, operation, context):
-        override = context.services.get("operation_policy")
-        if override is not None:
-            selected = override(operation, context)
-            if selected is not None:
-                return selected
         policies = (self.config.policy, *context.services.get("tool_operation_policies", ()))
-        return combine_decisions(policy.evaluate_operation(None, context, operation) for policy in policies)
-
-    def _permissions(self, path, context):
-        permissions = {}
-        reasons = {}
-        for action in ("read", "write", "delete", *(("list",) if path.is_dir() else ())):
-            decision = self.evaluate(self._operation(action, str(path)), context)
-            permissions[action] = decision.action
-            if decision.reason:
-                reasons[action] = decision.reason
-        return dict(permissions=permissions, permission_reasons=reasons)
+        decisions = [policy.evaluate_operation(None, context, operation) for policy in policies]
+        evaluate = context.services.get("operation_policy")
+        if evaluate is not None and (selected := evaluate(operation, context)) is not None:
+            decisions.append(selected)
+        return combine_decisions(decisions)
 
     def _verify(self, plan):
-        fresh = self._operation(plan.action.removeprefix("file."), plan.attributes["requested"],
-            expected=plan.attributes.get("expected_version"), anchor=plan.attributes["parent"])
-        if fresh != plan:
+        binding = plan.attributes["_binding"]
+        if (str(self._resolve(binding["requested"])) != plan.resource
+                or fingerprint(Path(binding["parent"])) != binding["parent_identity"]):
             fail("file_target_changed", "The resolved file target changed after authorization; retry for a fresh permission check.")
 
     @contextmanager
@@ -191,9 +177,9 @@ class LocalFileService:
         """No-follow descriptor traversal on POSIX; bounded portable fallback."""
         descriptors = []
         context = ToolContext.current()
-        anchors = {Path(plan.attributes["parent"]): plan.attributes["parent_identity"]
-            for plan in context.operations if plan.action.startswith("file.") and "parent" in plan.attributes
-            and path.is_relative_to(Path(plan.attributes["parent"]))} if context else {}
+        anchors = {Path(binding["parent"]): binding["parent_identity"]
+            for plan in context.operations if (binding := plan.attributes.get("_binding")) is not None
+            and plan.action.startswith("file.") and path.is_relative_to(Path(binding["parent"]))} if context else {}
         try:
             if path == path.parent:
                 yield None, str(path)
@@ -232,16 +218,14 @@ class LocalFileService:
             for descriptor in reversed(descriptors):
                 os.close(descriptor)
 
-    def create_directory(self, plan):
+    def create_directory(self, path):
         """Create an authorized runtime directory through no-follow traversal."""
-        self._verify(plan)
-        with self._parent(Path(plan.resource) / ".autoagent-directory-check", create=True):
+        with self._parent(path / ".autoagent-directory-check", create=True):
             pass
 
-    def open_output(self, plan):
+    def open_output(self, path):
         """Open a new authorized output file without clobbering or following links."""
-        self._verify(plan)
-        with self._parent(Path(plan.resource), create=True) as (directory, name):
+        with self._parent(path, create=True) as (directory, name):
             descriptor = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600, dir_fd=directory)
         return os.fdopen(descriptor, "wb")
@@ -282,11 +266,8 @@ class LocalFileService:
                 "or a format-specific execution command rather than retrying read_file.")
         return text, encoding
 
-    def _expected(self, plan, data):
-        expected = plan.attributes.get("expected_version")
-        if expected is None:
-            return
-        if version(data) != expected:
+    def _expected(self, expected, data):
+        if expected is not None and version(data) != expected:
             fail("version_conflict", "File does not match expected_version; inspect the latest contents before retrying.")
 
     def _output(self, record, text=None, **metadata):
@@ -383,20 +364,21 @@ class LocalFileService:
             diff=rendered, diff_truncated=diff is not None and len(diff.encode()) > limit,
             path=str(path), operation="create" if before is None else "edit")
 
-    def _write(self, path, args, plan):
+    def _write(self, path, args):
         before = None
-        if not path.exists() and plan.attributes.get("expected_version") is not None:
+        expected = args["expected_version"]
+        if not path.exists() and expected is not None:
             fail("version_conflict", "expected_version requires an existing file, but the file is missing.")
         if path.exists():
             if not args["overwrite"]:
                 fail("already_exists", "File already exists; use overwrite=true to replace all content, or edit_file for exact changes.")
             before, _ = self._bytes(path)
-            self._expected(plan, before)
+            self._expected(expected, before)
         return self._change(path, before, args["content"].encode(), create_parents=args["create_parents"])
 
-    def _edit(self, path, args, plan):
+    def _edit(self, path, args):
         before, _ = self._bytes(path)
-        self._expected(plan, before)
+        self._expected(args["expected_version"], before)
         text, encoding = self._decode(before)
         changes = []
         for edit in args["edits"]:
@@ -474,6 +456,18 @@ class LocalFileService:
         except (ValueError, TypeError, KeyError, AttributeError, OSError):
             fail("listing_changed", "Cursor is invalid or expired; restart without cursor and use the cursor returned by this tool.")
 
+    def _ignore_spec(self, directory, context):
+        from pathspec import GitIgnoreSpec
+
+        ignore = directory / ".gitignore"
+        if not ignore.is_file():
+            return None
+        target = self._resolve(str(ignore))
+        if self.evaluate(self._target("read", target), context).action == "allow":
+            body, _ = self._bytes(target)
+            return GitIgnoreSpec.from_lines(self._decode(body)[0].splitlines())
+        return None
+
     def _cursor(self, path, args, after, state, *, line=None):
         if not after:
             return None
@@ -488,7 +482,6 @@ class LocalFileService:
 
     def _entries(self, path, args, context, *, after=(), include_after=False, state=None, deadline=None):
         """Lazy depth-first pages, with bounded directory batches and no symlink descent."""
-        from pathspec import GitIgnoreSpec
         state = state if state is not None else {}
         state.setdefault("directories", {})
         state.setdefault("scanned", 0)
@@ -500,10 +493,8 @@ class LocalFileService:
                 return
             state["directories"][relative.as_posix()] = self._directory_stamp(directory)
             rules = list(inherited)
-            ignore = directory / ".gitignore"
-            if args["respect_gitignore"] and ignore.is_file() and self.evaluate(self._operation("read", str(ignore)), context).action == "allow":
-                body, _ = self._bytes(ignore.resolve())
-                rules.append((directory, GitIgnoreSpec.from_lines(self._decode(body)[0].splitlines())))
+            if args["respect_gitignore"] and (spec := self._ignore_spec(directory, context)) is not None:
+                rules.append((directory, spec))
             prefix = relative.parts
             start = after[len(prefix)] if len(after) > len(prefix) and after[:len(prefix)] == prefix else None
             inclusive = start is not None
@@ -548,7 +539,7 @@ class LocalFileService:
                             if args["recursive"] and is_directory:
                                 if not args.get("include_generated", False) and name in self.config.generated_directories:
                                     continue
-                                access = self.evaluate(self._operation("list", str(item)), context)
+                                access = self.evaluate(self._target("inspect", self._resolve(str(item))), context)
                                 if access.action == "allow":
                                     if depth >= maximum_depth:
                                         state.setdefault("depth_limited_paths", [])
@@ -573,10 +564,8 @@ class LocalFileService:
             for directory in reversed(path.parents):
                 if not directory.is_relative_to(self.root):
                     continue
-                ignore = directory / ".gitignore"
-                if ignore.is_file() and self.evaluate(self._operation("read", str(ignore)), context).action == "allow":
-                    body, _ = self._bytes(ignore.resolve())
-                    inherited.append((directory, GitIgnoreSpec.from_lines(self._decode(body)[0].splitlines())))
+                if (spec := self._ignore_spec(directory, context)) is not None:
+                    inherited.append((directory, spec))
         yield from visit(path, Path(), inherited, 0)
 
     def _list(self, path, args, context):
@@ -585,17 +574,11 @@ class LocalFileService:
         position, reason = after, None
         iterator = self._entries(path, args, context, after=after, state=state)
         try:
-            for item, relative, kind, info in iterator:
+            for _, relative, kind, info in iterator:
                 if not glob_match(relative, args["pattern"]):
                     position = Path(relative).parts
                     continue
                 row = dict(path=relative, type=kind, size_bytes=info.st_size)
-                permissions = self._permissions(item, context)
-                restricted = {action: decision for action, decision in permissions["permissions"].items() if decision != "allow"}
-                if restricted:
-                    row["permissions"] = restricted
-                    if permissions["permission_reasons"]:
-                        row["permission_reasons"] = permissions["permission_reasons"]
                 size = len(json.dumps(row).encode())
                 if len(selected) >= args["limit"] or used + size > self.config.max_output_bytes:
                     reason = "page_limit" if len(selected) >= args["limit"] else "output_bytes"
@@ -608,7 +591,9 @@ class LocalFileService:
         reason = reason or state.get("reason")
         cursor = self._cursor(path, args, position, state) if reason else None
         record = dict(path=str(path), entries=selected, cursor=cursor, has_more=bool(cursor),
-            truncated=bool(reason or state.get("depth_limited_paths")), permissions_default="allow", permission_preview=True)
+            truncated=bool(reason or state.get("depth_limited_paths") or state.get("protected_directories")))
+        if state.get("protected_directories"):
+            record["protected_directories"] = state["protected_directories"]
         if reason or state.get("depth_limited_paths"):
             record.update(truncated=True, reason=reason or "max_depth")
             if state.get("depth_limited_paths"):
@@ -627,7 +612,7 @@ class LocalFileService:
                     0 if args["case_sensitive"] else regex.IGNORECASE | regex.FULLCASE)
             except regex.error as error:
                 fail("invalid_regex", str(error))
-        rows, protected, skipped, contexts = [], [], [], []
+        rows, skipped = [], []
         matches, total_bytes, position, next_line, reason = 0, 0, after, None, None
         state = {}
         traversal = dict(args, recursive=True)
@@ -636,31 +621,15 @@ class LocalFileService:
             path, traversal, context, after=after, include_after=resume_line is not None, state=state, deadline=deadline)
 
         def record():
-            value = dict(path=str(path), results=rows, match_count=matches)
+            value = dict(path=str(path.parent if explicit_file else path), results=rows, match_count=matches)
             if state.get("protected_directories"):
                 value["protected_directories"] = state["protected_directories"]
-            if contexts:
-                value["contexts"] = contexts
-            if protected:
-                value["protected_files"] = protected
             if skipped:
                 value["skipped"] = skipped
             return value
 
-        def fits(extra, *, proposed=None):
-            value = record()
-            value["results"] = [*rows, extra]
-            if proposed:
-                value["contexts"] = proposed
-            return len(json.dumps(value).encode()) <= self.config.max_output_bytes
-
-        def snippet(line, column=0):
-            # Keep minified source and long log lines useful without flooding context.
-            maximum = min(4096, max(16, self.config.max_output_bytes // 8))
-            if len(line.encode()) <= maximum:
-                return line, 0, False
-            start = max(0, column - maximum // 8)
-            return line[start:].encode()[:maximum].decode("utf-8", errors="ignore"), start, True
+        def fits(row):
+            return len(json.dumps(record() | {"results": [*rows, row]}).encode()) <= self.config.max_output_bytes
 
         try:
             for item, relative, kind, info in entries:
@@ -670,16 +639,6 @@ class LocalFileService:
                     position, next_line, reason = key, begin if kind == "file" else None, "timeout"
                     break
                 if kind != "file" or not any(glob_match(relative, pattern) for pattern in args["include"]):
-                    position = key
-                    continue
-                access = self.evaluate(self._operation("read", str(item)), context)
-                explicit = any(value.action == "file.read" and value.resource == str(item) for value in context.operations)
-                if access.action != "allow" and not explicit:
-                    row = dict(path=relative, read=access.action, content_searched=False, reason=access.reason)
-                    if len(json.dumps(record() | {"protected_files": [*protected, row]}).encode()) > self.config.max_output_bytes:
-                        position, next_line, reason = key, begin, "output_bytes"
-                        break
-                    protected.append(row)
                     position = key
                     continue
                 if info.st_size > self.config.max_file_bytes or info.st_size > self.config.max_scan_bytes:
@@ -719,32 +678,12 @@ class LocalFileService:
                     column = match.start() if search and match else -1 if search else line.find(args["query"])
                     if column < 0:
                         continue
-                    proposed = contexts
                     if args["mode"] == "matches":
                         row = dict(path=relative, line=index + 1, column=column + 1)
-                        if args["context_lines"]:
-                            start, end = max(0, index - args["context_lines"]), min(len(lines), index + args["context_lines"] + 1)
-                            rendered = [snippet(value)[0] for value in lines[start:end]]
-                            block = dict(path=relative, start_line=start + 1, end_line=end, lines=rendered)
-                            if any(snippet(value)[2] for value in lines[start:end]):
-                                block["text_truncated"] = True
-                            if contexts and contexts[-1]["path"] == relative and start <= contexts[-1]["end_line"]:
-                                previous = contexts[-1]
-                                block = {**previous, **block, "start_line": previous["start_line"],
-                                    "lines": previous["lines"] + rendered[max(0, previous["end_line"] - start):]}
-                                proposed = [*contexts[:-1], block]
-                            else:
-                                proposed = [*contexts, block]
-                        else:
-                            text, offset, clipped = snippet(line, column)
-                            row["text"] = text
-                            if clipped:
-                                row.update(text_start_column=offset + 1, text_truncated=True)
-                        if not fits(row, proposed=proposed):
+                        if not fits(row):
                             reason, next_line = "output_bytes", index
                             break
                         rows.append(row)
-                        contexts = proposed
                     elif args["mode"] == "files":
                         row = dict(path=relative)
                         if not fits(row):
@@ -794,18 +733,18 @@ class LocalFileService:
             if state.get("depth_limited_paths"):
                 value["depth_limited_paths"] = state["depth_limited_paths"]
             value["next_step"] = "Continue with cursor and unchanged filters (limit may change); counts are per page." if cursor else "Narrow the path or include patterns to continue."
-        elif not args.get("cursor") and not protected and not skipped and not state.get("protected_directories"):
+        elif not args.get("cursor") and not skipped and not state.get("protected_directories"):
             value["total_count"] = matches
         return self._output(value)
 
-    def _manage(self, paths, args, plans, context):
+    def _manage(self, paths, args):
         operation, path = args["operation"], paths[0]
         if path == self.root and operation in {"move", "delete"}:
             fail("invalid_path", "The Workspace root cannot be moved or deleted.")
         if operation == "stat":
             info = path.stat()
             return self._output(dict(path=str(path), type="directory" if path.is_dir() else "file",
-                size_bytes=info.st_size, modified_at_ns=info.st_mtime_ns, **self._permissions(path, context)))
+                size_bytes=info.st_size, modified_at_ns=info.st_mtime_ns))
         if operation == "mkdir":
             with self._parent(path, create=args["parents"]) as (directory, name):
                 os.mkdir(name, dir_fd=directory)
@@ -817,7 +756,7 @@ class LocalFileService:
                 fail("unsupported_operation", "Directory transfers are not supported; move or copy explicit files.")
             data, _ = self._bytes(path)
             if operation == "move":
-                self._expected(plans[0], data)
+                self._expected(args["expected_version"], data)
             # Atomic no-clobber destination creation; never overwrite another Agent's file.
             with self._parent(path) as (source_dir, source_name), self._parent(destination) as (target_dir, target_name):
                 if operation == "move":
@@ -839,7 +778,7 @@ class LocalFileService:
                     os.rmdir(name, dir_fd=directory)
             else:
                 data, _ = self._bytes(path)
-                self._expected(plans[0], data)
+                self._expected(args["expected_version"], data)
                 with self._parent(path) as (directory, name):
                     os.unlink(name, dir_fd=directory)
         return self._output(dict(operation=operation, path=str(path)))
@@ -857,14 +796,14 @@ class LocalFileService:
                 if name == "read_file":
                     return self._read(paths[0], args, context)
                 if name == "write_file":
-                    return self._write(paths[0], args, plans[0])
+                    return self._write(paths[0], args)
                 if name == "edit_file":
-                    return self._edit(paths[0], args, plans[0])
+                    return self._edit(paths[0], args)
                 if name == "list_files":
                     return self._list(paths[0], args, context)
                 if name == "search_files":
                     return self._search(paths[0], args, context)
-                return self._manage(paths, args, plans, context)
+                return self._manage(paths, args)
         except FileNotFoundError:
             fail("not_found", "The requested file or directory does not exist.")
         except FileExistsError:

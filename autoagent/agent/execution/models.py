@@ -2,53 +2,12 @@
 
 from typing import Annotated, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, model_validator
 
 from ..models._base import Model, NonEmpty
-from ..files.models import FileToolsConfig
-
-Decision = Literal["allow", "ask", "deny"]
-
-
-class CommandRule(Model):
-    """Match one resolved command, independent of its exec/Shell entry point.
-
-    Omitted argument selectors match every argument list; args=() matches no
-    arguments. Regex uses fullmatch on shlex.join(args), a display format only.
-    Rules are ordered: the last match wins within this configuration.
-    """
-
-    program: NonEmpty
-    decision: Decision
-    args: tuple[str, ...] | None = None
-    args_prefix: tuple[str, ...] | None = None
-    args_regex: NonEmpty | None = None
-    cwd: str | None = None
-    reason: str | None = None
-
-    @field_validator("args", "args_prefix", mode="before")
-    @classmethod
-    def tuples(cls, value):
-        return tuple(value) if isinstance(value, list) else value
-
-    @model_validator(mode="after")
-    def selectors(self):
-        if sum(value is not None for value in (self.args, self.args_prefix, self.args_regex)) > 1:
-            raise ValueError("Use one argument selector per CommandRule.")
-        if self.args_regex is not None:
-            import regex
-            try:
-                regex.compile(self.args_regex)
-            except regex.error as error:
-                raise ValueError("Invalid command argument regex: " + str(error)) from error
-        return self
 
 
 class ExecutionToolsConfig(Model):
-    default_decision: Decision = "allow"
-    process_write_decision: Decision = "allow"
-    file_policy: FileToolsConfig = Field(default_factory=FileToolsConfig)
-    rules: tuple[CommandRule, ...] = ()
     default_timeout_seconds: float = Field(default=120, gt=0)
     max_timeout_seconds: float = Field(default=600, gt=0)
     default_yield_seconds: float = Field(default=10, ge=0)
@@ -64,12 +23,6 @@ class ExecutionToolsConfig(Model):
     cache_directory: str | None = None
     temp_directory: str | None = None
     max_running_processes: int = Field(default=4, gt=0, le=64)
-    regex_timeout_seconds: float = Field(default=0.05, gt=0, le=1)
-
-    @field_validator("rules", mode="before")
-    @classmethod
-    def tuples(cls, value):
-        return tuple(value) if isinstance(value, list) else value
 
     @model_validator(mode="after")
     def limits(self):
@@ -134,4 +87,4 @@ class ProcessList(Model):
 
 ProcessRequest = Annotated[ProcessRead | ProcessWait | ProcessWrite | ProcessTerminate | ProcessList, Field(discriminator="action")]
 
-__all__ = ["CommandRule", "ExecutionToolsConfig", "ExecCommand", "ShellCommand", "ExecutionCommand", "ProcessRequest"]
+__all__ = ["ExecutionToolsConfig", "ExecCommand", "ShellCommand", "ExecutionCommand", "ProcessRequest"]

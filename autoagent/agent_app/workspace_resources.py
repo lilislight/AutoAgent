@@ -112,18 +112,20 @@ class AgentWorkspaces:
                 execution = getattr(handler, "__agent_app_execution__", None)
                 execution_factory = getattr(workspace, "execution_service", None)
                 if execution is not None and callable(execution_factory):
-                    source = (id(workspace), key[1], json.dumps(execution.model_dump(mode="json"), sort_keys=True))
+                    policy = handler.__agent_app_command_policy__
+                    backend_key = (id(workspace), key[1], json.dumps(execution.model_dump(mode="json"), sort_keys=True))
+                    source = (*backend_key, policy.version)
                     if self._execution_sources.get(key) != source:
                         from autoagent.agent.execution import ProcessManager, CommandTools
                         if self.process_manager is None:
                             self.process_manager = ProcessManager()
-                        backend = self._execution_services.get(source)
+                        backend = self._execution_services.get(backend_key)
                         if backend is None:
                             backend = await asyncio.to_thread(execution_factory, key[1], config=execution, manager=self.process_manager)
-                            self._execution_services[source] = backend
-                        group = CommandTools(service=backend)
+                            self._execution_services[backend_key] = backend
+                        group = CommandTools(service=backend, policy=policy)
                         tools = group._tools
-                        registry.replace_source("execution", {("tool", item.name): (backend.version, tools[item.name])
+                        registry.replace_source("execution", {("tool", item.name): (backend.version + policy.version, tools[item.name])
                             for item in tools.definitions})
                         self._execution_sources[key] = source
                 else:

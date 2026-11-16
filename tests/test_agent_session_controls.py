@@ -214,8 +214,8 @@ class SessionControlContracts:
             self.assertEqual(approval['state'], 'resolved')
             self.assertEqual(approval['resolution']['response']['resolutions'][0]['source'], 'system')
 
-    async def test_product_allow_replaces_project_and_nested_policy(self):
-        """A product override is final even when the original Project ToolSet asks or denies."""
+    async def test_custom_allow_cannot_replace_project_and_nested_policy(self):
+        """A custom Allow cannot weaken a registered ToolSet Deny or the Agent access policy."""
         from autoagent.agent import Tool, ToolSet
         from autoagent.agent_app import ResourceControl
         from autoagent.agent import ToolPolicy
@@ -228,17 +228,17 @@ class SessionControlContracts:
         async with self.product(provider, access=AgentAccess(rules={'publish':'ask'}), tools=[protected]) as (host, client):
             manager = host.applications["agent"].context.shared_resources
             entry = next(row for row in (await manager.describe())['resources'] if row['name'] == 'publish')
-            self.assertEqual(entry['default_decision'], 'ask')
-            self.assertTrue(entry['parameter_policy'])
+            self.assertEqual(entry['registered_policies'][0]['policy']['default'], 'ask')
+            self.assertTrue(entry['policy_in_code'])
             await manager.save(ResourceControl(name='Publish', resource_id=entry['management_id'],
                 permissions=ToolPolicy(default='allow')))
             effective = next(row for row in (await manager.describe())['resources'] if row['name'] == 'publish')
-            self.assertEqual(effective['default_decision'], 'allow')
-            self.assertEqual(effective['permission_source'], 'tool')
+            self.assertEqual(effective['custom_policy']['default'], 'allow')
+            self.assertEqual(effective['registered_policies'], entry['registered_policies'])
             sent = await client.post('/api/v2/agent/messages', json={'session_id':'override','message':'Begin'})
             result = await host.join(sent.json()['invocation_id'])
             self.assertEqual(result.status, 'completed', result.error)
-            self.assertEqual(effects, ['hello'])
+            self.assertEqual(effects, [])
 
     async def test_cancelled_task_is_not_recoverable_and_new_turn_keeps_its_history(self):
         """Cancellation ends the product task while the next Invocation retains its recorded conversation."""

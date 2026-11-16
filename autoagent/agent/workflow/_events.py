@@ -138,7 +138,7 @@ def map_agent_event(context: UserEventContext) -> UserEventSpec | None:
         return None
 
     response_id = state.get("response_id")
-    if node in {"ask_user", "wait_approval"} and phase in {"waiting", "wait_resolved"}:
+    if node in {"ask_user", "ask_user_approved", "wait_approval"} and phase in {"waiting", "wait_resolved"}:
         return emit("agent.interaction", _interaction(context, response_id), persist=phase == "wait_resolved")
 
     if node == "finish" and phase == "output":
@@ -159,14 +159,17 @@ def map_agent_event(context: UserEventContext) -> UserEventSpec | None:
                 state="running" if result is None else None, result=result)]
         elif phase == "output":
             tools = _results(state, value)
-    elif node == "prepare_wait":
+    elif node == "route_approved" and phase == "output":
+        tools = _results(state, value["immediate"])
+    elif node in {"prepare_wait", "prepare_wait_approved"}:
         if phase == "chunk" and value["preparation"]["wait"] is not None:
             tools = [_snapshot(response_id, restore(LLMToolCall, value["call"]), state="queued",
                 progress=plain(value["preparation"]["wait"]["receipt"]))]
         elif phase == "output":
             tools = _results(state, value["results"])
-    elif node == "wait_tools" and phase in {"waiting", "wait_resolved"}:
-        wait = state["prepared_waits"]["waits"][context.unit_index]
+    elif node in {"wait_tools", "wait_tools_approved"} and phase in {"waiting", "wait_resolved"}:
+        key = "prepared_waits_approved" if node.endswith("_approved") else "prepared_waits"
+        wait = state[key]["waits"][context.unit_index]
         call = next(item for item in restore(LLMResponse, state["response"]).tool_calls if item.call_id == wait["call_id"])
         outcome = value.get("outcome")
         tools = [_snapshot(response_id, call, state="cancelled" if outcome == "cancelled" else
@@ -174,9 +177,10 @@ def map_agent_event(context: UserEventContext) -> UserEventSpec | None:
                 "wait_id": value["wait_id"], "deadline_at_us": value["deadline_at_us"], "outcome": outcome,
                 "error": plain(value.get("error"))})]
         persist = False
-    elif node == "collect_wait_results" and phase == "output":
+    elif node in {"collect_wait_results", "collect_wait_results_approved"} and phase == "output":
         # prepare_wait has already recorded any immediate preparation failures.
-        recorded = {item["call_id"] for item in state["prepared_waits"]["results"]}
+        key = "prepared_waits_approved" if node.endswith("_approved") else "prepared_waits"
+        recorded = {item["call_id"] for item in state[key]["results"]}
         tools = _results(state, (item for item in value["results"] if item["call_id"] not in recorded))
     return emit("agent.tools", AgentToolsEvent(node_id=node, tools=tuple(tools)), persist=persist) if tools else None
 

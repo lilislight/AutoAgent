@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Mapping
 import json
+import logging
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -12,10 +13,12 @@ from pydantic import TypeAdapter
 
 from autoagent.agent.context import plain
 from .resource_config import AgentResourceConfig
+from .mcp_catalog import observed_catalog, schema_version
 from autoagent.agent.resources import AgentResourceRegistry
 
 
 CONFIG = TypeAdapter(AgentResourceConfig)
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +32,7 @@ class _Source:
     source: object = None
     state: str = "connecting"
     error: str | None = None
+    catalog_revision: int = -1
 
     def __post_init__(self):
         self.drained.set()
@@ -41,6 +45,7 @@ class ManagedAgentResources:
         self.service = service
         self.records = {}
         self.sources = {}
+        self.mcp_catalogs = {}
         self.retired = []
         self.revision = 0
         self.lock = asyncio.Lock()
@@ -58,12 +63,13 @@ class ManagedAgentResources:
         return tuple(roots)
 
     def _permissions_editable(self, origin):
-        return origin != "builtin" and (origin != "project" or self.service.host.applications["agent"].edit_code_permissions)
+        return origin not in {"builtin", "project"} or self.service.host.applications["agent"].edit_code_permissions
 
     @asynccontextmanager
     async def lifespan(self):
         self.enabled = self.service.host.applications["agent"].enabled
         rows = await self.service.storage("resource_records")
+        self.mcp_catalogs = await self.service.storage("mcp_catalogs")
         for row in rows:
             self._publish(row["id"], row)
         configured = self.service.host.environment.get("AUTOAGENT_APP_SKILLS_DIR", "").strip()
@@ -90,12 +96,20 @@ class ManagedAgentResources:
             self.sources.clear()
             self.retired.clear()
             self.records.clear()
+            self.mcp_catalogs.clear()
             if self.environment_skills is not None:
                 await self.environment_skills.__aexit__(None, None, None)
 
     async def _watch(self):
         previous = None
         while True:
+            async with self.lock:
+                for key, source in tuple(self.sources.items()):
+                    if self.records[key][1].kind == "mcp" and self._source_ready(source):
+                        try:
+                            await self._sync_mcp_catalog(key, source)
+                        except Exception:
+                            logger.exception("Could not store the MCP tool catalog for %s", key)
             revision = tuple((key, value.registry.revision, value.state) for key, value in self.sources.items())
             if revision != previous:
                 previous = revision
@@ -113,7 +127,8 @@ class ManagedAgentResources:
         previous = self.records.get(resource_id)
         old = self.sources.get(resource_id)
         if (old is not None and previous is not None and config is not None and config.enabled
-                and old.state != "error" and config.model_dump(exclude={"name", "permissions"}) ==
+                and old.state != "error" and getattr(old.source, "last_error", None) is None
+                and config.model_dump(exclude={"name", "permissions"}) ==
                     previous[1].model_dump(exclude={"name", "permissions"})):
             # A permission-only edit must not replace an executable or drop an
             # MCP connection that is already serving approved calls.
@@ -129,6 +144,7 @@ class ManagedAgentResources:
             self.retired.append(old)
         if row is None:
             self.records.pop(resource_id, None)
+            self.mcp_catalogs.pop(resource_id, None)
         else:
             self.records[resource_id] = (row, config)
             if self.enabled and config.enabled and config.kind in {"mcp", "skills"}:
@@ -136,6 +152,55 @@ class ManagedAgentResources:
                 self.sources[resource_id] = source
                 source.task = asyncio.create_task(self._serve(source, config))
         self.revision += 1
+
+    @staticmethod
+    def _source_ready(source):
+        return source is not None and source.state == "ready" and not source.stop.is_set() and (
+            getattr(source.source, "last_error", None) is None)
+
+    async def _sync_mcp_catalog(self, connection_id, source):
+        revision = source.registry.revision
+        if revision == source.catalog_revision:
+            return
+        entries = source.registry.entries("tool")
+        tools = {self._executable(entry.value).remote_name: entry.value.definition for entry in entries}
+        old = self.mcp_catalogs.get(connection_id, {})
+        catalog = observed_catalog(old, tools)
+        if catalog != old:
+            await self.service.storage("save_mcp_catalog", connection_id, catalog)
+            self.mcp_catalogs[connection_id] = catalog
+            self.revision += 1
+        source.catalog_revision = revision
+
+    def _mcp_tool_state(self, entry, identity):
+        cached = self.mcp_catalogs.get(identity["source_id"], {}).get(identity["remote_name"])
+        source = self.sources.get(identity["source_id"])
+        if not self._source_ready(source):
+            return "offline"
+        if cached is None:
+            return "connecting"
+        if schema_version(entry.value.definition.parameters) != cached["approved_version"]:
+            return "review"
+        return "ready"
+
+    async def accept_mcp_schema(self, connection_id, remote_name, version):
+        async def accept():
+            async with self.lock:
+                source = self.sources.get(connection_id)
+                if not self._source_ready(source):
+                    raise self.service.services.conflict("mcp_unavailable", "The MCP server is offline.")
+                await self._sync_mcp_catalog(connection_id, source)
+                catalog = self.mcp_catalogs.get(connection_id, {})
+                tool = catalog.get(remote_name)
+                if tool is None or not tool["listed"] or tool["schema_version"] != version:
+                    raise self.service.services.conflict("mcp_schema_changed", "The tool schema changed. Refresh before reviewing again.")
+                updated = {**catalog, remote_name: {**tool, "approved_schema": tool["input_schema"],
+                    "approved_version": version}}
+                await self.service.storage("save_mcp_catalog", connection_id, updated)
+                self.mcp_catalogs[connection_id] = updated
+                self.revision += 1
+            await self.service.approvals.changed()
+        await self.service.host._perform(lambda: self.service.approvals._run(accept), control=True)
 
     async def _serve(self, state, config):
         """Open and close clients in the same Task; drain already borrowed calls."""
@@ -224,14 +289,18 @@ class ManagedAgentResources:
                             and other.group_id == config.group_id for key, (_, other) in self.records.items()):
                         raise ValueError("A group already has a configuration; update that entry.")
                     target_id = config.resource_id if config.kind == "resource" else config.group_id if config.kind == "group" else ""
-                    locked = target_id.startswith("builtin/") or (
-                        target_id.startswith("project/") and not self.service.host.applications["agent"].edit_code_permissions)
+                    locked = (target_id.startswith("builtin/") and config.kind == "group"
+                        or target_id.startswith(("builtin/", "project/"))
+                        and not self.service.host.applications["agent"].edit_code_permissions)
                     if locked:
                         if config.permissions is not None and (previous is None or config.permissions != previous[1].permissions):
                             raise ValueError("Permission editing for this resource is disabled.")
-                        # Locked permissions stay inactive; saving Enable also
-                        # clears permission overrides hidden by the edit policy.
-                        config = config.model_copy(update={"permissions": None})
+                        config = config.model_copy(update={"permissions": previous[1].permissions if previous else None})
+                    elif config.kind == "resource" and config.permissions is not None:
+                        policy = config.permissions
+                        policy = policy.model_copy(update={"rules": tuple(rule if rule.id else
+                            rule.model_copy(update={"id": uuid4().hex}) for rule in policy.rules)})
+                        config = config.model_copy(update={"permissions": policy})
                     data = config.model_dump(mode="json")
                 else:
                     data = None
@@ -269,7 +338,7 @@ class ManagedAgentResources:
             state="unavailable" if not self.enabled else "disabled" if not config.enabled else "error" if source_error else source.state if source else "ready",
             error=source_error)
 
-    async def describe(self, workspace_id=None):
+    async def describe(self, workspace_id=None, *, tool_id=None, scope=None):
         async def read():
             from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID
             from autoagent.agent import WorkspaceBinding
@@ -278,12 +347,13 @@ class ManagedAgentResources:
             from types import SimpleNamespace
             runtime = self.service.host._runtime
             revision = runtime.workflow_ids.get(BUILTIN_AGENT_WORKFLOW_ID)
-            registries = [self.service.resources]
-            if revision in self.service._build_resources:
+            registries = [] if scope == "mcp" else [self.service.resources]
+            if scope != "mcp" and revision in self.service._build_resources:
                 registries.append(self.service._build_resources[revision])
-            registries.extend(source.registry for source in self.sources.values())
+            registries.extend(source.registry for key, source in self.sources.items()
+                if scope is None or (self.records[key][1].kind == "mcp") == (scope == "mcp"))
             builtins = []
-            if revision is not None:
+            if revision is not None and scope != "mcp":
                 snapshot = SimpleNamespace(bindings={"workflow_revision": revision}, settings=self.service.defaults.model_copy(
                     update={"workspace": WorkspaceBinding(workspace_id=workspace_id or self.service.project_workspace_id)}))
                 await self.service.prepare_workspace(snapshot)
@@ -304,15 +374,40 @@ class ManagedAgentResources:
                     for entry in registry.entries(kind, include_disabled=True):
                         if not entry.workflows or BUILTIN_AGENT_WORKFLOW_ID in entry.workflows:
                             identity = self.resource_identity(entry, kind)
+                            if scope == "tools" and (kind != "tool" or identity["origin"] == "mcp"):
+                                continue
+                            if scope == "mcp" and identity["origin"] != "mcp":
+                                continue
+                            if tool_id is not None:
+                                if kind == "tool" and identity["management_id"] == tool_id:
+                                    return entry
+                                continue
                             if identity["management_id"] not in seen:
                                 seen.add(identity["management_id"])
                                 inventory.append(self._resource_description(entry, kind,
                                     available=registry.has(kind, entry.name)))
             for entry in builtins:
                 identity = self.resource_identity(entry, "tool")
+                if scope == "mcp" or scope == "tools" and identity["origin"] == "mcp":
+                    continue
+                if tool_id is not None:
+                    if identity["management_id"] == tool_id:
+                        return entry
+                    continue
                 if identity["management_id"] not in seen:
                     seen.add(identity["management_id"])
                     inventory.append(self._resource_description(entry, "tool"))
+            if tool_id is not None:
+                from autoagent.host.models import HostNotFoundError
+                raise HostNotFoundError("Tool is unavailable in the Agent application.")
+            if scope != "tools":
+                for connection_id, (_, config) in self.records.items():
+                    if config.kind != "mcp":
+                        continue
+                    for remote_name, cached in self.mcp_catalogs.get(connection_id, {}).items():
+                        identity = self._mcp_identity(connection_id, remote_name)
+                        if identity["management_id"] not in seen:
+                            inventory.append(self._offline_mcp_resource(identity, cached, config))
             groups = {}
             for entry in inventory:
                 group = groups.setdefault(entry["group_id"], dict(id=entry["group_id"], name=entry["group_name"],
@@ -320,11 +415,12 @@ class ManagedAgentResources:
                 group["resources"].append(entry)
             for group in groups.values():
                 control = next((config for _, config in self.records.values() if config.kind == 'group' and config.group_id == group['id']), None)
-                editable = self._permissions_editable(group['origin'])
+                editable = group['origin'] != "builtin" and self._permissions_editable(group['origin'])
                 group.update(enabled=control.enabled if control else True,
                     permissions=control.permissions.model_dump(mode='json') if editable and control and control.permissions else None,
                     permissions_editable=editable)
-            return dict(items=[self._describe(key) for key in sorted(self.records)],
+            return dict(items=[self._describe(key) for key in sorted(self.records)
+                    if scope != "tools" or self.records[key][1].kind != "mcp"],
                 resources=inventory, groups=list(groups.values()), workspace_id=workspace_id or self.service.project_workspace_id,
                 revision=self.revision)
         return await self.service.host._perform(lambda: self.service.approvals._run(read))
@@ -333,38 +429,21 @@ class ManagedAgentResources:
         identity = self.resource_identity(entry, kind)
         self._known_resources[identity["management_id"]] = entry
         self._known_resources[entry.resource_id] = entry
-        selected = next(((row, cfg) for row, cfg in self.records.values() if cfg.kind == "resource"
-            and cfg.resource_id in {entry.resource_id, identity["management_id"]}), None)
-        group = next(((row, cfg) for row, cfg in self.records.values() if cfg.kind == "group"
-            and cfg.group_id == identity["group_id"]), None)
-        permissions = self.effective_permissions(entry)
-        editable = self._permissions_editable(identity["origin"])
-        access = self.service.defaults.access
-        registered_default = access.rules.get(entry.name, access.default)
-        registered_policies = [entry.policy] if entry.policy is not None else []
-        value = entry.value
-        while getattr(value, '_owner', None) is not None:
-            owner = value._owner
-            if owner.policy is not None:
-                registered_policies.append(owner.policy)
-            value = owner._tools[entry.name]
-        from autoagent.agent.tools import ToolPolicy
-        rank = {'allow':0, 'ask':1, 'deny':2}
-        registered_default = max((registered_default, *(policy.default for policy in registered_policies
-            if isinstance(policy, ToolPolicy))), key=rank.__getitem__)
+        registered, callback = self.registered_policies(entry)
         source_enabled = True
+        mcp = {}
         if identity["origin"] == "mcp":
             config = self.records[identity["source_id"]][1]
-            remote = getattr(self._executable(entry.value), "remote_name", entry.name)
+            remote = identity["remote_name"]
             source_enabled = (config.include is None or remote in config.include) and remote not in config.exclude
+            status = self._mcp_tool_state(entry, identity)
+            available = available and status == "ready"
+            cached = self.mcp_catalogs.get(identity["source_id"], {}).get(remote)
+            mcp = dict(mcp_status=status, schema_version=schema_version(entry.value.definition.parameters),
+                approved_schema=cached["approved_schema"] if status == "review" and cached else None)
         result = dict(**identity, resource_id=entry.resource_id, name=entry.name, kind=kind, version=entry.version,
             available=available, enabled=available and source_enabled and bool(self.filter([entry])),
-            permissions=permissions.model_dump(mode="json") if permissions is not None else None,
-            default_decision=permissions.default if permissions is not None else registered_default,
-            parameter_policy=bool(permissions.rules) if permissions is not None else bool(registered_policies or access.policy),
-            permissions_editable=editable,
-            permission_source=("tool" if selected and selected[1].permissions is not None else "group" if group and group[1].permissions is not None else
-                "source" if identity.get("source_id") in self.records else "registration"))
+            **self._policy_details(identity, entry.resource_id, registered=registered, callback=callback), **mcp)
         if kind == "skill":
             from .skills import enabled, editable
             result["enabled"] = available and enabled(entry.value)
@@ -373,9 +452,6 @@ class ManagedAgentResources:
         if kind == "tool":
             result.update(description=entry.value.definition.description, input_schema=entry.value.definition.parameters)
             result["operation_schema"] = getattr(self._executable(entry.value), "operation_schema", None)
-            result['approval_exempt'] = entry.resource_id.startswith('builtin:')
-            if result['approval_exempt']:
-                result.update(default_decision='allow', permissions_editable=False, permission_source='system')
             if identity['origin'] == 'mcp':
                 result['remote_name'] = getattr(self._executable(entry.value), 'remote_name', entry.name)
         else:
@@ -384,6 +460,15 @@ class ManagedAgentResources:
                 location=getattr(getattr(source, "snapshot", None), "source_location", None)
                     or getattr(source, "location", None))
         return result
+
+    def _offline_mcp_resource(self, identity, cached, config):
+        ready = self._source_ready(self.sources.get(identity["source_id"]))
+        status = "removed" if ready and not cached["listed"] else "offline"
+        return dict(**identity, resource_id=identity["management_id"],
+            name=config.prefix + identity["remote_name"], kind="tool", available=False, enabled=False,
+            version=cached["schema_version"], description=cached["description"], input_schema=cached["input_schema"],
+            mcp_status=status, schema_version=cached["schema_version"],
+            **self._policy_details(identity, identity["management_id"]))
 
     async def skill_document(self, management_id, workspace_id=None):
         await self.describe(workspace_id)
@@ -408,23 +493,23 @@ class ManagedAgentResources:
         result = [[], []]
         names = [set(entry.name for entry in entries) for entries in reserved]
         for resource_id, source in tuple(self.sources.items()):
-            if source.stop.is_set() or source.state != "ready":
+            if not self._source_ready(source):
                 continue
             published = source.registry.catalog(BUILTIN_AGENT_WORKFLOW_ID)
             config = self.records[resource_id][1]
             if config.kind == "mcp":
                 def selected(entry):
-                    name = self._executable(entry.value)
-                    name = getattr(name, "remote_name", entry.name)
-                    return (config.include is None or name in config.include) and name not in config.exclude
+                    identity = self.resource_identity(entry)
+                    name = identity["remote_name"]
+                    return ((config.include is None or name in config.include) and name not in config.exclude
+                        and self._mcp_tool_state(entry, identity) == "ready")
                 published = (tuple(entry for entry in published[0] if selected(entry)), published[1])
             if any(names[index].intersection(entry.name for entry in entries) for index, entries in enumerate(published)):
                 source.error = "Resource names conflict with another source; configure a Tool prefix or distinct Skill names."
                 continue
             source.error = None
             for index, entries in enumerate(published):
-                result[index].extend(self._wrap(entry, self.records[resource_id][1].permissions,
-                    self.records[resource_id][0]["version"]) for entry in entries)
+                result[index].extend(entries)
                 names[index].update(entry.name for entry in entries)
         return tuple(tuple(items) for items in result)
 
@@ -443,11 +528,10 @@ class ManagedAgentResources:
             group = groups.get(identity["group_id"])
             if group is not None and not group[1].enabled or selected is not None and not selected[1].enabled:
                 continue
-            permission = selected if selected is not None and selected[1].permissions is not None else group
-            if not self._permissions_editable(identity["origin"]):
-                permission = None
-            result.append(self._wrap(entry, permission[1].permissions, permission[0]["version"])
-                if permission is not None and permission[1].permissions is not None else entry)
+            source = self.records.get(identity.get("source_id"))
+            versions = sum(row["version"] for row, config in
+                (value for value in (selected, group, source) if value is not None))
+            result.append(replace(entry, permission_revision=entry.permission_revision + versions) if versions else entry)
         return tuple(result)
 
     @staticmethod
@@ -468,8 +552,7 @@ class ManagedAgentResources:
                 config = self.records[key][1]
                 if config.kind == "mcp":
                     remote = getattr(self._executable(entry.value), "remote_name", name)
-                    return dict(management_id=f"mcp/{key}/tool/{remote}", group_id=f"mcp/{key}",
-                        group_name=config.name, origin="mcp", source_id=key)
+                    return self._mcp_identity(key, remote)
                 location = getattr(getattr(entry.value, "source", None), "location", None)
                 try:
                     relative = Path(location).relative_to(config.path).as_posix() if location else name
@@ -511,34 +594,73 @@ class ManagedAgentResources:
         return dict(management_id=f"project/{project}/{kind}/{name}", group_id=f"project/{project}",
             group_name="Project Tools" if kind == "tool" else "Project Skills", origin="project")
 
-    def _wrap(self, entry, permissions, version):
-        return replace(entry, policy=permissions, permission_revision=entry.permission_revision + version)
+    def _mcp_identity(self, connection_id, remote_name):
+        config = self.records[connection_id][1]
+        return dict(management_id=f"mcp/{connection_id}/tool/{remote_name}", group_id=f"mcp/{connection_id}",
+            group_name=config.name, origin="mcp", source_id=connection_id, remote_name=remote_name)
 
-    def effective_permissions(self, entry):
-        identity = self.resource_identity(entry)
+    def configured_policies(self, identity, resource_id):
+        """Return persisted policies without replacing the Tool's registration."""
         if not self._permissions_editable(identity["origin"]):
-            return None
-        tool = next((config.permissions for _, config in self.records.values() if config.kind == "resource"
-            and config.resource_id in {identity["management_id"], entry.resource_id} and config.permissions is not None), None)
-        if tool is not None:
-            return tool
-        group = next((config.permissions for _, config in self.records.values() if config.kind == "group"
-            and config.group_id == identity["group_id"] and config.permissions is not None), None)
-        if group is not None:
-            return group
-        source_id = identity.get("source_id")
-        if source_id in self.records:
-            return self.records[source_id][1].permissions
+            return ()
+        configured = []
+        for _, config in self.records.values():
+            if config.permissions is None:
+                continue
+            if config.kind == "resource" and config.resource_id in {identity["management_id"], resource_id}:
+                configured.append(("tool", config.permissions))
+            if config.kind == "group" and identity["origin"] != "builtin" and config.group_id == identity["group_id"]:
+                configured.append(("group", config.permissions))
+        source = self.records.get(identity.get("source_id"))
+        if source is not None and source[1].kind == "mcp" and source[1].permissions is not None:
+            configured.append(("source", source[1].permissions))
+        return tuple(configured)
+
+    def registered_policies(self, entry):
+        from autoagent.agent.files import FileToolsConfig
         from autoagent.agent.tools import ToolPolicy
-        if entry.policy is not None:
-            return entry.policy if isinstance(entry.policy, ToolPolicy) else None
+        from autoagent.agent.tools.operations import ToolOperationPolicy
+
+        layers = []
+        callbacks = False
+        access = self.service.defaults.access
+        action = access.rules.get(entry.name, access.default)
+        if action != "allow":
+            layers.append(ToolPolicy(default=action))
+        if access.policy is not None:
+            registry = self.service._build_resources.get(self.service.host._runtime.workflow_ids.get("autoagent.agent"))
+            binding = registry.get("policy", access.policy) if registry is not None and registry.has("policy", access.policy) else None
+            if binding is not None and isinstance(binding.value, ToolPolicy):
+                layers.append(binding.value)
+            else:
+                callbacks = True
+        handlers = [entry.policy]
         value = entry.value
         while getattr(value, "_owner", None) is not None:
             owner = value._owner
-            if owner.policy is not None:
-                return owner.policy if isinstance(owner.policy, ToolPolicy) else None
             value = owner._tools[entry.name]
-        return None
+            handler = owner.policy
+            if isinstance(handler, ToolOperationPolicy):
+                config = getattr(getattr(value, "service", None), "config", None)
+                if isinstance(config, FileToolsConfig):
+                    handler = config.policy
+            handlers.append(handler)
+        for handler in handlers:
+            if isinstance(handler, ToolPolicy):
+                layers.append(handler)
+            elif handler is not None:
+                callbacks = True
+        return tuple(layers), callbacks
+
+    def _policy_details(self, identity, resource_id, *, registered=(), callback=False):
+        configured = self.configured_policies(identity, resource_id)
+        custom = next((policy for source, policy in configured if source == "tool"), None)
+        inherited = tuple((source, policy) for source, policy in configured if source != "tool")
+        readonly = (*(("code", policy) for policy in registered), *inherited)
+        return dict(custom_policy=custom.to_dict() if custom is not None else None,
+            registered_policies=[{"source": source, "policy": policy.to_dict()} for source, policy in readonly],
+            policy_in_code=callback,
+            permissions_editable=self._permissions_editable(identity["origin"]))
 
     @asynccontextmanager
     async def borrow(self, resource_id):

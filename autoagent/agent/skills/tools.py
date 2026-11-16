@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Annotated, TYPE_CHECKING
 
 from pydantic import Field
@@ -46,13 +45,14 @@ class _SkillTool(Tool):
 
 
 def skill_tools(skills: SkillSet, *, prefix: str, runner: SkillScriptRunner | None = None) -> tuple[Tool, ...]:
+    skills = skills.for_model()
     if not skills.model_metadata:
         return ()
 
     def load(name: str) -> ToolOutput:
         """Load Skill instructions before using them; list supporting files separately."""
         try:
-            skill = skills.require_model_access(name)
+            skill = skills[name]
             document = skill.load()
             return ToolOutput(content=document_message(document, include_revisions=False).content, tool_metadata={"skill": {
                 "name": name, "revision": document.revision, "operation": "load", "snapshot_revision": document.snapshot_revision,
@@ -64,7 +64,7 @@ def skill_tools(skills: SkillSet, *, prefix: str, runner: SkillScriptRunner | No
                        limit: Annotated[int | None, Field(gt=0)] = None) -> ToolOutput:
         """List a page of Skill resources; next_cursor continues an unchanged listing."""
         try:
-            skill = skills.require_model_access(name)
+            skill = skills[name]
             page = skill.list_resources(prefix=prefix, cursor=cursor,
                 limit=min(limit, skill.limits.max_resources) if limit is not None else None)
             return ToolOutput(structured_content={"skill_name": name,
@@ -80,7 +80,7 @@ def skill_tools(skills: SkillSet, *, prefix: str, runner: SkillScriptRunner | No
                       max_bytes: Annotated[int | None, Field(gt=0)] = None) -> ToolOutput:
         """Read a Skill resource. Text is paged by lines with next_line for continuation; other resources retain their media type. Script source is never executed."""
         try:
-            skill = skills.require_model_access(name)
+            skill = skills[name]
             info = skill.source.resource_info(resource_path(path))
             if is_text(info.mime_type):
                 value = skill.read_text(path, start_line=start_line,
@@ -116,7 +116,7 @@ def skill_tools(skills: SkillSet, *, prefix: str, runner: SkillScriptRunner | No
                 resource_path(path)
                 if not path.startswith("scripts/"):
                     raise SkillScriptError("Skill execution paths must be under scripts/.")
-                skill = await asyncio.to_thread(skills.require_model_access, name)
+                skill = skills[name]
                 result = await runner.arun(skill, path, arguments=arguments, stdin=stdin, timeout_seconds=timeout_seconds)
                 result = SkillScriptResult.model_validate(result)
                 if result.skill_name != name or result.path != path:

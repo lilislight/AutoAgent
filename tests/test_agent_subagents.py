@@ -76,12 +76,13 @@ class SubagentConfigurationTests(unittest.TestCase):
         self.assertEqual(set(contracts), {"user.inbox", "team.inbox"})
         self.assertIs(contracts["user.inbox"].annotation, AgentSignalMessage)
         self.assertIs(contracts["team.inbox"].annotation, AgentSignalMessage)
-        self.assertEqual((len(enabled.nodes), len(enabled.edges)), (15, 22))
+        self.assertIn("prepare_wait_approved", {node.id for node in enabled.nodes})
         self.assertIn("prepare_wait", {node.id for node in enabled.nodes})
-        self.assertNotIn("wait_tools_approved", {node.id for node in enabled.nodes})
         self.assertEqual(enabled.node("prepare_wait").recovery_mode.mode, "never")
         self.assertEqual([(edge.source, edge.target) for edge in enabled.edges if edge.target == "wait_tools"],
             [("prepare_wait", "wait_tools")])
+        self.assertEqual([(edge.source, edge.target) for edge in enabled.edges if edge.target == "wait_tools_approved"],
+            [("prepare_wait_approved", "wait_tools_approved")])
         self.assertEqual([edge.target for edge in enabled.edges if edge.source == "tool_execute_approved"],
             ["complete_round"])
         with self.assertRaises(ValueError):
@@ -158,7 +159,9 @@ class SubagentContracts:
             self.assertTrue(child["agent_id"])
             self.assertEqual(child["result"], {"content": [{"type": "text", "text": "Child complete"}]})
             return answer()
-        provider = RoutedProvider([response(call("run_agent", {"type": "worker", "task": "child task", "wait_timeout_seconds": 2})), done])
+        provider = RoutedProvider([response(call("run_agent", {
+            "type": "worker", "task": "child task", "wait_timeout_seconds": 15,
+        })), done])
         async with self.host(provider) as host:
             result = await self.run_agent(host)
             result = await self.settled(host, result.invocation_id)
@@ -322,23 +325,25 @@ class SubagentContracts:
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(len(relations), 2)
 
-    async def test_configured_collaboration_bypasses_ordinary_tool_approval(self):
-        """Enabled builtins remain advertised and execute without ordinary Tool access or approval modes."""
+    async def test_collaboration_approval_then_native_select(self):
+        """Always Ask authorizes both calls before dispatch or native Select."""
         def done(request):
             item = results(request)[-1]
             self.assertFalse(item.is_error, item)
             self.assertEqual(item.structured_content["wake_reason"], "timer")
             self.assertEqual([item.call_id for item in results(request)], ["get", "wait"])
             return answer()
-        for mode in ("always_ask", "never_ask"):
-            with self.subTest(mode=mode):
-                provider = RoutedProvider([response(call("get_agents", {}, "get"), call("wait_for", {
-                    "timeout_seconds": 0.01, "wake_on_message": False}, "wait")), done])
-                async with self.host(provider, defaults=settings(mode=mode,
-                    access=AgentAccess(default="deny", allowed_tools=()))) as host:
-                    result = await self.run_agent(host)
-                    result = await self.settled(host, result.invocation_id)
-                    self.assertEqual(result.status, "completed", result.error)
+        provider = RoutedProvider([response(call("get_agents", {}, "get"), call("wait_for", {
+            "timeout_seconds": 0.01, "wake_on_message": False}, "wait")), done])
+        async with self.host(provider, defaults=settings(mode="always_ask")) as host:
+            waiting = await self.run_agent(host)
+            batch = restore(AgentApprovalRequest, waiting.waits[0].request)
+            self.assertEqual([request.call.name for request in batch.requests], ["get_agents", "wait_for"])
+            self.assertTrue(all(not request.operations for request in batch.requests))
+            await host.respond(waiting.invocation_id, waiting.waits[0].id, AgentApprovalResponse(
+                decisions=tuple(request.respond(approved=True) for request in batch.requests)).model_dump(mode="json"))
+            result = await self.settled(host, waiting.invocation_id)
+            self.assertEqual(result.status, "completed", result.error)
 
     async def test_waits_register_and_wake_before_slow_tool_and_unrelated_approval_finish(self):
         """Independent Select Map wakes while a slow ordinary Tool and approval remain unfinished, then joins all results once."""

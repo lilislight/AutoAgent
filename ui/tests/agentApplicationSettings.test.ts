@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { selectedRemote, withRemoteSelection, type ResourceConfig } from '../src/agent/settings/types.js';
-import { buildCondition, draftCondition, fieldOperators, parsePolicy, schemaPaths } from '../src/agent/settings/policyState.js';
-import type { Condition } from '../src/agent/settings/types.js';
+import { buildCondition, conditionSummary, draftCondition, fieldOperators, parsePolicy, retainRuleMetadata, schemaPaths } from '../src/agent/settings/policyState.js';
+import type { Condition, Policy } from '../src/agent/settings/types.js';
 
 test('unchecking a discovered MCP tool preserves automatic selection of future tools', () => {
   const source: ResourceConfig = { kind: 'mcp', name: 'Local', enabled: true, include: null, exclude: [] };
@@ -66,4 +66,25 @@ test('empty groups and mixed condition structures cannot be silently discarded',
   for (const when of [{ all: [] }, { any: [] }, { all: [], any: [] }, { not: null }, { field: 'args.x', op: 'unknown', value: 1 }]) {
     assert.throws(() => parsePolicy(JSON.stringify({ rules: [{ when, decision: 'deny' }] })));
   }
+});
+
+test('saving a converted policy retains hidden metadata on unchanged rules', () => {
+  const original: Policy = { default: 'allow', rules: [
+    { id: 'external', reason: 'Outside Workspace', decision: 'ask', when: { field: 'operation.attributes.scope', op: 'equals', value: 'external' } },
+  ] };
+  const draft: Policy = { default: 'deny', rules: [
+    { ...original.rules[0], id: undefined, reason: undefined },
+    { ...original.rules[0], id: undefined, reason: undefined, decision: 'deny' },
+  ] };
+  const saved = retainRuleMetadata(draft, original);
+  assert.equal(saved.rules[0].id, 'external');
+  assert.equal(saved.rules[0].reason, 'Outside Workspace');
+  assert.equal(saved.rules[1].id, undefined);
+});
+
+test('rule summaries communicate workspace checks, negation and missing fields', () => {
+  const summarize = (when: Condition) => conditionSummary(draftCondition(when));
+  assert.equal(summarize({ field: 'operation.attributes.scope', op: 'equals', value: 'external' }), 'Outside the workspace');
+  assert.equal(summarize({ field: 'args.path', op: 'prefix', value: 'vendor/' }), 'args.path starts with "vendor/"');
+  assert.equal(summarize({ not: { field: 'args.path', op: 'exists', value: false } }), 'Not: args.path is missing');
 });

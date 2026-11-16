@@ -10,7 +10,7 @@ from uuid import uuid4
 import httpx
 
 from autoagent.agent_app import AgentApplication, BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
-from autoagent.agent import AgentInput, ExecutionToolsConfig, CommandRule
+from autoagent.agent import AgentInput, ExecutionToolsConfig, ToolPolicy
 from autoagent.host import AutoAgentHost, HostSettings, ProjectError
 from autoagent.host.project import Project
 from autoagent.server import create_app
@@ -21,12 +21,13 @@ from tests.test_agent_workflow import ScriptedProvider, answer, settings
 class BuiltinRegistrationTests(unittest.TestCase):
     def test_sdk_context_defaults_to_200k_and_accepts_execution_policy(self):
         """The product Agent uses a 200k Context window and explicit command configuration."""
-        config = ExecutionToolsConfig(default_decision="deny", rules=[CommandRule(program="git", decision="ask")])
-        workflow = builtin_agent_workflow(execution=config)
+        config = ExecutionToolsConfig(max_running_processes=2)
+        policy = ToolPolicy(default="deny")
+        workflow = builtin_agent_workflow(execution=config, command_policy=policy)
         start = next(node for node in workflow.nodes if node.id == "start")
         self.assertEqual(start.executable.handler.__autoagent_context_policy__.context_window, 200_000)
-        self.assertEqual(start.executable.handler.__agent_app_execution__.default_decision, config.default_decision)
-        self.assertEqual(start.executable.handler.__agent_app_execution__.rules, config.rules)
+        self.assertEqual(start.executable.handler.__agent_app_execution__, config)
+        self.assertEqual(start.executable.handler.__agent_app_command_policy__, policy)
 
     def test_empty_directory_and_empty_manifest_register_sdk_agent(self):
         """Empty projects leave product registration to explicit application composition."""

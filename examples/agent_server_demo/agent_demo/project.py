@@ -6,7 +6,7 @@ import sys
 
 from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
 from autoagent.agent import (
-    AgentResources, CommandTools, CommandRule, ContextPolicy, ExecutionToolsConfig, SubagentsConfig, SubagentTarget,
+    AgentResources, CommandTools, ContextPolicy, ToolPolicy, SubagentsConfig, SubagentTarget,
     Tool, ToolSet, ToolDecision, SkillDirectory, agent_workflow,
 )
 from autoagent.host import workflow
@@ -17,24 +17,31 @@ from .tools import add_numbers, get_demo_weather, save_demo_note
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
-def demo_execution_config():
-    """Deliberately small allowlist; approval/deny probes perform no writes."""
-    rules = [CommandRule(program=name, decision="allow") for name in ("pwd", "ls", "printf")]
-    rules.extend((
-        CommandRule(program="git", args_prefix=["status"], decision="allow"),
-        CommandRule(program="git", args_prefix=["diff"], decision="allow"),
-        CommandRule(program="git", args_prefix=["push"], decision="ask"),
-        CommandRule(program="git", args_prefix=["reset", "--hard"], decision="deny"),
-    ))
-    for program in dict.fromkeys((sys.executable, "python3")):
-        prefix = ["-u", "-m", "agent_demo.cli_probe"]
-        rules.extend((
-            CommandRule(program=program, args=["--version"], decision="allow"),
-            CommandRule(program=program, args_prefix=prefix, decision="allow"),
-            CommandRule(program=program, args_prefix=[*prefix, "approval"], decision="ask"),
-            CommandRule(program=program, args_prefix=[*prefix, "deny"], decision="deny"),
-        ))
-    return ExecutionToolsConfig(default_decision="ask", rules=rules)
+def demo_command_policy():
+    """Approve only the demo's literal exec forms; other commands require approval."""
+    python = list(dict.fromkeys((sys.executable, "python3")))
+    prefix = ["-u", "-m", "agent_demo.cli_probe"]
+    cases = [
+        (["pwd", "ls", "printf"], [], "allow"),
+        (["git"], [dict(field="args.args", op="prefix", value=["status"])], "allow"),
+        (["git"], [dict(field="args.args", op="prefix", value=["diff"])], "allow"),
+        (["git"], [dict(field="args.args", op="prefix", value=["reset", "--hard"])], "deny"),
+        (python, [dict(field="args.args", op="equals", value=["--version"])], "allow"),
+        (python, [dict(field="args.args", op="prefix", value=prefix)], "allow"),
+        (python, [dict(field="args.args", op="prefix", value=[*prefix, "approval"])], "ask"),
+        (python, [dict(field="args.args", op="prefix", value=[*prefix, "deny"])], "deny"),
+    ]
+    return ToolPolicy(default="ask", rules=[
+        dict(when={"all": [
+            dict(field="args.mode", op="equals", value="exec"),
+            dict(field="args.program", op="in", value=programs),
+            *conditions,
+        ]}, decision=decision)
+        for programs, conditions, decision in cases
+    ] + [dict(when={"all": [
+        dict(field="context.tool_name", op="equals", value="manage_process"),
+        dict(field="args.request.action", op="not_equals", value="write"),
+    ]}, decision="allow")])
 
 
 def demo_tool_policy(call, context):
@@ -48,7 +55,7 @@ def demo_tools():
 
 def demo_resources():
     tools = demo_tools()
-    commands = CommandTools(PROJECT_ROOT, config=demo_execution_config())
+    commands = CommandTools(PROJECT_ROOT, policy=demo_command_policy())
     return AgentResources(tools=(*(tools[item.name] for item in tools.definitions), *commands.tools()),
         skills=(SkillDirectory(PROJECT_ROOT / "skills", include=("demo-guide",)),))
 
@@ -60,7 +67,7 @@ async def lifespan(setup):
     # marker, applying the same demo command policy as the execution Workflows.
     for selected in setup.workflows:
         if selected.id == BUILTIN_AGENT_WORKFLOW_ID:
-            selected.nodes[0].executable.handler.__agent_app_execution__ = demo_execution_config()
+            selected.nodes[0].executable.handler.__agent_app_command_policy__ = demo_command_policy()
     application = setup.applications.get("agent")
     if application is None or not application.enabled:
         yield

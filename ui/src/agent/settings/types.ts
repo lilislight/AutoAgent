@@ -17,8 +17,11 @@ export interface Resource {
   management_id: string; group_id: string; group_name: string; resource_id: string; kind: 'tool' | 'skill'; name: string;
   origin: 'builtin' | 'project' | 'mcp' | 'manual' | 'workspace' | 'shared'; source_id?: string; workspace_id?: string; remote_name?: string;
   description: string; location?: string; input_schema?: Record<string, unknown>; operation_schema?: Record<string, unknown> | null;
-  available: boolean; enabled: boolean; enabled_editable?: boolean; permissions: Policy | null; default_decision: Decision; parameter_policy: boolean;
-  permission_source: string; permissions_editable: boolean; approval_exempt?: boolean;
+  available: boolean; enabled: boolean; enabled_editable?: boolean; custom_policy?: Policy | null;
+  registered_policies?: { source: 'code' | 'group' | 'source'; policy: Policy }[];
+  permissions_editable: boolean; policy_in_code?: boolean;
+  mcp_status?: 'ready' | 'offline' | 'removed' | 'connecting' | 'review';
+  schema_version?: string; approved_schema?: Record<string, unknown> | null;
 }
 export interface Group { id: string; name: string; origin: Resource['origin']; resources: Resource[]; enabled: boolean; permissions: Policy | null; permissions_editable: boolean }
 export interface Inventory { items: ConfigRecord[]; resources: Resource[]; groups: Group[]; workspace_id: string; revision: number; edit_code_permissions: boolean; policy_schema: Record<string, unknown> }

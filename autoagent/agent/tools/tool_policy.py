@@ -369,7 +369,7 @@ class ToolPolicy(Model):
     def _evaluate_operation(self, call, context, operation=None):
         facts = {
             "args": context.arguments,
-            "operation": operation.model_dump(mode="json") if operation is not None else _MISSING,
+            "operation": operation.policy_facts() if operation is not None else _MISSING,
             "context": {
                 "user_id": context.user_id, "session_id": context.session_id,
                 "tool_name": context.tool_name, "call_id": context.call_id,
@@ -393,7 +393,7 @@ class ToolPolicy(Model):
         for operation in context.operations or (None,):
             decision, matched, fallback = self._evaluate_operation(call, context, operation)
             decisions.append(decision)
-            details.append(dict(operation=operation.model_dump(mode="json") if operation is not None else None,
+            details.append(dict(operation=operation.policy_facts() if operation is not None else None,
                 decision=decision.model_dump(mode="json"), matched_rules=matched, default_used=fallback))
         return dict(decision=combine_decisions(decisions).model_dump(mode="json"), operations=details)
 

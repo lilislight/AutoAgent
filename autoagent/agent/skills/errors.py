@@ -30,10 +30,6 @@ class SkillChangedError(SkillError):
     """Skill metadata or its root changed after discovery; rediscover explicitly."""
 
 
-class SkillAccessError(SkillError):
-    """A Skill is unavailable for model-directed calls."""
-
-
 class SkillScriptError(SkillError):
     """Script configuration, launch or timeout failure."""
 
@@ -41,5 +37,5 @@ class SkillScriptError(SkillError):
 __all__ = [
     "SkillError", "SkillFormatError", "SkillNotFoundError", "SkillResourceError",
     "SkillLimitError", "SkillChangedError",
-    "SkillAccessError", "SkillScriptError",
+    "SkillScriptError",
 ]

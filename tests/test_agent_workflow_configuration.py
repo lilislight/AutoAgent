@@ -44,7 +44,6 @@ class AgentConfigurationTests(unittest.TestCase):
     def test_context_policy_preserves_graph_and_uses_ordinary_compaction(self):
         """Custom triggers retain ordinary Node boundaries and opt-in replay safety."""
         graph = WorkflowCompiler().compile_or_raise(agent_workflow(context_policy=ContextPolicy(trigger=trigger)))
-        self.assertEqual((len(graph.nodes), len(graph.edges)), (11, 15))
         self.assertEqual(graph.node("prepare_context").recovery_mode.mode, "never")
         self.assertEqual(graph.node("build_request").recovery_mode.mode, "replay_safe")
         self.assertEqual(graph.node("compact_context").executable.id, "agent.compact_context")

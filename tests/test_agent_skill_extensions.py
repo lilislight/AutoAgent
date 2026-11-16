@@ -24,7 +24,7 @@ from pydantic import ValidationError
 from autoagent import ValueContract
 from autoagent.agent import (
     LocalSkillSource, MemorySkillSource, PackageSkillSource, Skill, SkillSet,
-    SkillAccessError, SkillChangedError, SkillDiagnostic, SkillFormatError,
+    SkillChangedError, SkillDiagnostic, SkillFormatError,
     SkillLimitError, SkillLimits, SkillResource, SkillResourceError,
     SkillResourcePage, SkillScriptError, SkillScriptResult, SkillScriptSpec,
     SkillTextContent, SubprocessSkillRunner, ToolSet,
@@ -190,7 +190,7 @@ class SkillExpansionTests(unittest.TestCase):
                 args["path"] = "rules.md"
             result = executable.invoke(call(executable.definition.name, args))
             self.assertTrue(result.is_error)
-            self.assertEqual(result.structured_content["error"]["kind"], "SkillAccessError")
+            self.assertEqual(result.structured_content["error"]["kind"], "SkillNotFoundError")
         self.assertIsNone(SkillSet((disabled,)).catalog_message())
         self.assertEqual(SkillSet((disabled,)).as_tools(), ())
 

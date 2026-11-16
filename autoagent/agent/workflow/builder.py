@@ -21,12 +21,12 @@ from . import context as preparation
 from .completion import complete_agent_round, finish_agent_round
 from .configuration import AgentWorkflowExtensions, AgentWorkflowPolicies
 from .models import (
-    AgentApprovalRequest, AgentApprovalResponse, AgentInput, AgentResult,
+    AgentApprovalRequest, AgentApprovalResponse, AgentInput, AgentResult, ApprovedTools,
     AgentWorkflowOptions, CompactionChunk, CompleteRoundInput, ContextPlan,
     ContextPreparation, Conversation, PreparedRequest, RoundResult,
     ToolBranchInput, ToolBranchResult, ToolTask,
 )
-from .tools import branch_tools, execute_tool, prepare_tool_wait
+from .tools import branch_tools, execute_tool, prepare_tool_wait, route_approved_tools
 from .questions import (
     ASK_USER_RESOURCE, AskUserRequest, AskUserResponse, QuestionResults, question_request,
 )
@@ -95,9 +95,9 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         raise TypeError("tool_context_provider must implement get_context.")
     context_source = tool_context if tool_context is not None else tool_context_provider
     identity = {"runtime_binding": 1, "history_commits": 1, "final_inbox_check": 1, "agent_result": 2, "builtin_tool_results": 2,
-        "tool_routing": 2, "history_projection": PROJECTION_VERSION, "options": options.model_dump(mode="json"),
+        "tool_routing": 3, "history_projection": PROJECTION_VERSION, "options": options.model_dump(mode="json"),
         "resources": resources.manifest, "wait_collection": 1, "user_event_contract": 1,
-        "workspace_context": 1, "skill_tools": 2, "file_tools": 2, "execution_tools": 2,
+        "workspace_context": 1, "skill_tools": 3, "file_tools": 3, "execution_tools": 3,
         "builtin_tools": {"ask_user": ASK_USER_RESOURCE.version} if options.include_ask_user else {},
         "context_policy": context_policy.identity(), "extensions": {
         name: {"id": operator.id, "version": operator.version}
@@ -346,7 +346,7 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
             bindings=tuple(item.binding for item in result.ask))
 
     @hook
-    def approved_input(context: InputMappingContext) -> list[ToolTask]:
+    def approved_input(context: InputMappingContext) -> ApprovedTools:
         batch = restore(ToolBranchResult, state(context)["branch"])
         reply = restore(AgentApprovalResponse, next(iter(context.incoming.values())))
         expected = {item.approval_request.id for item in batch.ask}
@@ -356,12 +356,14 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         tasks = [item.model_copy(update={"observed_versions": dict(state(context).get("observed_versions", {}))}) for item in batch.ask]
         if reply.resolutions:
             resolutions = {value.request_id: value for value in reply.resolutions}
-            return [item.model_copy(update={
+            return ApprovedTools(tasks=tuple(item.model_copy(update={
                 "approval": resolutions[item.approval_request.id].approval,
                 "observation": resolutions[item.approval_request.id].result,
-            }) for item in tasks]
+            }) for item in tasks))
         approvals = {value.request_id: value for value in reply.decisions}
-        return [item.model_copy(update={"approval": approvals[item.approval_request.id]}) for item in tasks]
+        return ApprovedTools(tasks=tuple(item.model_copy(update={
+            "approval": approvals[item.approval_request.id],
+        }) for item in tasks))
 
     @hook
     def complete_input(context: InputMappingContext) -> CompleteRoundInput:
@@ -369,11 +371,15 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         batch = state(context).get("branch")
         if batch is not None:
             results.extend(restore(ToolBranchResult, batch).immediate)
-        for edge in ("allow_complete", "approved_complete", "questions_complete", "wait_preparation_complete", "wait_complete"):
+        for edge in ("allow_complete", "approved_complete", "approved_rejected",
+                     "questions_complete", "questions_complete_approved",
+                     "wait_preparation_complete", "wait_preparation_complete_approved", "wait_complete", "wait_complete_approved"):
             incoming = context.incoming.get(edge, ())
-            if edge == "wait_preparation_complete" and incoming:
+            if edge == "approved_rejected":
+                incoming = incoming.get("immediate", ()) if incoming else ()
+            elif edge.startswith("wait_preparation_complete") and incoming:
                 incoming = restore(WaitPreparationBatch, incoming).results
-            elif edge in ("questions_complete", "wait_complete") and incoming:
+            elif edge.startswith(("questions_complete", "wait_complete")) and incoming:
                 incoming = restore(QuestionResults, incoming).results
             for item in incoming:
                 results.append(restore(LLMToolResult, item))
@@ -455,37 +461,46 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
             waits=tuple(output.wait for output in outputs if output.wait is not None))
 
     @hook
-    def wait_preparation_binding(context: OutputBindingContext) -> ContextPatch:
-        batch = restore(WaitPreparationBatch, context.output)
-        return ContextPatch(session=result_operations(context, batch.results),
-            invocation=(ContextOperation.set("agent.prepared_waits", plain(context.output)),))
-
-    @hook
     def waits_input(context: InputMappingContext) -> list["SelectRequest"]:
         return [item.request for item in restore(WaitPreparationBatch, next(iter(context.incoming.values()))).waits]
-
-    @hook
-    def wait_results(context: AggregationContext) -> CompletedToolWaitBatch:
-        from autoagent.core.commands import SelectResult
-        batch = restore(WaitPreparationBatch, state(context)["prepared_waits"])
-        return CompletedToolWaitBatch(waits=tuple(CompletedToolWait(wait=wait, selected_case=restore(SelectResult, output).case)
-            for wait, output in zip(batch.waits, context.outputs, strict=True)))
 
     @hook
     def collect_wait_input(context: InputMappingContext) -> list[CompletedToolWait]:
         return list(restore(CompletedToolWaitBatch, next(iter(context.incoming.values()))).waits)
 
-    @hook
-    def collected_wait_results(context: AggregationContext) -> QuestionResults:
-        batch = restore(WaitPreparationBatch, state(context)["prepared_waits"])
-        return QuestionResults(results=(*batch.results, *(restore(LLMToolResult, value) for value in context.outputs)))
+    def wait_hooks(key):
+        @hook
+        def prepared(context: OutputBindingContext) -> ContextPatch:
+            batch = restore(WaitPreparationBatch, context.output)
+            return ContextPatch(session=result_operations(context, batch.results),
+                invocation=(ContextOperation.set(("agent", key), plain(context.output)),))
+
+        @hook
+        def selected(context: AggregationContext) -> CompletedToolWaitBatch:
+            from autoagent.core.commands import SelectResult
+            batch = restore(WaitPreparationBatch, state(context)[key])
+            return CompletedToolWaitBatch(waits=tuple(
+                CompletedToolWait(wait=wait, selected_case=restore(SelectResult, output).case)
+                for wait, output in zip(batch.waits, context.outputs, strict=True)))
+
+        @hook
+        def collected(context: AggregationContext) -> QuestionResults:
+            batch = restore(WaitPreparationBatch, state(context)[key])
+            return QuestionResults(results=(*batch.results, *(restore(LLMToolResult, value) for value in context.outputs)))
+
+        @hook
+        def bound(context: OutputBindingContext) -> ContextPatch:
+            batch = restore(WaitPreparationBatch, state(context)[key])
+            completed_ids = {item.call_id for item in batch.results}
+            results = restore(QuestionResults, context.output).results
+            return ContextPatch(session=result_operations(context, (item for item in results if item.call_id not in completed_ids)))
+
+        return prepared, selected, collected, bound
 
     @hook
-    def wait_binding(context: OutputBindingContext) -> ContextPatch:
-        batch = restore(WaitPreparationBatch, state(context)["prepared_waits"])
-        completed_ids = {item.call_id for item in batch.results}
-        results = restore(QuestionResults, context.output).results
-        return ContextPatch(session=result_operations(context, (item for item in results if item.call_id not in completed_ids)))
+    def approved_routing_binding(context: OutputBindingContext) -> ContextPatch:
+        result = restore(ToolBranchResult, context.output)
+        return ContextPatch(session=result_operations(context, result.immediate))
 
     safe = Recovery(mode="replay_safe")
     def node(identity, handler, **kwargs):
@@ -493,7 +508,7 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         return Node(identity, selected or Operator(handler, id=options.workflow_id + "." + identity, version=version),
                     recovery_mode=Recovery() if selected is not None else safe, **kwargs)
     dispatch = Operator(execute_tool_stream if options.user_events else execute_tool,
-        id=options.workflow_id + ".tool.dispatch", version="5" if options.user_events else "4")
+        id=options.workflow_id + ".tool.dispatch", version="6" if options.user_events else "5")
     dispatch_stream = Stream(ToolExecutionReducer()) if options.user_events else None
     nodes = [
         node("start", start, output_binding=start_binding),
@@ -510,7 +525,8 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         Node("tool_execute", dispatch, input_mapping=allow_input, output_binding=results_binding,
              map=Map(max_parallelism=options.max_parallelism), stream=dispatch_stream),
         Node("wait_approval", Wait(AgentApprovalRequest, AgentApprovalResponse), input_mapping=approval_input),
-        Node("tool_execute_approved", dispatch, input_mapping=approved_input, output_binding=results_binding,
+        node("route_approved", route_approved_tools, input_mapping=approved_input, output_binding=approved_routing_binding),
+        Node("tool_execute_approved", dispatch, input_mapping=allow_input, output_binding=results_binding,
              map=Map(max_parallelism=options.max_parallelism), stream=dispatch_stream),
         node("complete_round", complete, input_mapping=complete_input, output_binding=complete_binding),
         node("finish", finish, input_mapping=finish_input),
@@ -527,41 +543,45 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         Edge("tool_branch", "wait_approval", test_field("ask"), id="branch_ask"),
         Edge("tool_branch", "complete_round", test_field("immediate"), id="branch_complete"),
         Edge("tool_execute", "complete_round", id="allow_complete"),
-        Edge("wait_approval", "tool_execute_approved", id="approval_execute"),
+        Edge("wait_approval", "route_approved", id="approval_route"),
+        Edge("route_approved", "tool_execute_approved", test_field("allow"), id="approval_execute"),
+        Edge("route_approved", "complete_round", test_field("immediate"), id="approved_rejected"),
         Edge("tool_execute_approved", "complete_round", id="approved_complete"),
         Edge("complete_round", "prepare_context", test_field("continue_loop"), id="round_back"),
         Edge("complete_round", "finish", test_field("continue_loop", False), id="round_finish"),
     ]
-    if options.include_ask_user:
-        nodes.extend([
-            Node("ask_user", Wait(AskUserRequest, AskUserResponse), input_mapping=questions_input, output_binding=questions_binding,
-                 map=Map(max_parallelism=options.max_parallelism, aggregate=question_results)),
-        ])
-        edges.extend([
-            Edge("tool_branch", "ask_user", test_field("questions"), id="branch_questions"),
-            Edge("ask_user", "complete_round", id="questions_complete"),
-        ])
-    if options.subagents.enabled:
-        from autoagent.core.commands import Select
-        nodes.extend([
-            Node("prepare_wait", Operator(prepare_wait_stream if options.user_events else prepare_tool_wait,
-                id=options.workflow_id + ".prepare_wait", version="3" if options.user_events else "2"),
-                input_mapping=wait_preparation_input, output_binding=wait_preparation_binding,
-                map=Map(max_parallelism=options.max_parallelism, aggregate=wait_preparation_results),
-                stream=Stream(WaitPreparationReducer()) if options.user_events else None),
-            Node("wait_tools", Select(), input_mapping=waits_input,
-                map=Map(max_parallelism=options.max_parallelism, aggregate=wait_results)),
-            node("collect_wait_results", collect_tool_wait, input_mapping=collect_wait_input,
-                output_binding=wait_binding,
-                map=Map(max_parallelism=options.max_parallelism, aggregate=collected_wait_results)),
-        ])
-        edges.extend([
-            Edge("tool_branch", "prepare_wait", test_field("waits"), id="branch_wait"),
-            Edge("prepare_wait", "wait_tools", test_field("waits"), id="prepare_wait_enter"),
-            Edge("prepare_wait", "complete_round", test_field("waits", False), id="wait_preparation_complete"),
-            Edge("wait_tools", "collect_wait_results", id="wait_collect"),
-            Edge("collect_wait_results", "complete_round", id="wait_complete"),
-        ])
+    # Keep native waits independent when one batch contains approved and direct calls.
+    for source, suffix in (("tool_branch", ""), ("route_approved", "_approved")):
+        if options.include_ask_user:
+            questions = "ask_user" + suffix
+            nodes.append(Node(questions, Wait(AskUserRequest, AskUserResponse), input_mapping=questions_input,
+                output_binding=questions_binding, map=Map(max_parallelism=options.max_parallelism, aggregate=question_results)))
+            edges.extend([
+                Edge(source, questions, test_field("questions"), id="branch_questions" + suffix),
+                Edge(questions, "complete_round", id="questions_complete" + suffix),
+            ])
+        if options.subagents.enabled:
+            from autoagent.core.commands import Select
+            prepare_wait, wait_tools, collect = ("prepare_wait" + suffix, "wait_tools" + suffix, "collect_wait_results" + suffix)
+            prepared, selected, collected, bound = wait_hooks("prepared_waits" + suffix)
+            nodes.extend([
+                Node(prepare_wait, Operator(prepare_wait_stream if options.user_events else prepare_tool_wait,
+                    id=options.workflow_id + "." + prepare_wait, version="4" if options.user_events else "3"),
+                    input_mapping=wait_preparation_input, output_binding=prepared,
+                    map=Map(max_parallelism=options.max_parallelism, aggregate=wait_preparation_results),
+                    stream=Stream(WaitPreparationReducer()) if options.user_events else None),
+                Node(wait_tools, Select(), input_mapping=waits_input,
+                    map=Map(max_parallelism=options.max_parallelism, aggregate=selected)),
+                node(collect, collect_tool_wait, input_mapping=collect_wait_input,
+                    output_binding=bound, map=Map(max_parallelism=options.max_parallelism, aggregate=collected)),
+            ])
+            edges.extend([
+                Edge(source, prepare_wait, test_field("waits"), id="branch_wait" + suffix),
+                Edge(prepare_wait, wait_tools, test_field("waits"), id="prepare_wait_enter" + suffix),
+                Edge(prepare_wait, "complete_round", test_field("waits", False), id="wait_preparation_complete" + suffix),
+                Edge(wait_tools, collect, id="wait_collect" + suffix),
+                Edge(collect, "complete_round", id="wait_complete" + suffix),
+            ])
     if not (isinstance(context_policy.estimate, UsagePlusCharacters)
             and context_policy.trigger in (over_context_limit, always_compact)):
         nodes[1].recovery_mode = Recovery()
@@ -571,8 +591,13 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
     for selected in nodes:
         if options.user_events:
             selected.user_events = agent_events
-        if selected.id in policies.nodes:
-            policies.nodes[selected.id].apply(selected)
+        node_policy = policies.nodes.get(selected.id)
+        if node_policy is None and selected.id in {
+            "ask_user_approved", "prepare_wait_approved", "wait_tools_approved", "collect_wait_results_approved",
+        }:
+            node_policy = policies.nodes.get(selected.id.removesuffix("_approved"))
+        if node_policy is not None:
+            node_policy.apply(selected)
         if options.user_events and selected.id in {"tool_execute", "tool_execute_approved"} and selected.retry is not None:
             selected.executable = Operator(execute_retryable_tool_stream,
                 id=options.workflow_id + ".tool.dispatch.retryable", version="1")

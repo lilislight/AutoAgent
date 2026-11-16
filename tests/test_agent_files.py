@@ -56,18 +56,38 @@ class FileToolsTests(unittest.TestCase):
         self.assertIn("oneOf", str(definitions["manage_files"].parameters))
 
     def test_file_operation_contract_is_normalized_and_transfers_have_independent_targets(self):
-        """File Tools declare consistent Operation facts without advertising them as model arguments."""
+        """Preflight maps calls to four public actions without reading or traversing the targets."""
         from jsonschema import validate
         from autoagent.agent import FILE_OPERATION_SCHEMA
-        (self.root / 'source').write_text('content')
-        proposal = call('manage_files', request={'operation': 'copy', 'path': 'source', 'destination': 'target'})
-        operations = self.tools._prepare(proposal, None).context.operations
-        self.assertEqual([op.action for op in operations], ['file.read', 'file.write'])
-        self.assertEqual([op.attributes['path'] for op in operations], ['source', 'target'])
-        for operation in operations:
-            validate(operation.model_dump(mode='json'), FILE_OPERATION_SCHEMA)
-            self.assertTrue(Path(operation.resource).is_absolute())
-            self.assertEqual(operation.attributes['scope'], 'workspace')
+
+        outside = self.root.parent / "target"
+        cases = [
+            (call("list_files", path="source", recursive=True), [("inspect", "source")]),
+            (call("search_files", path="source", query="text"), [("read", "source")]),
+            (call("read_file", path="source"), [("read", "source")]),
+            (call("write_file", path="source", content="text"), [("write", "source")]),
+            (call("write_file", path="source", content="text", overwrite=True), [("write", "source"), ("read", "source")]),
+            (call("edit_file", path="source", edits=[dict(old_text="a", new_text="b")]), [("write", "source"), ("read", "source")]),
+            (call("manage_files", request=dict(operation="stat", path="source")), [("inspect", "source")]),
+            (call("manage_files", request=dict(operation="mkdir", path="source")), [("write", "source")]),
+            (call("manage_files", request=dict(operation="delete", path="source")), [("delete", "source")]),
+            (call("manage_files", request=dict(operation="copy", path="source", destination=str(outside))),
+                [("read", "source"), ("write", outside.as_posix())]),
+            (call("manage_files", request=dict(operation="move", path="source", destination=str(outside))),
+                [("delete", "source"), ("write", outside.as_posix()), ("read", "source")]),
+        ]
+        with patch("os.scandir", side_effect=AssertionError("Directory traversal during preflight")), \
+                patch.object(self.service, "_bytes", side_effect=AssertionError("File read during preflight")):
+            for proposal, expected in cases:
+                with self.subTest(name=proposal.name, arguments=proposal.arguments):
+                    operations = self.tools._prepare(proposal, None).context.operations
+                    self.assertEqual([(op.action, op.attributes["path"]) for op in operations],
+                        [("file." + action, path) for action, path in expected])
+                    for operation in operations:
+                        validate(operation.policy_facts(), FILE_OPERATION_SCHEMA)
+                        path = operation.attributes["path"]
+                        self.assertEqual(operation.resource, str(self.root / path))
+                        self.assertEqual(operation.attributes["scope"], "external" if path == outside.as_posix() else "workspace")
         for tool in self.tools._tools.values():
             self.assertEqual(tool.operation_schema, FILE_OPERATION_SCHEMA)
             self.assertNotIn('operation_schema', tool.definition.parameters['properties'])
@@ -93,7 +113,7 @@ class FileToolsTests(unittest.TestCase):
         self.assertEqual(full["total_count"], 3)
         (self.root / ".env").write_text("needle\n")
         protected = self.invoke("search_files", query="needle", mode="count", include_hidden=True).structured_content
-        self.assertNotIn("total_count", protected)
+        self.assertEqual(protected["total_count"], 4)
 
     def test_read_metadata_and_failed_mutation_guidance_preserve_file(self):
         """Reads expose snapshot metadata and ambiguous or nonempty mutations give corrective feedback."""
@@ -136,31 +156,28 @@ class FileToolsTests(unittest.TestCase):
         """An unreadable subtree is labelled without claiming its contents were searched."""
         (self.root / "locked").mkdir()
         (self.root / "locked" / "hidden.txt").write_text("needle")
-        tools = file_tools(LocalFileService(self.root, config=file_config(path_rule("locked", actions=("list",), decision="deny"))), context=ToolContext(session_id="one"))
+        tools = file_tools(LocalFileService(self.root, config=file_config(path_rule("locked", actions=("inspect",), decision="deny"))), context=ToolContext(session_id="one"))
         value = tools.invoke(call("search_files", query="needle")).structured_content
         self.assertEqual(value["match_count"], 0)
         self.assertNotIn("total_count", value)
         self.assertEqual(value["protected_directories"], [dict(path="locked", list="deny", content_searched=False)])
 
-    def test_listing_labels_protected_names_without_reading_them(self):
-        """Ask and deny files remain visible with access labels, never content."""
+    def test_listing_returns_metadata_without_evaluating_file_content_permissions(self):
+        """Listing and stat disclose metadata without evaluating read, write or delete for each file."""
         (self.root / ".env").write_text("SECRET_VALUE")
         (self.root / "denied.txt").write_text("DENIED_VALUE")
         service = LocalFileService(self.root, config=file_config(path_rule(".env"), path_rule("denied.txt", decision="deny")))
-        result = file_tools(service).invoke(call("list_files", include_hidden=True))
+        with patch.object(service, "evaluate", wraps=service.evaluate) as evaluate:
+            tools = file_tools(service)
+            result = tools.invoke(call("list_files", include_hidden=True, respect_gitignore=False))
+            metadata = tools.invoke(call("manage_files", request=dict(operation="stat", path=".env")))
+        self.assertEqual([checked.args[0].action for checked in evaluate.call_args_list], ["file.inspect", "file.inspect"])
         rows = {value["path"]: value for value in result.structured_content["entries"]}
-        self.assertEqual(rows[".env"]["permissions"]["read"], "ask")
-        self.assertEqual(rows["denied.txt"]["permissions"]["read"], "deny")
+        self.assertEqual(rows[".env"], dict(path=".env", type="file", size_bytes=len("SECRET_VALUE")))
+        self.assertEqual(rows["denied.txt"]["size_bytes"], len("DENIED_VALUE"))
+        self.assertEqual(metadata.structured_content["size_bytes"], len("SECRET_VALUE"))
         self.assertNotIn("SECRET_VALUE", result.model_dump_json())
         self.assertNotIn("DENIED_VALUE", result.model_dump_json())
-
-    def test_protected_search_does_not_leak_matching_or_content(self):
-        """Protected search candidates are listed even when the query would not match."""
-        (self.root / ".env").write_text("SECRET_VALUE")
-        result = self.invoke("search_files", query="absent", include_hidden=True)
-        self.assertEqual(result.structured_content["match_count"], 0)
-        self.assertFalse(result.structured_content["protected_files"][0]["content_searched"])
-        self.assertNotIn("SECRET_VALUE", result.model_dump_json())
 
     def test_secret_and_external_access_require_exact_approval(self):
         """External and sensitive reads use approvals bound to the resolved operation."""
@@ -187,7 +204,7 @@ class FileToolsTests(unittest.TestCase):
         decision = self.tools.check(request)
         self.assertEqual(decision.action, "ask")
         result = self.tools.invoke(request, approval=decision.approval_request.respond(approved=True))
-        self.assertEqual(result.structured_content["results"][0]["text"], "SECRET_VALUE")
+        self.assertEqual(result.structured_content["results"], [dict(path=".env", line=1, column=1)])
 
     def test_deny_cannot_be_overridden_by_bypass(self):
         """Bypass may skip ask but cannot override file policy deny."""
@@ -354,14 +371,16 @@ class FileToolsTests(unittest.TestCase):
         result = self.invoke("search_files", path="sub", query="needle")
         self.assertEqual(result.structured_content["results"], [])
 
-    def test_declarative_rules_label_and_block_discovered_search_content(self):
-        """Session argument rules are applied to each discovered file, not only the search root."""
+    def test_search_returns_locations_while_direct_read_is_denied(self):
+        """Search reports a location and a direct Read is independently denied by the SDK policy."""
         (self.root / "secret.txt").write_text("SECRET")
         tools = ToolSet(FileTools(service=self.service).tools(), policy=ToolPolicy(rules=[path_rule("secret.txt", "deny", ("read",))]),
                         context=ToolContext(session_id="one"))
         result = tools.invoke(call("search_files", query="SECRET"))
-        self.assertEqual(result.structured_content["protected_files"][0]["read"], "deny")
-        self.assertEqual(result.structured_content["results"], [])
+        self.assertEqual(result.structured_content["results"], [dict(path="secret.txt", line=1, column=1)])
+        self.assertNotIn("SECRET", result.model_dump_json())
+        denied = tools.invoke(call("read_file", path="secret.txt"))
+        self.assertEqual(denied.structured_content["error"]["kind"], "tool_access_denied")
 
     def test_frozen_sibling_writes_accept_new_parent_and_reject_replaced_anchor(self):
         """Creating a shared parent preserves authorization; replacing its anchor does not."""
@@ -385,16 +404,6 @@ class FileToolsTests(unittest.TestCase):
         result = self.tools.invoke(proposal, context=context)
         self.assertTrue(result.is_error)
         self.assertFalse((directory / "new/file").exists())
-
-    def test_search_merges_context_without_repeating_source_lines(self):
-        """Nearby matches share one context block while retaining exact match positions."""
-        (self.root / "a").write_text("one\nmatch a\nthree\nmatch b\nfive\nsix\nseven\neight\nmatch c\nten\n")
-        result = self.invoke("search_files", query="match", context_lines=1).structured_content
-        self.assertEqual(result["match_count"], 3)
-        self.assertEqual([row["line"] for row in result["results"]], [2, 4, 9])
-        self.assertEqual([(row["start_line"], row["end_line"]) for row in result["contexts"]], [(1, 5), (8, 10)])
-        self.assertEqual(result["contexts"][0]["lines"], ["one", "match a", "three", "match b", "five"])
-        self.assertTrue(all("text" not in row for row in result["results"]))
 
     def test_preflight_version_cannot_rebase_after_another_read(self):
         """An execution plan pins the preflight version even if Session observations advance."""
@@ -607,15 +616,13 @@ class FileToolsTests(unittest.TestCase):
                 break
         self.assertEqual("".join(fragments), original)
 
-    def test_long_search_match_is_clipped_around_the_match(self):
-        """Minified source yields a bounded useful snippet instead of an output-size error."""
+    def test_long_search_matches_only_return_locations(self):
+        """Both literal and whole-line regex matches return coordinates without text."""
         (self.root / "long.txt").write_text("a" * 10000 + "needle" + "b" * 10000)
-        value = self.invoke("search_files", query="needle").structured_content
-        row = value["results"][0]
-        self.assertTrue(row["text_truncated"])
-        self.assertIn("needle", row["text"])
-        self.assertEqual(row["column"], 10001)
-        self.assertLessEqual(len(row["text"].encode()), 4096)
+        for query, regex, column in (("needle", False, 10001), (".+", True, 1)):
+            with self.subTest(query=query):
+                value = self.invoke("search_files", query=query, regex=regex).structured_content
+                self.assertEqual(value["results"], [dict(path="long.txt", line=1, column=column)])
 
     def test_file_contract_publishes_actual_configured_limits(self):
         """Model-facing definitions expose runtime limits instead of unrelated static defaults."""

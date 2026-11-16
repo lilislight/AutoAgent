@@ -17,14 +17,15 @@ class ApplicationResourceContracts:
     database_url = ApplicationIsolationContracts.database_url
 
     @asynccontextmanager
-    async def product(self, *, execution=False, root=None, environment=None, provider=None):
+    async def product(self, *, execution=False, root=None, environment=None, provider=None, policy=None):
         @asynccontextmanager
         async def lifespan(setup):
             setup.providers.register('offline', provider or ScriptedProvider())
             setup.applications["agent"].context.set_defaults(settings())
             def project_echo(text: str) -> str:
                 return text
-            setup.applications["agent"].context.resources.register_tool(Tool(project_echo), workflows={BUILTIN_AGENT_WORKFLOW_ID})
+            setup.applications["agent"].context.resources.register_tool(Tool(project_echo),
+                workflows={BUILTIN_AGENT_WORKFLOW_ID}, policy=policy)
             yield
         async with AutoAgentHost(root=root or self.root, workflows=[builtin_agent_workflow(execution=execution)],
             lifespan=lifespan, settings=HostSettings(database_url=self.url), environment=environment or {}) as host:
@@ -47,8 +48,8 @@ class ApplicationResourceContracts:
         self.assertEqual(identities[0]['management_id'], identities[1]['management_id'])
         self.assertEqual(identities[0]['resource_id'], identities[1]['resource_id'])
 
-    async def test_nested_policy_persists_and_tool_override_replaces_group_policy(self):
-        """Nested policies survive reopening and a Tool Allow replaces its group's Ask."""
+    async def test_nested_custom_policy_persists_alongside_group_policy(self):
+        """Nested Tool rules and inherited group rules survive reopening independently."""
         from autoagent.agent import ToolPolicy, ToolContext, LLMToolCall
         policy = ToolPolicy.from_dict({'rules': [dict(id='protected', when={'all': [
             dict(field='args.text', op='regex', value='secret', flags='i'),
@@ -62,14 +63,13 @@ class ApplicationResourceContracts:
         async with self.product() as host:
             manager = host.applications['agent'].context.shared_resources
             row = next(row for row in (await manager.describe())['resources'] if row['name'] == 'project_echo')
-            self.assertEqual(row['permissions'], policy.to_dict())
-            self.assertEqual(row['permission_source'], 'tool')
-            bound = manager.effective_permissions(host.applications['agent'].context.resources.get('tool', 'project_echo'))
-            call = LLMToolCall(name='project_echo', call_id='one', arguments='{"text":"normal"}')
-            context = ToolContext(user_id='guest').for_call(call, {'text': 'normal'})
-            self.assertEqual(bound(call, context).action, 'allow')
-            self.assertEqual(bound(call, context.for_call(call, {'text': 'SECRET'})).action, 'deny')
-            self.assertEqual(bound(call, ToolContext(user_id='owner').for_call(call, {'text': 'SECRET'})).action, 'allow')
+            self.assertEqual(row['custom_policy'], policy.to_dict())
+            self.assertEqual(row['registered_policies'], [{'source': 'group', 'policy': ToolPolicy(default='ask').to_dict()}])
+            application = host.applications['agent']
+            for user, argument, expected in (('guest', 'normal', 'ask'), ('guest', 'SECRET', 'deny'), ('owner', 'SECRET', 'ask')):
+                result = await application.preview_policy(policy, tool_id=row['management_id'],
+                    arguments={'text': argument}, context={'user_id': user})
+                self.assertEqual(result['decision']['action'], expected)
 
     async def test_registered_declarative_rules_are_visible_before_product_overrides(self):
         """The editor receives the registered Policy instead of an empty approximation of its default."""
@@ -80,9 +80,20 @@ class ApplicationResourceContracts:
             context = host.applications['agent'].context
             context.resources.set_policy('tool', 'project_echo', configured)
             row = next(row for row in (await context.shared_resources.describe())['resources'] if row['name'] == 'project_echo')
-            self.assertEqual(row['permissions'], configured.to_dict())
-            self.assertEqual(row['permission_source'], 'registration')
-            self.assertEqual(row['default_decision'], 'ask')
+            self.assertEqual(row['registered_policies'], [{'source': 'code', 'policy': configured.to_dict()}])
+            self.assertIsNone(row['custom_policy'])
+            self.assertEqual(await context.storage("resource_records"), [])
+            custom = ToolPolicy(rules=[dict(when=dict(field="args.text", op="equals", value="hello"), decision="ask")])
+            await host.applications["agent"].save_resource(ResourceControl(name="Echo",
+                resource_id=row["management_id"], permissions=custom))
+        updated = ToolPolicy.from_yaml("default: deny")
+        async with self.product(policy=updated) as host:
+            app = host.applications["agent"]
+            row = next(row for row in (await app.resource_configs())['resources'] if row['name'] == 'project_echo')
+            self.assertEqual(row["registered_policies"], [{"source": "code", "policy": updated.to_dict()}])
+            self.assertEqual(row["custom_policy"]["rules"][0]["decision"], "ask")
+            preview = await app.preview_policy(custom, tool_id=row["management_id"], arguments={"text": "hello"})
+            self.assertEqual(preview["decision"]["action"], "deny")
 
     async def test_group_switch_filters_tools_without_changing_sdk_registration(self):
         """A disabled product group hides every member while the Host's explicit registrations remain enabled."""
@@ -143,43 +154,68 @@ class ApplicationResourceContracts:
             manager = host.applications["agent"].context.shared_resources
             entry = next(row for row in (await manager.describe())['resources'] if row['name'] == 'project_echo')
             self.assertFalse(entry['permissions_editable'])
-            self.assertIsNone(entry['permissions'])
+            self.assertIsNone(entry['custom_policy'])
             actual = host.applications["agent"].context.resources.get('tool','project_echo')
             self.assertIsNone(manager.filter([actual])[0].policy)
             with self.assertRaisesRegex(ValueError, 'disabled'):
                 await manager.save(ResourceControl(name='Project', resource_id=entry['management_id'], permissions=ToolPolicy(default='allow')),
                     resource_id=saved['id'], expected_version=saved['version'])
 
-    async def test_builtin_permission_settings_are_locked_and_native_file_policy_still_asks(self):
-        """Built-in Tool and group overrides are rejected while secret reads retain native approval."""
+    async def test_builtin_permissions_load_code_and_scope_custom_rules_to_one_tool(self):
+        """Built-in file rules stay registered while per-tool additions persist independently."""
         from autoagent.agent import LLMResponse, LLMToolCall
         from autoagent.agent import ToolPolicy
         from tests.test_agent_workflow import answer
-        (self.root / '.env').write_text('SMOKE_TEST=example')
+        external = self.root.with_name(self.root.name + '-external')
+        self.addCleanup(external.unlink, missing_ok=True)
+        external.write_text('SMOKE_TEST=example')
         provider = ScriptedProvider(LLMResponse(model='offline', finish_reason='tool_calls', output=(
-            LLMToolCall(name='read_file', call_id='read', arguments='{"path":".env"}'),)), answer())
+            LLMToolCall(name='read_file', call_id='read', arguments=json.dumps({'path': str(external)})),)), answer())
         async with self.product(provider=provider) as host:
             manager = host.applications["agent"].context.shared_resources
             inventory = await manager.describe()
             builtin = [row for row in inventory['resources'] if row['origin'] == 'builtin']
             self.assertTrue(builtin)
-            self.assertTrue(all(not row['permissions_editable'] for row in builtin))
+            self.assertTrue(all(row['permissions_editable'] for row in builtin))
             groups = [row for row in inventory['groups'] if row['origin'] == 'builtin']
             self.assertTrue(all(not row['permissions_editable'] for row in groups))
             entry = next(row for row in builtin if row['name'] == 'read_file')
-            self.assertFalse(entry['approval_exempt'])
-            with self.assertRaisesRegex(ValueError, 'disabled'):
-                await manager.save(ResourceControl(name='Read files', resource_id=entry['management_id'], permissions=ToolPolicy(default='allow')))
+            self.assertIsNone(entry['custom_policy'])
+            self.assertEqual(entry['registered_policies'][0]['policy']['rules'][0]['when']['field'], 'operation.attributes.scope')
             with self.assertRaisesRegex(ValueError, 'disabled'):
                 await manager.save(GroupControl(name='Files', group_id=entry['group_id'], permissions=ToolPolicy(default='allow')))
             result = await host.join(await host.applications["agent"].start_conversation('read', 'Read the test file'))
             self.assertEqual(result.status, 'waiting', result.error)
             self.assertNotIn('SMOKE_TEST=example', str(provider.requests[-1].input))
+            draft = ToolPolicy(rules=[dict(when=dict(field="args.path", op="equals", value=str(external)), decision="deny")])
+            saved = await manager.save(ResourceControl(name='Read files', resource_id=entry['management_id'], permissions=draft))
+            self.assertTrue(saved['configuration']['permissions']['rules'][0]['id'])
+        provider = ScriptedProvider(LLMResponse(model='offline', finish_reason='tool_calls', output=(
+            LLMToolCall(name='read_file', call_id='read', arguments=json.dumps({'path': str(external)})),)), answer())
+        async with self.product(provider=provider) as host:
+            application = host.applications['agent']
+            current = await application.resource_configs()
+            shown = next(row for row in current['resources'] if row['name'] == 'read_file')
+            self.assertEqual(shown['custom_policy'], saved['configuration']['permissions'])
+            other = next(row for row in current['resources'] if row['name'] == 'write_file')
+            self.assertIsNone(other['custom_policy'])
+            self.assertEqual(shown['registered_policies'], other['registered_policies'])
+            base = await application.preview_policy(ToolPolicy(default='allow'), tool_id=shown['management_id'],
+                arguments={'path': str(external)})
+            self.assertEqual(base['decision']['action'], 'ask')
+            preview = await application.preview_policy(draft, tool_id=shown['management_id'], arguments={'path': str(external)})
+            self.assertEqual(preview['decision']['action'], 'deny')
+            self.assertEqual(preview['operations'][0]['operation']['attributes']['scope'], 'external')
+            with self.assertRaisesRegex(ValueError, 'path'):
+                await application.preview_policy(draft, tool_id=shown['management_id'], arguments={})
+            denied = await host.join(await application.start_conversation('denied', 'Read the test file'))
+            self.assertEqual(denied.status, 'completed', denied.error)
+            self.assertIn('tool_access_denied', str(provider.requests[-1].input))
 
     async def test_stored_builtin_overrides_cannot_change_native_permissions(self):
-        """Stored Built-in overrides cannot bypass native policies or block Enable switches."""
+        """The Host lock keeps stored Built-in overrides dormant while switches remain editable."""
         from autoagent.agent import ToolPolicy
-        async with self.product(execution=True) as host:
+        async with self.product(execution=True, environment={"AUTOAGENT_AGENT_EDIT_CODE_PERMISSIONS":"false"}) as host:
             manager = host.applications["agent"].context.shared_resources
             inventory = await manager.describe()
             entry = next(row for row in inventory['resources'] if row['name'] == 'read_file')
@@ -191,15 +227,16 @@ class ApplicationResourceContracts:
                 manager._publish(key, row)
             current = await manager.describe()
             shown = next(row for row in current['resources'] if row['name'] == 'read_file')
-            self.assertIsNone(shown['permissions'])
+            self.assertIsNone(shown['custom_policy'])
+            self.assertEqual(shown['registered_policies'], entry['registered_policies'])
             self.assertIsNone(next(row for row in current['groups'] if row['id'] == entry['group_id'])['permissions'])
             actual = manager._known_resources[entry['management_id']]
-            self.assertIsNone(manager.effective_permissions(actual))
-            self.assertIs(manager.filter([actual])[0], actual)
+            self.assertFalse(manager.configured_policies(manager.resource_identity(actual), actual.resource_id))
+            self.assertIs(manager.filter([actual])[0].policy, actual.policy)
             for key in ('stored-file', 'stored-group'):
                 old, configuration = manager.records[key]
                 saved = await manager.save(configuration.model_copy(update={'enabled':False}), resource_id=key, expected_version=old['version'])
-                self.assertIsNone(saved['configuration']['permissions'])
+                self.assertEqual(saved['configuration']['permissions'], configuration.permissions.to_dict())
             self.assertFalse(next(row for row in (await manager.describe())['resources'] if row['name'] == 'read_file')['enabled'])
 
     async def test_mcp_only_accepts_environment_credential_references(self):

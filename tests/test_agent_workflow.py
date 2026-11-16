@@ -55,10 +55,9 @@ class ScriptedProvider:
 
 class AgentGraphTests(unittest.TestCase):
     def test_complete_graph_and_unique_back_edge(self):
-        """The full eleven-Node, fifteen-Edge graph compiles with one Back Edge."""
+        """The Agent graph compiles with one Back Edge and an approval routing Node."""
         graph = WorkflowCompiler().compile_or_raise(agent_workflow())
-        self.assertEqual(len(graph.nodes), 11)
-        self.assertEqual(len(graph.edges), 15)
+        self.assertIn("route_approved", {node.id for node in graph.nodes})
         self.assertEqual([edge for loop in graph.loop_regions for edge in loop.back_edge_ids], ["round_back"])
 
     def test_resource_versions_cannot_be_reused_after_removal(self):

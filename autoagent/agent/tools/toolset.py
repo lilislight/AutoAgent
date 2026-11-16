@@ -233,7 +233,7 @@ class ToolSet:
                     tool_name=call.name, call_id=call.call_id,
                 ) from error
             arguments = record
-        current = current.for_call(call, record)
+        current = replace(current, operations=()).for_call(call, record)
         resolver = getattr(selected, "operation_resolver", None)
         if resolver is not None:
             try:

@@ -26,6 +26,8 @@ workspaces = Table("agent_app_workspaces", context_meta,
 resource_configs = Table("agent_app_resource_configs", context_meta,
     c("id", nullable=False, pk=True), c("version", B, False),
     c("configuration", J, False), c("updated_at_us", B, False))
+mcp_catalogs = Table("agent_app_mcp_catalogs", context_meta,
+    c("connection_id", nullable=False, pk=True), c("catalog", J, False))
 class ApplicationContextStorage:
     def __init__(self, writer, queries):
         self.writer, self.queries, self._ready = writer, queries, False
@@ -91,6 +93,7 @@ class ApplicationContextStorage:
                 if configuration is None:
                     if row is None:
                         raise ConflictError("Agent resource configuration is unavailable.")
+                    await conn.execute(delete(mcp_catalogs).where(mcp_catalogs.c.connection_id == resource_id))
                     await conn.execute(delete(table).where(table.c.id == resource_id))
                     result = None
                 else:
@@ -102,6 +105,31 @@ class ApplicationContextStorage:
                         await conn.execute(insert(table).values(**result))
             self._ready = True
         return result
+
+    async def mcp_catalogs(self):
+        engine = self.writer.storage.query_engine or self.writer.storage.engine
+        async with engine.connect() as conn:
+            if not await self._exists(conn, mcp_catalogs):
+                return {}
+            return dict((await conn.execute(select(mcp_catalogs.c.connection_id, mcp_catalogs.c.catalog))).tuples().all())
+
+    async def save_mcp_catalog(self, connection_id, catalog):
+        self.writer.check_open()
+        if self.writer.read_only:
+            return
+        async with self.writer.mutation:
+            async with self.writer.storage.transaction() as conn:
+                await self._prepare(conn)
+                if (await conn.execute(select(resource_configs.c.id).where(
+                        resource_configs.c.id == connection_id))).scalar_one_or_none() is None:
+                    raise ConflictError("MCP server no longer exists.")
+                match = mcp_catalogs.c.connection_id == connection_id
+                exists = (await conn.execute(select(mcp_catalogs.c.connection_id).where(match))).scalar_one_or_none()
+                if exists is None:
+                    await conn.execute(insert(mcp_catalogs).values(connection_id=connection_id, catalog=catalog))
+                else:
+                    await conn.execute(update(mcp_catalogs).where(match).values(catalog=catalog))
+            self._ready = True
 
     async def workspace_records(self):
         engine = self.writer.storage.query_engine or self.writer.storage.engine

@@ -51,6 +51,17 @@ export function schemaFields(schema: Record<string, unknown> | undefined, prefix
 }
 
 export const schemaPaths = (schema: Record<string, unknown> | undefined, prefix = 'args') => Object.keys(schemaFields(schema, prefix));
+
+export function retainRuleMetadata(policy: Policy, original: Policy): Policy {
+  const unused = [...original.rules];
+  const key = (rule: Policy['rules'][number]) => JSON.stringify([rule.decision, rule.when]);
+  return { ...policy, rules: policy.rules.map(rule => {
+    const index = unused.findIndex(previous => key(previous) === key(rule));
+    if (index < 0) return rule;
+    const [{ id, reason }] = unused.splice(index, 1);
+    return { ...rule, id, reason };
+  }) };
+}
 export function fieldOperators(schema: Record<string, unknown> | undefined): Operator[] {
   const common: Operator[] = ['equals', 'not_equals', 'in', 'not_in', 'exists'];
   if (!schema || typeof schema.type !== 'string') return operators;
@@ -62,6 +73,33 @@ export function fieldOperators(schema: Record<string, unknown> | undefined): Ope
 
 export interface DraftCondition { kind: 'field' | 'all' | 'any' | 'not'; field: string; op: Operator; valueText: string; flags: string; children: DraftCondition[] }
 export const newCondition = (field = 'args.path'): DraftCondition => ({ kind: 'field', field, op: 'equals', valueText: 'null', flags: '', children: [] });
+
+const conditionVerbs: Record<Operator, string> = {
+  equals: 'equals', not_equals: 'does not equal', in: 'is one of', not_in: 'is not one of',
+  exists: 'exists', prefix: 'starts with', suffix: 'ends with', contains: 'contains',
+  glob: 'matches', regex: 'matches regex', lt: '<', lte: '≤', gt: '>', gte: '≥',
+  any_item: 'has a matching item', all_items: 'matches for every item',
+};
+
+function conditionValue(value: string): unknown {
+  try { return JSON.parse(value); } catch { return value; }
+}
+
+export function conditionSummary(condition: DraftCondition): string {
+  const { kind, field, op, valueText, flags, children } = condition;
+  if (kind === 'not') return `Not: ${conditionSummary(children[0])}`;
+  if (kind !== 'field') return `${kind === 'all' ? 'All' : 'Any'} of ${children.length} conditions`;
+  if (!field) return 'Select a field';
+  const value = conditionValue(valueText);
+  if (field === 'operation.attributes.scope' && op === 'equals') {
+    if (value === 'external') return 'Outside the workspace';
+    if (value === 'workspace') return 'Inside the workspace';
+  }
+  if (op === 'exists') return `${field} ${value === false ? 'is missing' : 'exists'}`;
+  if (op === 'any_item' || op === 'all_items') return `${field} ${conditionVerbs[op]}`;
+  return `${field} ${conditionVerbs[op]} ${JSON.stringify(value)}${op === 'regex' && flags ? ` (${flags})` : ''}`;
+}
+
 export function draftCondition(value: Condition): DraftCondition {
   if ('all' in value || 'any' in value || 'not' in value) {
     const kind = 'all' in value ? 'all' : 'any' in value ? 'any' : 'not';
@@ -76,8 +114,6 @@ export function buildCondition(value: DraftCondition): Condition {
   if (value.kind === 'all' || value.kind === 'any') return { [value.kind]: value.children.map(buildCondition) } as Condition;
   if (value.kind === 'not') return { not: buildCondition(value.children[0]) };
   const items = value.op === 'any_item' || value.op === 'all_items';
-  let parsed: unknown;
-  try { parsed = JSON.parse(value.valueText); } catch { parsed = value.valueText; }
-  return { field: value.field, op: value.op, value: items ? buildCondition(value.children[0]) : parsed,
+  return { field: value.field, op: value.op, value: items ? buildCondition(value.children[0]) : conditionValue(value.valueText),
     ...(value.op === 'regex' && value.flags ? { flags: value.flags } : {}) };
 }

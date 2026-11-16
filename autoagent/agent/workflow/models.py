@@ -121,6 +121,10 @@ class ToolBranchInput(Model):
     prepared: PreparedRequest
 
 
+class ApprovedTools(Model):
+    tasks: tuple[ToolTask, ...]
+
+
 class AuthorizationObservation(Model):
     call_id: NonEmpty
     approval_mode: str

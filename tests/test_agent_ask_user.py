@@ -6,7 +6,7 @@ import unittest
 from autoagent.agent import (
     AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentNodePolicy,
     AgentWorkflowOptions, AgentWorkflowPolicies, AskUserArguments, AskUserRequest,
-    AskUserResponse, LLMResponse, LLMToolCall, LLMToolResult, Tool, agent_workflow,
+    AskUserResponse, LLMResponse, LLMToolCall, LLMToolResult, Tool, ToolPolicy, agent_workflow,
 )
 from autoagent.agent.context import restore
 from autoagent.agent.workflow.questions import ASK_USER_TOOL
@@ -45,8 +45,9 @@ class AskUserModelTests(unittest.TestCase):
         disabled = WorkflowCompiler().compile_or_raise(agent_workflow())
         enabled = WorkflowCompiler().compile_or_raise(agent_workflow(include_ask_user=True))
         configured = WorkflowCompiler().compile_or_raise(agent_workflow(options=AgentWorkflowOptions(include_ask_user=True)))
-        self.assertEqual((len(disabled.nodes), len(disabled.edges)), (11, 15))
-        self.assertEqual((len(enabled.nodes), len(enabled.edges)), (12, 17))
+        self.assertNotIn("ask_user", {node.id for node in disabled.nodes})
+        self.assertNotIn("ask_user_approved", {node.id for node in disabled.nodes})
+        self.assertIsNotNone(enabled.node("ask_user_approved").map.aggregate)
         self.assertNotEqual(disabled.workflow_revision_id, enabled.workflow_revision_id)
         self.assertEqual(enabled.workflow_revision_id, configured.workflow_revision_id)
         self.assertEqual([edge for loop in enabled.loop_regions for edge in loop.back_edge_ids], ["round_back"])
@@ -194,19 +195,16 @@ class AskUserContracts:
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply())
             self.assertEqual((await host.join(waiting.invocation_id)).status, "completed")
 
-    async def test_enabled_question_ignores_tool_policy_and_approval_modes(self):
-        """The explicit build option enables questions independently from Tool access and approvals."""
-        for mode in ("always_ask", "never_ask"):
-            provider = ScriptedProvider(tool_response(ask_call()), answer())
-            async with self.host(provider, include_ask_user=True,
-                defaults=settings(mode=mode, access=AgentAccess(default="deny", allowed_tools=()))) as host:
-                waiting = await self.run_agent(host)
-                self.assertEqual(waiting.status, "waiting", waiting.error)
-                self.assertEqual(len(waiting.waits), 1)
-                self.assertEqual(waiting.waits[0].request["kind"], "agent.ask_user")
-                self.assertIn("ask_user", [tool.name for tool in provider.requests[0].tools])
-                await host.respond(waiting.invocation_id, waiting.waits[0].id, reply())
-                self.assertEqual((await host.join(waiting.invocation_id)).status, "completed")
+    async def test_enabled_question_still_obeys_tool_deny(self):
+        """An explicit Tool Deny prevents the native question Wait."""
+        provider = ScriptedProvider(tool_response(ask_call()), answer())
+        async with self.host(provider, include_ask_user=True,
+            defaults=settings(mode="always_ask", access=AgentAccess(rules={"ask_user": "deny"}))) as host:
+            result = await self.run_agent(host)
+            self.assertEqual(result.status, "completed", result.error)
+            self.assertNotIn("ask_user", [tool.name for tool in provider.requests[0].tools])
+            observed = next(item for item in provider.requests[-1].input if isinstance(item, LLMToolResult))
+            self.assertEqual(observed.structured_content["error"]["kind"], "tool_not_advertised")
 
     async def test_question_and_unrelated_approval_wait_are_visible_together(self):
         """Direct human input is not blocked behind an unrelated Tool's approval branch."""
@@ -236,12 +234,17 @@ class AskUserContracts:
             return text
         provider = ScriptedProvider(tool_response(ask_call(),
             LLMToolCall(call_id="write", name="write", arguments='{"text":"ok"}')), answer())
+        policy = ToolPolicy(rules=[
+            dict(when=dict(field="args.questions[0].id", op="equals", value="goal"), decision="ask"),
+            dict(when=dict(field="context.tool_name", op="equals", value="write"), decision="ask"),
+        ])
         async with self.host(provider, include_ask_user=True, tools=(Tool(write),),
-            defaults=settings(access=AgentAccess(default="ask"))) as host:
+            defaults=settings(access=AgentAccess(policy="approval")), policies=(("approval", policy),)) as host:
             waiting = await self.run_agent(host)
             approval = next(wait for wait in waiting.waits if wait.request["kind"] == "agent.tool_approval")
             batch = restore(AgentApprovalRequest, approval.request)
-            self.assertEqual(len(batch.requests), 1)
+            self.assertEqual([request.call.name for request in batch.requests], ["ask_user", "write"])
+            self.assertTrue(all(not request.operations for request in batch.requests))
             await host.respond(waiting.invocation_id, approval.id,
                 AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in batch.requests)).model_dump(mode="json"))
             waiting = await host.join(waiting.invocation_id)
@@ -300,6 +303,7 @@ class AskUserContracts:
         async with self.host(provider, include_ask_user=True,
             defaults=settings(access=AgentAccess(rules={"ask_user": "ask"}))) as host:
             waiting = await self.run_agent(host)
+            self.assertEqual(waiting.waits[0].request["kind"], "agent.tool_approval")
             await host.pause(waiting.invocation_id)
             await host.extensions["agent"].context.configure(waiting.session_id, settings(mode="bypass").session_defaults())
             result = await host.recover(waiting.invocation_id)

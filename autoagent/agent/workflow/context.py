@@ -70,16 +70,8 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
     from ..tools.context import tool_context
     with tool_context(toolset.context):
         advertised = toolset.definitions
-    builtins = BUILTIN_NAMES & catalog.keys() if options.subagents.enabled else frozenset()
     definitions = tuple(item for item in advertised
-        if item.name != "ask_user" and item.name not in builtins
-        and snapshot.settings.access.rules.get(item.name, snapshot.settings.access.default) != "deny")
-    definitions = (*definitions, *(entry.value.definition for name, entry in catalog.items() if name in builtins))
-    if options.include_ask_user and "ask_user" in catalog:
-        definitions = (*definitions, catalog["ask_user"].value.definition)
-    elif "ask_user" in catalog:
-        definitions = (*definitions, *(item for item in advertised if item.name == "ask_user"
-            and snapshot.settings.access.rules.get(item.name, snapshot.settings.access.default) != "deny"))
+        if snapshot.settings.access.rules.get(item.name, snapshot.settings.access.default) != "deny")
     bindings = tuple(ToolBinding(name=item.name, resource_id=catalog[item.name].resource_id, version=catalog[item.name].version,
         definition_hash=definition_hash(item),
         kind=("ask_user" if options.include_ask_user and item.name == "ask_user" else

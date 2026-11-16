@@ -35,7 +35,7 @@ class _FileTool(Tool):
             "max_bytes": "Maximum returned UTF-8 text bytes including line labels, not the maximum file size. Continue long lines using next_line and next_column.",
             "case_sensitive": "True by default. Set false explicitly for case-insensitive content search; path glob matching stays case-sensitive.",
             "regex": "False by default: query is literal text. Set true for a regular expression; do not escape literal searches as regexes.",
-            "mode": "matches returns matching lines; files returns matching paths; count counts matching lines. Choose the needed mode directly; count then files then matches is not required. match_count is page-local, not a total.",
+            "mode": "matches returns match locations (path, line, column); files returns matching paths; count counts matching lines. Choose the needed mode directly; count then files then matches is not required. match_count is page-local, not a total.",
             "edits": "Exact replacements against the same original file, committed atomically. Do not include read_file line labels in old_text. Replacements must be unique unless replace_all=true, and must not overlap.",
         }
         for name, description in descriptions.items():
@@ -74,18 +74,17 @@ def file_tools(service: FileService, *, context: ToolContext | None = None) -> T
                    include_hidden: bool = False, respect_gitignore: bool = True,
                    exclude: list[str] = [], limit: PageSize = 100, cursor: str | None = None,
                    include_generated: bool = False, max_depth: Annotated[int | None, Field(ge=0)] = None) -> ToolOutput:
-        """List one page of directory entries or glob paths without scanning the whole tree first. limit is a page size, not a total tree size. Omitted permission actions mean allow in this preview; Ask/Deny remain explicit. Previews do not authorize later operations. Use stat for full metadata."""
+        """List one page of directory entries with names, types and sizes. Recursive listings skip restricted subdirectories. Use stat for full metadata."""
         return execute("list_files")
 
     def search_files(query: str, path: str = ".", include: list[str] = ["*"], exclude: list[str] = [],
                      regex: bool = False, case_sensitive: bool = True,
-                     context_lines: Annotated[int, Field(ge=0, le=10)] = 0,
                      include_hidden: bool = False, respect_gitignore: bool = True,
                      mode: Literal["matches", "files", "count"] = "matches",
                      limit: PageSize = 100, max_matches: Annotated[int, Field(gt=0, le=10000)] = 1000,
                      cursor: str | None = None, include_generated: bool = False,
                      max_depth: Annotated[int | None, Field(ge=0)] = None) -> ToolOutput:
-        """Search readable text, returning matches, paths or counts. With context_lines, results contain match positions and text appears once in merged contexts blocks (start_line/end_line inclusive). Long snippets are marked text_truncated with text_start_column when offset; read_file retrieves more. Protected candidates are labelled without searching their contents. Explicit protected file searches require approval."""
+        """Locate text matches without returning file contents. Join the result's base path with each row's path; use read_file at the returned line to read content. Modes return locations, file paths, or counts."""
         return execute("search_files")
 
     def read_file(path: str, start_line: Positive = 1, start_column: Positive = 1,

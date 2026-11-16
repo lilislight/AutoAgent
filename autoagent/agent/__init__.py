@@ -66,7 +66,7 @@ from .skills import (
     Skill, SkillSet, SkillMetadata, SkillLimits, SkillResource,
     SkillDocument, SkillResourceContent, SkillError, SkillFormatError,
     SkillNotFoundError, SkillResourceError, SkillLimitError, SkillChangedError,
-    SkillAccessError, SkillScriptError, SkillResourcePage, SkillTextContent,
+    SkillScriptError, SkillResourcePage, SkillTextContent,
     SkillDiagnostic, SkillScriptSpec, SkillScriptResult, SkillSource,
     LocalSkillSource, MemorySkillSource, PackageSkillSource, SkillScriptRunner,
     SubprocessSkillRunner,

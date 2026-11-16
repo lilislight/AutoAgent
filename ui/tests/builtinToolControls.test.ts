@@ -16,20 +16,19 @@ async function loadPanel() {
 }
 const { ResourcePanel } = await loadPanel();
 
-const actions: ResourceActions = { pending: null, save: async () => {}, run() {}, editPolicy() {}, saveSourcePolicy: async () => {} };
+const actions: ResourceActions = { pending: null, save: async () => {}, run() {}, editPolicy() {} };
 function group(id: string, origin: Resource['origin'], name: string, tool: string): Group {
   const resource: Resource = { management_id: `${id}/${tool}`, group_id: id, group_name: name, resource_id: tool,
-    kind: 'tool', name: tool, origin, description: '', available: true, enabled: true, permissions: null,
-    default_decision: 'ask', parameter_policy: true, permission_source: 'registration', permissions_editable: true };
+    kind: 'tool', name: tool, origin, description: '', available: true, enabled: true, custom_policy: null, permissions_editable: true };
   return { id, name, origin, resources: [resource], enabled: true, permissions: null, permissions_editable: true };
 }
-function render(groups: Group[]) {
+function render(groups: Group[], onlyGroup?: string) {
   const inventory: Inventory = { items: [], resources: groups.flatMap(group => group.resources), groups,
     workspace_id: 'workspace', revision: 1, edit_code_permissions: true, policy_schema: {} };
-  return renderToStaticMarkup(createElement(ResourcePanel, { inventory, actions }));
+  return renderToStaticMarkup(createElement(ResourcePanel, { inventory, actions, onlyGroup }));
 }
 
-test('every Built-in group and Tool offers only Enable even with older editable metadata', () => {
+test('Built-in Tools expose permission editing while group actions only toggle availability', () => {
   const html = render([
     group('builtin/files', 'builtin', 'Files', 'read_file'),
     group('builtin/commands', 'builtin', 'Commands', 'execute_command'),
@@ -39,19 +38,18 @@ test('every Built-in group and Tool offers only Enable even with older editable 
   assert.equal(html.match(/role="switch"/g)?.length, 8);
   assert.match(html, /Enable read_file/);
   assert.match(html, /Enable execute_command/);
-  assert.doesNotMatch(html, /<select|Rules for| permission"/);
+  assert.match(html, /Rules for read_file/);
+  assert.match(html, /Rules for execute_command/);
+  assert.doesNotMatch(html, /Rules for Files|Rules for Commands/);
+  assert.doesNotMatch(html, /<select/);
 });
 
-test('Project and MCP groups retain their rule editors, permission choices and Enable switches', () => {
-  const html = render([group('project/test', 'project', 'Project Tools', 'publish'), group('mcp/test', 'mcp', 'MCP Tools', 'lookup')]);
-  assert.match(html, /Rules for publish/);
-  assert.match(html, /Rules for lookup/);
-  assert.match(html, /Rules for Project Tools/);
-  assert.match(html, /Rules for MCP Tools/);
-  assert.equal(html.match(/<select/g)?.length, 4);
-  assert.equal(html.match(/<option /g)?.length, 12);
-  assert.equal(html.match(/value="ask" selected=""/g)?.length, 2);
-  assert.equal(html.match(/value="allow" selected=""/g)?.length, 2);
-  assert.doesNotMatch(html, /Code policy|Follow code/);
-  assert.equal(html.match(/role="switch"/g)?.length, 4);
+test('MCP tools appear only inside their own server', () => {
+  const groups = [group('project/test', 'project', 'Project Tools', 'publish'), group('mcp/test', 'mcp', 'MCP Tools', 'lookup')];
+  const tools = render(groups);
+  assert.match(tools, /Rules for publish/);
+  assert.doesNotMatch(tools, /Rules for lookup|Rules for Project Tools/);
+  const mcp = render(groups, 'mcp/test');
+  assert.match(mcp, /Rules for lookup/);
+  assert.doesNotMatch(mcp, /Rules for publish|Rules for MCP Tools/);
 });

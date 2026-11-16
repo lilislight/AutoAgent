@@ -14,8 +14,8 @@ class FileToolsConfig(Model):
     max_scan_bytes: int = Field(default=64 * 1024 * 1024, gt=0)
     max_depth: int = Field(default=32, ge=0, le=128)
     generated_directories: tuple[str, ...] = (".venv", "venv", "node_modules", "__pycache__")
-    regex_timeout_seconds: float = Field(default=0.1, gt=0, le=10)
-    search_timeout_seconds: float = Field(default=5, gt=0, le=60)
+    regex_timeout_seconds: float = Field(default=5, gt=0, le=10)
+    search_timeout_seconds: float = Field(default=10, gt=0, le=60)
 
 
 class FileEdit(Model):

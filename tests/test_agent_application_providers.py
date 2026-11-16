@@ -106,9 +106,9 @@ class ProviderContracts:
                 self.assertEqual(response.status_code, 201, response.text)
                 async with asyncio.timeout(5):
                     while True:
-                        inventory = await host.applications["agent"].context.shared_resources.describe()
-                        remote = [entry for entry in inventory['resources'] if entry['origin'] == 'mcp']
-                        if remote:
+                        inventory = await host.applications["agent"].resource_configs(scope='mcp')
+                        remote = inventory['resources']
+                        if remote and all(entry['mcp_status'] == 'ready' for entry in remote):
                             break
                         await asyncio.sleep(0.01)
                 self.assertEqual([entry['name'] for entry in remote], ['add'])

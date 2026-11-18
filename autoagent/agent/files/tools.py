@@ -84,7 +84,7 @@ def file_tools(service: FileService, *, context: ToolContext | None = None) -> T
                      limit: PageSize = 100, max_matches: Annotated[int, Field(gt=0, le=10000)] = 1000,
                      cursor: str | None = None, include_generated: bool = False,
                      max_depth: Annotated[int | None, Field(ge=0)] = None) -> ToolOutput:
-        """Locate text matches without returning file contents. Join the result's base path with each row's path; use read_file at the returned line to read content. Modes return locations, file paths, or counts."""
+        """Locate text matches in readable files. Directory searches skip files requiring approval or denied by policy. Search a specific path to request access to that file. Join the result's base path with each row's path; use read_file at the returned line. Modes return locations, file paths, or counts."""
         return execute("search_files")
 
     def read_file(path: str, start_line: Positive = 1, start_column: Positive = 1,

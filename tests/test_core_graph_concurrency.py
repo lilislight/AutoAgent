@@ -9,7 +9,8 @@ from tests.graph_fixtures import (
 import asyncio
 import unittest
 
-from autoagent import AutoAgentApp, Edge, Map, Node, Wait, Workflow
+from autoagent import Edge, Map, Node, Wait, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core import StateReducer
 from autoagent.core.app._graph_gate import GraphGate
 from autoagent.core.errors import RuntimeInfrastructureError, RuntimeTransitionError

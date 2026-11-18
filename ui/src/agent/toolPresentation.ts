@@ -66,7 +66,7 @@ export function toolStateLabel(tool: ToolSnapshot | undefined, lifecycle?: strin
   if (!tool) return 'No saved result';
   if (['queued', 'running', 'waiting'].includes(tool.state)) {
     if (lifecycle === 'cancelled') return 'Stopped';
-    if (lifecycle === 'failed' || lifecycle === 'interrupted') return 'Interrupted';
+    if (lifecycle === 'failed') return 'Interrupted';
     if (lifecycle === 'paused') return 'Paused';
   }
   return tool.state === 'completed' ? undefined : ({ queued: 'Queued', running: 'Running', waiting: 'Waiting', failed: 'Failed', denied: 'Denied', cancelled: 'Stopped' }[tool.state]);

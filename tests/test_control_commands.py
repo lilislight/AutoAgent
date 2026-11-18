@@ -3,10 +3,12 @@ import asyncio
 import unittest
 
 from autoagent import (
-    AutoAgentApp, Await, AwaitAny, AwaitAnyRequest, Cancel, CancelRequest, CancelReceipt,
-    Edge, InputMappingContext, Map, Node, RuntimeHandle, RuntimeInfrastructureError,
+    Await, AwaitAny, AwaitAnyRequest, Cancel, CancelRequest, CancelReceipt,
+    Edge, InputMappingContext, Map, Node, RuntimeHandle,
     RuntimeObservation, Spawn, Timer, TimerRequest, TimerResult, Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError
 from autoagent.core import RuntimeEvent, ChildResult
 from tests.test_system_commands import Value, Collector, identity
 from tests.test_status_command import observed_handle

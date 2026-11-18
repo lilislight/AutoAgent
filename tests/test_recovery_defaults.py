@@ -7,11 +7,14 @@ import unittest
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp, BackoffPolicy, Edge, Node, Recovery, RecoverySource,
-    RetryPolicy, RuntimeTransitionError, SubWorkflow, Wait, Workflow, WorkflowCompiler,
+    BackoffPolicy, Edge, Node, Recovery,
+    RetryPolicy, SubWorkflow, Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler
+from autoagent.core.errors import RuntimeTransitionError
 from autoagent.core.operators import OperatorCallContext
-from autoagent.core.runtime import SessionCheckpoint, StateReducer
+from autoagent.core.runtime import RecoverySource, SessionCheckpoint, StateReducer
 from tests.graph_fixtures import load_graph
 from tests.test_phase2_runtime_state import RecordingSink
 

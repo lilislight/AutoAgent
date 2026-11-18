@@ -10,10 +10,20 @@ from ..context import current_agent_context
 from ..models._base import NonEmpty
 from ..resources import AgentResource
 from ..tools import Tool
-from .questions import with_ask_user
+from .questions import ASK_USER_RESOURCE, with_ask_user
+from .subagents import BUILTIN_NAMES
 
 
 PositiveSeconds = Annotated[float, Field(gt=0)]
+
+
+def tool_kind(entry):
+    """Classify native registrations independently of a proposed Tool's name."""
+    if entry.resource_id == ASK_USER_RESOURCE.resource_id:
+        return "ask_user"
+    if entry.name in BUILTIN_NAMES and entry.resource_id == "builtin:collaboration/" + entry.name:
+        return "agent_builtin"
+    return "tool"
 
 
 async def spawn_agent(type: NonEmpty, task: NonEmpty) -> dict[str, JsonValue]:

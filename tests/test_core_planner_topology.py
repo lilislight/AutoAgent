@@ -52,10 +52,10 @@ class PlannerIndexTests(unittest.TestCase):
 
     def test_wait_index_remains_unpublished_until_ack_and_timestamp_delta_is_kept(self):
         """A failed indexed Wait commit preserves State/counts and the existing time Delta."""
-        from autoagent import AutoAgentApp, Node, Wait, Workflow
+        from autoagent import Node, Wait, Workflow
+        from autoagent.core.app import AutoAgentApp
         from autoagent.core.errors import RuntimeInfrastructureError
-        from autoagent.core.runtime import RuntimeRepository
-        from autoagent.core.runtime import CommandsPending
+        from autoagent.core.runtime import CommandsPending, RuntimeRepository
         from tests.benchmarks.benchmark_core_execution import Value
         class Sink:
             pending = None
@@ -86,7 +86,8 @@ class PlannerIndexTests(unittest.TestCase):
 
     def test_custom_planner_keeps_original_signature(self):
         """Repository does not require custom Planners to accept the private index argument."""
-        from autoagent import AutoAgentApp, Node, Workflow
+        from autoagent import Node, Workflow
+        from autoagent.core.app import AutoAgentApp
         from autoagent.core.runtime import RuntimeRepository
         from tests.benchmarks.benchmark_core_execution import identity
         class CustomPlanner(TransitionPlanner):

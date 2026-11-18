@@ -1,0 +1,13 @@
+schema_version = 1
+
+[project]
+name = "debug-expense-session"
+
+[[workflows]]
+entrypoint = "workflows:set_expense_limit"
+
+[[workflows]]
+entrypoint = "workflows:classify_expense"
+
+[[evaluations]]
+entrypoint = "evaluations:expense_cases"

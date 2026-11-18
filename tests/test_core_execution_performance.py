@@ -11,7 +11,8 @@ import unittest
 import threading
 from unittest.mock import patch
 
-from autoagent import AutoAgentApp, Edge, InputMappingContext, Map, Node, Workflow
+from autoagent import Edge, InputMappingContext, Map, Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import RuntimeRepository, ChildResult
 from autoagent.core.runtime._execution_index import ExecutionIndex
 from tests.benchmarks.benchmark_core_execution import Value, identity, shrink, loop_workflow

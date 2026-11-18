@@ -17,8 +17,19 @@ import time
 import tracemalloc
 
 from typing_extensions import TypedDict
-from autoagent import (AggregationContext, AutoAgentApp, ConditionContext, ContextOperation, ContextPatch,
-                       Edge, InputMappingContext, Map, Node, OutputBindingContext, Workflow)
+from autoagent import (
+    AggregationContext,
+    ConditionContext,
+    ContextOperation,
+    ContextPatch,
+    Edge,
+    InputMappingContext,
+    Map,
+    Node,
+    OutputBindingContext,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
 
 MIB = 1024 * 1024
 
@@ -391,7 +402,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--worker')
     parser.add_argument('--representation', action='store_true')
-    parser.add_argument('--output', type=Path, default=Path('artifacts/core_runtime_memory'))
+    parser.add_argument('--output', type=Path, default=Path('.autoagent/benchmarks/core_runtime_memory'))
     parser.add_argument('--cases', nargs='*')
     args = parser.parse_args()
     if args.worker:

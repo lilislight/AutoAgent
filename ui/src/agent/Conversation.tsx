@@ -15,11 +15,12 @@ import { conversationLandmarks, type ConversationLandmark } from './conversation
 export { formatTokens } from './ConversationTurn.js';
 
 const noInvocations: AgentInvocation[] = [];
-export const Conversation = memo(function Conversation({ state, loading, error, onRetry, invocations = noInvocations, execution, active = true, session = '', loadUsage, before, after, footer, running = false }: {
+export const Conversation = memo(function Conversation({ state, loading, error, onRetry, invocations = noInvocations, execution, active = true, session = '', loadUsage, header, before, after, footer, running = false, mobile = false }: {
   session?: string; loadUsage?: UsageLoader;
   state: ConversationState; loading: boolean; error?: Error | null; onRetry: () => void;
   invocations?: AgentInvocation[]; execution?: AgentExecution; active?: boolean;
-  before?: ReactNode; after?: ReactNode; footer?: ReactNode; running?: boolean;
+  header?: (items: ConversationLandmark[], jumpTo: (item: ConversationLandmark) => void) => ReactNode;
+  before?: ReactNode; after?: ReactNode; footer?: ReactNode; running?: boolean; mobile?: boolean;
 }) {
   const metadata = useMemo(() => {
     const values = new Map(invocations.map(item => [item.invocation_id, item]));
@@ -72,7 +73,7 @@ export const Conversation = memo(function Conversation({ state, loading, error, 
   const interrupt = () => {
     following.current.interrupt();
     const element = area.current;
-    if (element) element.scrollTo({ top: element.scrollTop, behavior: 'instant' });
+    if (element && !mobile) element.scrollTo({ top: element.scrollTop, behavior: 'instant' });
   };
   const jumpTo = (item: ConversationLandmark) => {
     const root = area.current, target = document.getElementById(item.anchor);
@@ -82,7 +83,7 @@ export const Conversation = memo(function Conversation({ state, loading, error, 
     root.scrollTo({ top: root.scrollTop + target.getBoundingClientRect().top - root.getBoundingClientRect().top - 16,
       behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' });
   };
-  return <div className={`agent-feed-shell ${!loading && landmarks.length > 1 ? 'has-turn-navigator' : ''}`} style={{ '--agent-dock-height': `${dockHeight}px` } as CSSProperties}><div ref={area} className="agent-chat-scroll" tabIndex={0} aria-label="Chat history"
+  return <>{header?.(loading ? [] : landmarks, jumpTo)}<div className={`agent-feed-shell ${!mobile && !loading && landmarks.length > 1 ? 'has-turn-navigator' : ''}`} style={{ '--agent-dock-height': `${dockHeight}px` } as CSSProperties}><div ref={area} className="agent-chat-scroll" tabIndex={0} aria-label="Chat history"
     onWheelCapture={event => { if (event.deltaY < 0) interrupt(); }}
     onTouchStartCapture={event => { touchY.current = event.touches[0]?.clientY ?? null; }}
     onTouchMoveCapture={event => { const y = event.touches[0]?.clientY; if (y !== undefined && touchY.current !== null && y > touchY.current) interrupt(); touchY.current = y ?? null; }}
@@ -98,9 +99,9 @@ export const Conversation = memo(function Conversation({ state, loading, error, 
       const item = metadata.get(entry.invocation);
       const hasError = entry.rows.some(row => row.type === 'error' && !row.handled);
       const status = executionStatus(item?.status ?? (state.completed[entry.invocation] ? 'completed' : hasError ? 'failed' : 'running'), execution?.current.invocation_id === entry.invocation ? execution.controls : undefined);
-      return <ConversationTurn session={session} loadUsage={loadUsage} key={entry.id} turn={entry} state={state} metadata={item} lifecycle={status} active={active} tools={tools} interactions={interactions} />;
+      return <ConversationTurn mobile={mobile} session={session} loadUsage={loadUsage} key={entry.id} turn={entry} state={state} metadata={item} lifecycle={status} active={active} tools={tools} interactions={interactions} />;
     }) : null}
   </div>{after}<div ref={dock} className="agent-composer-dock">{footer}</div></div>
-    {!loading ? <ConversationNavigator items={landmarks} area={area} content={content} active={active} onJump={jumpTo} /> : null}
-    {jump ? <Tooltip content={running ? 'Agent is working · Go to latest messages' : 'Go to latest messages'}><button className={`agent-jump ${running ? 'is-running' : ''}`} aria-label={running ? 'Agent is working · Go to latest messages' : 'Go to latest messages'} onClick={() => { following.current.resume(); area.current?.scrollTo({ top: area.current.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' }); setJump(false); }}><span className={running ? 'agent-jump-activity' : ''}><AgentIcon name={running ? 'activity' : 'down'} /></span></button></Tooltip> : null}</div>;
+    {!mobile && !loading ? <ConversationNavigator items={landmarks} area={area} content={content} active={active} onJump={jumpTo} /> : null}
+    {jump ? <Tooltip content={running ? 'Agent is working · Go to latest messages' : 'Go to latest messages'}><button className={`agent-jump ${running ? 'is-running' : ''}`} aria-label={running ? 'Agent is working · Go to latest messages' : 'Go to latest messages'} onClick={() => { following.current.resume(); area.current?.scrollTo({ top: area.current.scrollHeight, behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth' }); setJump(false); }}><span className={running ? 'agent-jump-activity' : ''}><AgentIcon name={running ? 'activity' : 'down'} /></span></button></Tooltip> : null}</div></>;
 });

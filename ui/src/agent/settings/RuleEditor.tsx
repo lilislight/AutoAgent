@@ -3,7 +3,7 @@ import { JsonEditor } from '../../components/JsonEditor';
 import { jsonExample, jsonIssues } from '../../jsonSchema';
 import { BusyLabel } from '../../components/LoadingState';
 import { AgentIcon } from '../AgentIcon';
-import { newId } from '../ids';
+import { newId } from '../../ids';
 import { settingsApi, type PolicyPreview } from './api';
 import { DecisionSelect, FormActions, FormError, errorText } from './Controls';
 import type { Decision, Operator, Policy, Resource, Rule } from './types';
@@ -24,7 +24,7 @@ const contextSchema = {
     attributes: { type: 'object' },
   },
 };
-const sourceLabels = { code: 'Code', group: 'Tool group', source: 'MCP server', custom: 'Custom' };
+const sourceLabels = { code: 'Code', group: 'Tool group', source: 'MCP server', file_read: 'File read', custom: 'Custom' };
 const decisionLabel = (action: Decision) => action[0].toUpperCase() + action.slice(1);
 
 function RuleRow({ label, decision, source, expanded, onToggle, children }: {

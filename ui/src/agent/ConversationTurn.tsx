@@ -24,7 +24,7 @@ export function ConversationMessage({ row }: { row: Extract<FeedRow, { type: 'me
 }
 function Reasoning({ text, running }: { text: string; running?: boolean }) {
   if (!text.trim()) return null;
-  return <AgentDisclosure className="agent-reasoning" label={running ? 'Thinking…' : 'Reasoning'} icon={<AgentIcon name="sparkles" />}><div className="agent-reasoning-body"><Markdown text={text} /></div></AgentDisclosure>;
+  return <AgentDisclosure className="agent-reasoning" label={running ? 'Thinking…' : 'Reasoning'} icon={<AgentIcon name="sparkles" />}><div className="agent-reasoning-body"><Markdown text={text} streaming={running} /></div></AgentDisclosure>;
 }
 function AnswerBlocks({ blocks }: { blocks: ResponseBlock[] }) {
   return <>{blocks.map((block, index) => block.type === 'media' ? <MessageContent key={index} content={[block.content]} /> : block.type === 'text' || block.type === 'refusal' ? <Markdown key={index} text={block.text} /> : null)}</>;
@@ -35,8 +35,8 @@ function ResponseLog({ row, state, finalId, tools, interactions, lifecycle }: { 
     : live?.parts.filter(part => part.kind === 'reasoning' || part.kind === 'reasoning_summary').map(part => part.text).join('\n\n') ?? '';
   const items = response ? response.blocks.filter(block => block.type === 'tool').map(block => ({ id: block.tool_id, tool: state.tools[entityKey(row.invocation, block.tool_id)], interaction: interactions.get(entityKey(row.invocation, block.tool_id)) })) : tools;
   return <div className="agent-response-log">
-    <Reasoning text={reasoning} running={!response && !['failed', 'cancelled', 'interrupted'].includes(lifecycle)} />
-    {row.responseId !== finalId ? response ? <AnswerBlocks blocks={response.blocks} /> : live?.parts.filter(part => ['text', 'refusal', 'audio_transcript'].includes(part.kind)).map(part => <Markdown key={part.key} text={part.text} />) : null}
+    <Reasoning text={reasoning} running={!response && !['failed', 'cancelled'].includes(lifecycle)} />
+    {row.responseId !== finalId ? response ? <AnswerBlocks blocks={response.blocks} /> : live?.parts.filter(part => ['text', 'refusal', 'audio_transcript'].includes(part.kind)).map(part => <Markdown key={part.key} text={part.text} streaming />) : null}
     {items.length ? <ConversationTools items={items} lifecycle={lifecycle} /> : null}
     {response?.finish_reason === 'length' && row.responseId !== finalId ? <p className="agent-muted">The model reached its output limit.</p> : null}
   </div>;
@@ -58,7 +58,7 @@ function TurnTime({ status, started, ended, active }: { status: string; started?
     return () => clearInterval(timer);
   }, [active, ended, status, started]);
   const elapsed = started == null ? '' : formatElapsed((ended ?? now) - started);
-  const label = ({ completed: 'Worked for', cancelled: 'Stopped', failed: 'Failed', pausing: 'Pausing', paused: 'Paused', interrupted: 'Interrupted', waiting: 'Waiting', running: 'Working' } as Record<string, string>)[status] ?? 'Working';
+  const label = ({ completed: 'Worked for', cancelled: 'Stopped', failed: 'Failed', pausing: 'Pausing', paused: 'Paused', waiting: 'Waiting', running: 'Working' } as Record<string, string>)[status] ?? 'Working';
   return <span className="agent-turn-time">{label}{elapsed ? status === 'completed' ? ` ${elapsed}` : ` · ${elapsed}` : ''}</span>;
 }
 function CopyResponse({ blocks }: { blocks: ResponseBlock[] }) {
@@ -80,7 +80,7 @@ function CopyResponse({ blocks }: { blocks: ResponseBlock[] }) {
   return <><Tooltip content={copied ? 'Copied' : 'Copy response'}><button className="agent-answer-copy" type="button" aria-label={copied ? 'Copied' : 'Copy response'} onClick={() => void copy()}>{copied ? <CheckIcon /> : <CopyIcon />}</button></Tooltip>{error ? <span role="status" className="agent-copy-error">{error}</span> : null}</>;
 }
 
-export function ConversationTurn({ turn, state, metadata, lifecycle, active, tools, interactions, session, loadUsage }: { session: string; loadUsage?: UsageLoader; turn: Turn; state: ConversationState; metadata?: AgentInvocation; lifecycle: string; active: boolean; tools: Map<string, ConversationTool[]>; interactions: Map<string, Interaction> }) {
+export function ConversationTurn({ turn, state, metadata, lifecycle, active, tools, interactions, session, loadUsage, mobile }: { session: string; mobile?: boolean; loadUsage?: UsageLoader; turn: Turn; state: ConversationState; metadata?: AgentInvocation; lifecycle: string; active: boolean; tools: Map<string, ConversationTool[]>; interactions: Map<string, Interaction> }) {
   const answer = finalResponse(state, turn.invocation, lifecycle), complete = state.completed[turn.invocation];
   const finalId = answer?.response_id;
   const [choice, setChoice] = useState<LogChoice>();
@@ -100,8 +100,8 @@ export function ConversationTurn({ turn, state, metadata, lifecycle, active, too
   return <article className="agent-turn" aria-label="Agent response" data-invocation={turn.invocation}>
     <div className="agent-turn-heading">{logIds.length ? <button className="agent-turn-toggle" type="button" aria-expanded={open} aria-controls={logIds.join(' ')} onClick={() => setChoice({ phase, open: !open })}><TurnTime status={status} started={started} ended={ended} active={active} /><Chevron /></button> : <TurnTime status={status} started={started} ended={ended} active={active} />}</div>
     {segments.map((segment, index) => Array.isArray(segment) ? <AnimatedRegion key={`${id}-${index}`} id={`${id}-${index}`} open={open} className="agent-turn-log">{() => <div className="agent-process-content">{segment.map(row => <ProcessRow key={row.id} row={row} state={state} finalId={finalId} tools={tools} interactions={interactions} lifecycle={lifecycle} />)}</div>}</AnimatedRegion> : <ConversationMessage key={segment.id} row={segment} />)}
-    {answer ? <div className="agent-final-response"><AnswerBlocks blocks={answer.blocks.filter(isAnswerBlock)} />{answer.finish_reason === 'length' ? <p className="agent-muted">The model reached its output limit.</p> : null}<div className="agent-answer-actions">{answer.blocks.some(block => (block.type === 'text' || block.type === 'refusal') && block.text.trim()) ? <CopyResponse blocks={answer.blocks} /> : null}<UsageButton session={session} invocation={turn.invocation} load={loadUsage} active={active} /></div></div> : null}
-    {!answer && ['failed', 'cancelled', 'interrupted'].includes(lifecycle) ? <div className={`agent-turn-notice is-${lifecycle}`} role="status"><AgentIcon name={lifecycle === 'failed' ? 'alert' : 'stop'} /><span>{lifecycle === 'failed' ? 'Task failed. No final response was produced.' : lifecycle === 'cancelled' ? 'You stopped this task. No final response was produced.' : 'Execution was interrupted. No final response was produced.'}</span></div> : null}
+    {answer ? <div className="agent-final-response"><AnswerBlocks blocks={answer.blocks.filter(isAnswerBlock)} />{answer.finish_reason === 'length' ? <p className="agent-muted">The model reached its output limit.</p> : null}<div className="agent-answer-actions">{answer.blocks.some(block => (block.type === 'text' || block.type === 'refusal') && block.text.trim()) ? <CopyResponse blocks={answer.blocks} /> : null}<UsageButton mobile={mobile} session={session} invocation={turn.invocation} load={loadUsage} active={active} /></div></div> : null}
+    {!answer && (lifecycle === 'failed' || lifecycle === 'cancelled') ? <div className={`agent-turn-notice is-${lifecycle}`} role="status"><AgentIcon name={lifecycle === 'failed' ? 'alert' : 'stop'} /><span>{lifecycle === 'failed' ? 'Task failed. No final response was produced.' : 'You stopped this task. No final response was produced.'}</span></div> : null}
     {!answer && lifecycle === 'completed' ? <p className="agent-muted">{complete && !state.responses[entityKey(turn.invocation, complete.final_response_id)] ? 'Final response is being synchronized.' : 'Finished without a final response.'}</p> : null}
   </article>;
 }

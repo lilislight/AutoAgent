@@ -216,7 +216,7 @@ class HostMemoryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_sampling_starts_before_workflow_compilation(self):
         """Compilation can consume memory before Core and Persistence are ready."""
-        from autoagent import WorkflowCompiler
+        from autoagent.core.compiler import WorkflowCompiler
         original = WorkflowCompiler.compile_or_raise
         host = self.host()
         observed = []

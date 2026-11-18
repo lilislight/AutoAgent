@@ -29,7 +29,7 @@ import math
 import threading
 import warnings
 from collections import defaultdict
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from concurrent.futures import Future
 from dataclasses import replace
 from typing import cast, get_args
@@ -377,7 +377,9 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, UserEventRuntime, PauseRuntime, T
         session_id: str | None = None,
         session_context: dict[str, object] | None = None,
         entry_node_id: str | None = None,
+        before_start: Callable[[InvocationRef], Awaitable[None]] | None = None,
     ) -> InvocationSubmission:
+        """Submit an Invocation, optionally recording its identity before its start event."""
         return await self._await(
             self._submit(
                 self._invoke(
@@ -387,6 +389,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, UserEventRuntime, PauseRuntime, T
                     session_context=session_context,
                     entry_node_id=entry_node_id,
                     wait_for_boundary=False,
+                    before_start=before_start,
                 )
             )
         )
@@ -721,6 +724,7 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, UserEventRuntime, PauseRuntime, T
         session_context: dict[str, object] | None,
         entry_node_id: str | None,
         wait_for_boundary: bool,
+        before_start: Callable[[InvocationRef], Awaitable[None]] | None = None,
     ) -> InvocationResult | InvocationSubmission:
         compiled = self._resolve_workflow(workflow)
         session_id = session_id or str(uuid4())
@@ -853,9 +857,17 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, UserEventRuntime, PauseRuntime, T
                             "A Session cannot replace its Invocation before every "
                             "Child plan reaches its terminal phase.",
                         )
+                invocation_id = str(uuid4())
+                ref = InvocationRef(
+                    session_id=session_id,
+                    invocation_id=invocation_id,
+                    workflow_id=compiled.workflow_id,
+                    workflow_revision_id=compiled.workflow_revision_id,
+                )
+                if before_start is not None:
+                    await before_start(ref)
                 if state.session is None:
                     await self._emit(session_id, None, SessionOpened(session_context or {}))
-                invocation_id = str(uuid4())
                 if retired_invocation_ids:
                     self._admission_retirements[session_id] = (
                         invocation_id, old_child_sessions, retired_invocation_ids)
@@ -874,12 +886,6 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, UserEventRuntime, PauseRuntime, T
                     current = self._repository.state(session_id).invocation
                     if current is not None and current.id == invocation_id:
                         self._finish_admission_retirement(session_id)
-                ref = InvocationRef(
-                    session_id=session_id,
-                    invocation_id=invocation_id,
-                    workflow_id=compiled.workflow_id,
-                    workflow_revision_id=compiled.workflow_revision_id,
-                )
                 self._start_drive(compiled, session_id, invocation_id, None, None)
             if not wait_for_boundary:
                 return InvocationSubmission(ref)

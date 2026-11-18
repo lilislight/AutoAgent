@@ -6,8 +6,18 @@ import unittest
 
 from typing_extensions import TypedDict
 
-from autoagent import (AutoAgentApp, InputMappingContext, Map, Node, Stream, StreamContext,
-                       TimeoutPolicy, Wait, Workflow, WorkflowCompiler, WorkflowDefinitionSnapshot)
+from autoagent import (
+    InputMappingContext,
+    Map,
+    Node,
+    Stream,
+    StreamContext,
+    TimeoutPolicy,
+    Wait,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from tests.test_operator_execution_bridge import wait_set
 
 

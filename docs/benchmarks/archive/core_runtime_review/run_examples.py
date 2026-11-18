@@ -1,7 +1,7 @@
 """Run the existing Core example and export complete, replay-verified Events.
 
 Run from the repository root:
-    .venv/bin/python artifacts/core_runtime_review/run_examples.py
+    .venv/bin/python docs/benchmarks/archive/core_runtime_review/run_examples.py
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT))
 
 from autoagent import AutoAgentApp

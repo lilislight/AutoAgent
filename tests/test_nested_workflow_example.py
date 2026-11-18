@@ -2,7 +2,9 @@
 
 import unittest
 
-from autoagent import AutoAgentApp, WorkflowCompiler, WorkflowDefinitionSnapshot, Workflow, Node, SubWorkflow
+from autoagent import Workflow, Node, SubWorkflow
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from autoagent.core.runtime import RuntimeRepository
 from examples.local_ui_demo.nested_demo import nested_review, Submission
 

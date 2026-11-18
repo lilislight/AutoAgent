@@ -4,7 +4,8 @@ import asyncio
 import time
 import unittest
 
-from autoagent import AutoAgentApp, Node, Recovery, Workflow
+from autoagent import Node, Recovery, Workflow
+from autoagent.core.app import AutoAgentApp
 from examples.core_agent_harness_demo import (
     ApprovalRequest, ApprovalResponse, Decision, Draft, MockServices,
     RunSpec, Task, ToolCall, parent_workflow, run_scenario,

@@ -18,7 +18,7 @@ export const settingsApi = {
   preview: (policy: Policy, toolId: string, workspace: string, args: unknown, context: unknown, signal: AbortSignal) => request<PolicyPreview>('/agent/policies/preview', signal, write('POST', { policy, tool_id: toolId, workspace_id: workspace, arguments: args, context })),
 };
 interface PreviewDecision { action: Decision; reason: string | null }
-interface PreviewLayer { decision: Decision; source: 'code' | 'group' | 'source' | 'custom'; layer: number }
+interface PreviewLayer { decision: Decision; source: 'code' | 'group' | 'source' | 'file_read' | 'custom'; layer: number }
 export interface PolicyPreview {
   decision: PreviewDecision;
   includes_code_callbacks: boolean;

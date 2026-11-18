@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from autoagent.agent import (
     AgentInput, LLMResponse, LLMToolCall, LocalWorkspace,
@@ -168,7 +169,7 @@ class WorkspaceContracts:
             self.assertNotIn("SECOND_PROJECT_INSTRUCTIONS", first)
             self.assertIn("second-skill", second)
             self.assertNotIn("first-skill", second)
-            self.assertNotIn("skill_load", unbound)
+            self.assertNotIn("skill_load", {tool.name for tool in provider.requests[-1].tools})
             self.assertNotIn("PROJECT_INSTRUCTIONS", unbound)
 
     async def test_configuration_rejects_binding_changes_but_accepts_model_changes(self):
@@ -230,6 +231,30 @@ class WorkspaceContracts:
             result = await self.run_agent(host, "session")
             self.assertEqual(result.status, "completed", result.error)
             self.assertIn("tool_unavailable", provider.requests[1].model_dump_json())
+
+    async def test_parallel_file_tools_share_workspace_discovery(self):
+        """A batch reuses its Workspace catalog and still executes each file call."""
+        for name in ("alpha", "beta", "gamma"):
+            (self.first / name).write_text(name.upper())
+        proposal = LLMResponse(model="offline", finish_reason="tool_calls", output=tuple(
+            LLMToolCall(name="read_file", call_id=name, arguments=json.dumps({"path": name}))
+            for name in ("alpha", "beta", "gamma")))
+        provider = ScriptedProvider(proposal, answer())
+        defaults = settings().model_copy(update={"workspace": WorkspaceBinding(workspace_id="first")})
+        calls = []
+        original = LocalWorkspace.adiscover
+
+        async def discover(workspace, directory=".", **options):
+            calls.append(workspace.id)
+            return await original(workspace, directory, **options)
+
+        async with self.host(provider, workspaces=[LocalWorkspace("first", self.first)], defaults=defaults) as host:
+            with patch.object(LocalWorkspace, "adiscover", discover):
+                result = await self.run_agent(host, "session")
+        self.assertEqual(result.status, "completed", result.error)
+        self.assertEqual(calls, ["first"] * 3)
+        for name in ("ALPHA", "BETA", "GAMMA"):
+            self.assertIn(name, provider.requests[1].model_dump_json())
 
     async def test_unbound_sessions_and_concurrent_configuration_cannot_rebind(self):
         """Accepted unbound Sessions stay unbound and competing first bindings are serialized."""
@@ -333,6 +358,15 @@ class WorkspaceContracts:
             snapshot = await host.applications["agent"].context.get_snapshot(children.items[0]["invocation_id"])
             self.assertNotEqual(snapshot.session_id, "parent")
             self.assertEqual(snapshot.settings.workspace, defaults.workspace)
+            app = host.applications["agent"]
+            with patch.object(host, "list_session_invocations", side_effect=AssertionError("Unbatched invocation lookup")), \
+                    patch.object(app.context, "get_settings", side_effect=AssertionError("Unbatched settings lookup")):
+                page = await app.list_sessions(limit=1)
+            self.assertIsNone(page.next_cursor)
+            self.assertEqual(len(page.items), 1)
+            self.assertEqual(page.items[0]["session_id"], "parent")
+            self.assertEqual(page.items[0]["status"], "completed")
+            self.assertEqual(page.items[0]["workspace_id"], "first")
 
     @asynccontextmanager
     async def workspace_client(self, provider):
@@ -407,6 +441,28 @@ class WorkspaceContracts:
             self.assertEqual(mismatch.status_code, 400)
             rejected = await client.post("/api/v2/agent/messages", json={"session_id": "project-new", "message": "Wrong directory", "workspace_id": item["id"]})
             self.assertEqual(rejected.status_code, 409)
+
+    async def test_broken_workspace_skill_leaves_healthy_skill_and_chat_available(self):
+        """One malformed Skill is diagnosed without taking down Workspace tools or model requests."""
+        make_workspace(self.root, "healthy")
+        broken = make_workspace(self.root, "broken") / "SKILL.md"
+        broken.write_text("Missing frontmatter.")
+        from autoagent.agent.skills import SkillError
+        with self.assertRaises(SkillError):
+            LocalWorkspace("strict", self.root).discover()
+        provider = ScriptedProvider(answer())
+        async with self.workspace_client(provider) as (host, client):
+            tools = await client.get("/api/v2/agent/resource-configs", params={"scope": "tools"})
+            self.assertEqual(tools.status_code, 200, tools.text)
+            skills = await client.get("/api/v2/agent/resource-configs")
+            self.assertEqual(skills.status_code, 200, skills.text)
+            self.assertEqual([row["name"] for row in skills.json()["resources"] if row["kind"] == "skill"], ["healthy"])
+            self.assertTrue(skills.json()["skill_diagnostics"][0]["location"].endswith("broken/SKILL.md"))
+            response = await client.post("/api/v2/agent/messages", json={"session_id": "chat", "message": "Continue"})
+            self.assertEqual(response.status_code, 202, response.text)
+            result = await host.join(response.json()["invocation_id"])
+            self.assertEqual(result.status, "completed", result.error)
+            self.assertIn("healthy instructions", provider.requests[0].model_dump_json())
 
     async def test_failed_workspace_registration_removes_only_its_new_empty_directory(self):
         """Failed registration removes its newly created parent chain while preserving existing directories."""

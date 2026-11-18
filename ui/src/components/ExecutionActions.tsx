@@ -6,6 +6,7 @@ import type { ExecutionActionInput, ExecutionActionKind, ExecutionControls, Exec
 import type { FieldError } from '../jsonSchema';
 import { observeOperation, pendingOperation, readPendingOperation, type PendingOperation, type OperationObservation } from '../executionOperations';
 import { Tooltip } from './Tooltip';
+import { newId } from '../ids';
 
 const progressLabels: Record<ExecutionActionKind, string> = { pause: 'Pausing…', recover: 'Recovering…', cancel: 'Cancelling…', respond: 'Responding…', signal: 'Sending…' };
 function savedOperation(iid: string, value?: PendingOperation | null) {
@@ -70,20 +71,24 @@ export function useExecutionActions(trace: ExecutionTrace, active: boolean, repl
   const send = async (action: ExecutionActionKind, options: Partial<ExecutionActionInput> = {}) => {
     if (submittingRef.current || busy || replaying || !active) return;
     submittingRef.current = true; setSubmitting(action); setError(null); setFieldErrors([]);
-    const request_id = crypto.randomUUID();
-    const input: ExecutionActionInput = { ...options, ...(action === 'recover' ? { expected_version: controls.data?.expected_version } : {}), invocation_id: iid, action, request_id };
-    const pending = pendingOperation(input, controls.data);
-    // Retain the observation key even if the page reloads before POST returns.
-    savedOperation(iid, pending);
+    let pending: PendingOperation | undefined;
     try {
+      const input: ExecutionActionInput = { ...options, ...(action === 'recover' ? { expected_version: controls.data?.expected_version } : {}), invocation_id: iid, action, request_id: newId() };
+      pending = pendingOperation(input, controls.data);
+      // Retain the observation key even if the page reloads before POST returns.
+      savedOperation(iid, pending);
       const receipt = await submitExecutionAction(input, new AbortController().signal);
       client.setQueryData<OperationObservation>(['execution-operation', receipt.operation_id], () => ({ kind: 'receipt', receipt }));
       const accepted = { ...pending, operation_id: receipt.operation_id };
       savedOperation(iid, accepted); setPendingOperation(accepted); setCancelOpen(false);
     } catch (failure) {
-      if (!(failure instanceof ApiError) || failure.status >= 500) {
+      if (pending && (!(failure instanceof ApiError) || failure.status >= 500)) {
         setPendingOperation(pending); setCancelOpen(false);
-      } else { savedOperation(iid, null); setError(failure.message); setFieldErrors(failure.fields); }
+      } else {
+        savedOperation(iid, null);
+        setError(failure instanceof Error ? failure.message : 'Could not submit the execution action.');
+        if (failure instanceof ApiError) setFieldErrors(failure.fields);
+      }
       void controls.refetch();
     } finally { submittingRef.current = false; setSubmitting(null); }
   };

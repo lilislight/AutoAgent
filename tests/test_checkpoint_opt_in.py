@@ -9,7 +9,8 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import AsyncMock, patch
 
-from autoagent import AutoAgentApp, Node, Wait, Workflow
+from autoagent import Node, Wait, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core import AppCheckpoint, SessionCheckpoint, RuntimeGraphCheckpoint
 from autoagent.core.errors import RuntimeInfrastructureError
 from tests.benchmarks.benchmark_core_audit import Value, identity

@@ -9,12 +9,14 @@ import json
 
 from pydantic import BaseModel, ConfigDict
 from autoagent import (
-    AutoAgentApp, Await, ContextOperation, ContextPatch, Edge, InputMappingContext,
+    Await, ContextOperation, ContextPatch, Edge, InputMappingContext,
     Node, OutputBindingContext, ReceiveSignal, Resume,
-    ResumeRequest, RuntimeGraphCheckpoint, RuntimeHandle, RuntimeObservation,
+    ResumeRequest, RuntimeHandle, RuntimeObservation,
     SendSignal, SignalBatch, SignalEndpoint, SignalLimits,
     Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 
 class Gate(BaseModel):

@@ -11,13 +11,15 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autoagent import (
-    AutoAgentApp, Await, AwaitAny, AwaitAnyRequest, AwaitSignal, BackoffPolicy,
+    Await, AwaitAny, AwaitAnyRequest, AwaitSignal, BackoffPolicy,
     Capability, Edge, InputMappingContext, Map, Node, Operator, ReceiveSignal,
-    ReceiveSignalRequest, RetryPolicy, RuntimeHandle, RuntimeTransitionError,
+    ReceiveSignalRequest, RetryPolicy, RuntimeHandle,
     Select, SelectRequest, SelfHandle, SendSignal, SendSignalRequest, SignalEndpoint, SignalRequestCase,
     Spawn, TimeoutPolicy, Timer, TimerRequest, TimerRequestCase, Wait, Workflow,
-    WorkflowCompiler,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler
+from autoagent.core.errors import RuntimeTransitionError
 from autoagent.core import RuntimeGraphCheckpoint
 from autoagent.core.operators import OperatorCallContext
 from tests.test_node_policies import Value, ZERO, identity, items

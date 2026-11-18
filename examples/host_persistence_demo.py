@@ -13,7 +13,8 @@ from pathlib import Path
 
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, Edge, Node, Operator, Workflow
+from autoagent import Edge, Node, Operator, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.host.persistence import DatabaseSink, PersistenceConfig
 
 

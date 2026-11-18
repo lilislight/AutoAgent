@@ -8,7 +8,8 @@ from unittest.mock import patch
 
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, Node, Workflow, run_sync
+from autoagent import Node, Workflow, run_sync
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import LLMToolCall, LLMToolResult, ToolSet, tool
 
 

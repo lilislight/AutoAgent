@@ -7,7 +7,8 @@ import time
 import tracemalloc
 from dataclasses import replace
 from types import MappingProxyType
-from autoagent import AutoAgentApp, Node, Workflow
+from autoagent import Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.compiler.compiler import WorkflowCompiler
 from autoagent.core.runtime import TransitionPlanner, SchedulerDelta
 from autoagent.core.runtime._execution_index import ExecutionIndex

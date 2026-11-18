@@ -12,6 +12,7 @@ from ..models._base import Model, NonEmpty
 
 if TYPE_CHECKING:
     from ..skills import Skill
+    from ..skills.models import SkillDiagnostic
 
 
 class WorkspaceError(ValueError):
@@ -50,6 +51,7 @@ class WorkspaceDiscovery:
     working_directory: str
     instructions: tuple[WorkspaceInstruction, ...] = ()
     skills: tuple[Skill, ...] = ()
+    skill_diagnostics: tuple[SkillDiagnostic, ...] = ()
 
 
 @runtime_checkable

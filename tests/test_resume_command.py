@@ -1,8 +1,19 @@
 """Runtime Resume acceptance, identity, and crash-boundary contracts."""
 import unittest
 from pydantic import BaseModel, ConfigDict
-from autoagent import (AutoAgentApp, Workflow, Node, Edge, Wait, Await, Resume, ResumeRequest,
-    ResumeReceipt, RuntimeHandle, InputMappingContext)
+from autoagent import (
+    Workflow,
+    Node,
+    Edge,
+    Wait,
+    Await,
+    Resume,
+    ResumeRequest,
+    ResumeReceipt,
+    RuntimeHandle,
+    InputMappingContext,
+)
+from autoagent.core.app import AutoAgentApp
 from tests.test_system_commands import Collector
 
 
@@ -221,7 +232,7 @@ class ResumeCommandTests(unittest.TestCase):
     def test_lost_ack_retries_exact_event_in_same_app(self):
         """Lost target, caller-result, and receipt-release ACKs retry their exact event once."""
         import asyncio
-        from autoagent import RuntimeInfrastructureError
+        from autoagent.core.errors import RuntimeInfrastructureError
         for boundary in ('wait.resumed', 'operator_call.completed', 'resume_receipt.released'):
             class Sink(Collector):
                 failed = None
@@ -400,7 +411,7 @@ class ResumeCommandTests(unittest.TestCase):
 
     def test_cross_graph_rejection_does_not_settle_target_pending_event(self):
         """Rejected cross-graph Resume cannot acknowledge an unrelated pending target event."""
-        from autoagent import RuntimeInfrastructureError
+        from autoagent.core.errors import RuntimeInfrastructureError
         class Sink(Collector):
             pending = None
             attempts = 0

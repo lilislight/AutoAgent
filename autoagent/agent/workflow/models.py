@@ -11,11 +11,10 @@ from ..context import AgentModelSelection, AgentHostSettings
 from ..tools import ToolApproval, ToolApprovalRequest
 from .subagents import SubagentsConfig
 from .events import AgentEventMessage
+from .message import AgentUserMessage
 
 
-class AgentInput(Model):
-    message: NonEmpty
-    request_id: NonEmpty | None = None
+class AgentInput(AgentUserMessage):
     model: AgentModelSelection | None = None
 
 
@@ -119,10 +118,6 @@ class ToolTask(Model):
 class ToolBranchInput(Model):
     response: LLMResponse
     prepared: PreparedRequest
-
-
-class ApprovedTools(Model):
-    tasks: tuple[ToolTask, ...]
 
 
 class AuthorizationObservation(Model):

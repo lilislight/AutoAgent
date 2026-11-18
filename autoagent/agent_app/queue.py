@@ -4,6 +4,7 @@ import asyncio
 import logging
 from weakref import WeakValueDictionary
 
+from autoagent.agent.context import AgentModelSelection, restore
 from autoagent.core import RuntimeTransitionError
 from autoagent.host.models import HostNotFoundError, HostRunConflict
 
@@ -26,6 +27,7 @@ class AgentMessageQueue:
         return await self.host.applications["agent"].storage.queue(method, *args, **kwargs)
 
     async def start(self):
+        await self.storage("prepare")
         self.wake.set()
         self.task = asyncio.create_task(self._work())
 
@@ -60,6 +62,16 @@ class AgentMessageQueue:
         row = await self.host._persistence.get_session(sid, view="accepted")
         return await self.host._persistence.get_invocation(row["latest_invocation_id"], view="accepted") if row and row["latest_invocation_id"] else None
 
+    async def _submit_invocation(self, item):
+        async def bind_invocation(ref):
+            await self.storage("change", ref.session_id, item["id"], ("starting",), invocation_id=ref.invocation_id)
+        return await self.service.start_conversation(item["session_id"], item["message"],
+            model=item["model"], images=item["images"] or (), remember_model=False, before_start=bind_invocation)
+
+    async def _was_admitted(self, item):
+        iid = item["invocation_id"]
+        return iid is not None and await self.host._persistence.get_invocation(iid, view="accepted") is not None
+
     async def _advance(self, sid):
         rows = await self.storage("rows", sid)
         if not rows:
@@ -77,21 +89,22 @@ class AgentMessageQueue:
                 return
             await self.storage("change", sid, item["id"], ("blocked",), state="queued", error=None, blocked_on_id=None)
         if item["state"] == "starting":
-            if iid and await self.storage("request_for", iid) == item["id"]:
+            if await self._was_admitted(item):
                 await self.host._persistence.flush()
-                await self.storage("change", sid, item["id"], ("starting",), state="started", invocation_id=iid, error=None)
+                await self.storage("change", sid, item["id"], ("starting",), state="started", error=None)
                 self.wake.set()
                 return
-            await self.storage("change", sid, item["id"], ("starting",), state="queued")
+            await self.storage("change", sid, item["id"], ("starting",), state="queued", invocation_id=None)
         if latest and latest["status"] not in ("completed", "failed", "cancelled"):
             return
         if latest and latest["status"] != "completed" and item["continue_after_id"] != iid:
             await self.storage("change", sid, item["id"], ("queued",), state="blocked",
                 blocked_on_id=iid, error="The previous task ended. Continue the queue to start the next task.")
             return
-        await self.storage("change", sid, item["id"], ("queued",), state="starting", previous_invocation_id=iid, error=None)
+        await self.storage("change", sid, item["id"], ("queued",), state="starting", invocation_id=None,
+            previous_invocation_id=iid, error=None)
         try:
-            ref = await self.service.start_conversation(sid, item["message"], request_id=item["id"], model=item["model"], remember_model=False)
+            ref = await self._submit_invocation(item)
             # The accepted Invocation identity must be durable before retiring its submission.
             await self.host._persistence.flush()
             await self.storage("change", sid, item["id"], ("starting",), state="started", invocation_id=ref.invocation_id)
@@ -102,16 +115,18 @@ class AgentMessageQueue:
             # Admission can briefly wait on child settlement or a delivered result.
             if getattr(error, "code", "") in ("SESSION_CHILDREN_ACTIVE", "SESSION_RESULT_PENDING", "session_busy", "SESSION_INVOCATION_ACTIVE"):
                 return
-            latest = await self.latest(sid)
-            if latest and await self.storage("request_for", latest["invocation_id"]) == item["id"]:
+            current = (await self.storage("rows", sid, item_id=item["id"]))[0]
+            if await self._was_admitted(current):
                 return  # Reconcile an ambiguous admission; never resubmit blindly.
-            await self.storage("change", sid, item["id"], ("starting",), state="blocked", error=str(error))
+            await self.storage("change", sid, item["id"], ("starting",), state="blocked", invocation_id=None, error=str(error))
 
-    async def submit(self, sid, message, request_id, workspace_id=None, *, send_to=None, unbound=False, initial_settings=None, model=None):
+    async def submit(self, sid, message, item_id, workspace_id=None, *, send_to=None, unbound=False, initial_settings=None, model=None, uploads=()):
         if send_to is not None and model is not None:
             raise ValueError("Messages to a running task cannot change its model.")
-        if not message.strip() or not request_id or len(request_id) > 64 or not all(c.isascii() and (c.isalnum() or c in "_-") for c in request_id):
-            raise ValueError("A message and a unique request ID (up to 64 letters, digits, '_' or '-') are required.")
+        if not message.strip() and not uploads:
+            raise ValueError("Provide a message or an image.")
+        if not item_id or len(item_id) > 64 or not all(c.isascii() and (c.isalnum() or c in "_-") for c in item_id):
+            raise ValueError("A unique queue item ID (up to 64 letters, digits, '_' or '-') is required.")
         async def operation():
             async with self.lock(sid):
                 existing = await self.service.workspace_session(sid, allow_new=True)
@@ -120,10 +135,9 @@ class AgentMessageQueue:
                     from autoagent.host.models import HostNotFoundError
                     raise HostNotFoundError("The Agent application is disabled for this project.")
                 record = await self.service.conversation_settings(sid, workspace_id, unbound=unbound)
-                previous = await self.storage("rows", sid, item_id=request_id)
+                previous = await self.storage("rows", sid, item_id=item_id)
                 if initial_settings is not None and not previous:
                     from .models import ApplicationSessionSettings
-                    from autoagent.agent.context import restore
                     from autoagent.host.persistence import ConflictError
                     chosen = restore(ApplicationSessionSettings, initial_settings)
                     if existing is not None or record.version:
@@ -131,28 +145,33 @@ class AgentMessageQueue:
                             raise ConflictError("Conversation already started; update its settings explicitly.")
                     else:
                         record = record.model_copy(update={"settings": chosen})
-                await self.service.approvals._run(lambda: self.service._workspaces.validate(record.workspace))
-                await self.service.storage("initialize_settings", sid, record.settings, record.workspace, message)
-                from autoagent.agent import AgentModelSelection
-                from autoagent.agent.context import restore
-                selected = None if send_to is not None else (model if model is not None else record.settings.model)
-                selected = self.service.bind_model(restore(AgentModelSelection, selected)).model_dump(mode="json") if selected is not None else None
+                selected = None
                 if previous and model is None and send_to is None:
                     selected = previous[0]["model"]
-                if previous and previous[0]["state"] in ("started", "sent", "cancelled"):
-                    return await self.storage("add", sid, request_id, message, selected)
-                if send_to is not None:
-                    latest = await self.latest(sid)
-                    if not latest or latest["invocation_id"] != send_to:
-                        raise HostRunConflict("queue_target_changed", "The current task changed; your message was not sent.")
-                item = await self.storage("add", sid, request_id, message, selected)
+                elif send_to is None:
+                    selection = restore(AgentModelSelection, model if model is not None else record.settings.model)
+                    if previous:
+                        saved_model = previous[0]["model"] or {}
+                        if selection.reasoning_effort is None:
+                            selection = selection.model_copy(update={"reasoning_effort": saved_model.get("reasoning_effort")})
+                    else:
+                        selection = self.service.bind_submission_model(selection)
+                    selected = selection.model_dump(mode="json")
+                if previous:
+                    item = await self.storage("add", sid, item_id, message, selected, send_to=send_to, uploads=uploads)
+                    if item["state"] in ("started", "sent", "cancelled") or send_to is not None and item["state"] != "sending":
+                        return item
+                else:
+                    if send_to is not None:
+                        latest = await self.latest(sid)
+                        if not latest or latest["invocation_id"] != send_to:
+                            raise HostRunConflict("queue_target_changed", "The current task changed; your message was not sent.")
+                    await self.service.approvals._run(lambda: self.service._workspaces.validate(record.workspace))
+                    item = await self.storage("add", sid, item_id, message, selected, conversation=record, send_to=send_to, uploads=uploads)
                 if not previous and selected is not None:
-                    await self.service.remember_model(sid, selected)
+                    await self.service._read_settings(sid)
                 if send_to is not None:
-                    if item["state"] in ("queued", "blocked"):
-                        await self.storage("change", sid, request_id, (item["state"],), state="sending", invocation_id=send_to, error=None)
-                    if item["state"] in ("queued", "blocked", "sending"):
-                        await self._signal((await self.storage("rows", sid, item_id=request_id))[0])
+                    await self._signal(item)
                 else:
                     if not previous:
                         latest = await self.latest(sid)
@@ -164,7 +183,7 @@ class AgentMessageQueue:
                                         continue_after_id=latest["invocation_id"], blocked_on_id=None, error=None)
                     await self._advance(sid)
                 self.wake.set()
-                return (await self.storage("rows", sid, item_id=request_id))[0]
+                return (await self.storage("rows", sid, item_id=item_id))[0]
         return await self.host._perform(operation, payload=message, control=True)
 
     async def view(self, sid):
@@ -191,6 +210,9 @@ class AgentMessageQueue:
                     await self.storage("change", sid, item_id, ("blocked",), state="queued",
                         continue_after_id=latest["invocation_id"] if latest else None, error=None)
                 elif action == "send_now":
+                    target = item["send_to"] or (item["invocation_id"] if item["state"] in ("sending", "sent") else None)
+                    if target is not None and target != invocation_id:
+                        raise HostRunConflict("queue_target_changed", "This message already targets another task.")
                     if item["state"] == "sent":
                         return item
                     latest = await self.latest(sid)
@@ -212,7 +234,8 @@ class AgentMessageQueue:
             revision = family["current"]["workflow_revision_id"]
             options = self.service.options_for_workflow(self.host._runtime.workflow_irs[revision])
             await self.host.signal(item["invocation_id"], options.user_signal_endpoint,
-                dict(message=item["message"], reply_requested=False, reply_to=None, wait_timeout_seconds=None),
+                dict(message=item["message"], images=item["images"] or [], reply_requested=False,
+                    reply_to=None, wait_timeout_seconds=None),
                 source_id="queue_" + item["id"], sequence=1)
             await self.host._persistence.flush()
             await self.storage("change", item["session_id"], item["id"], ("sending",), state="sent", error=None)

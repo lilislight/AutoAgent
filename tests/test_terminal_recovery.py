@@ -3,7 +3,9 @@ import unittest
 from collections import Counter
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, Node, Edge, Workflow, RecoverySource, Recovery, Map, InputMappingContext
+from autoagent import Node, Edge, Workflow, Recovery, Map, InputMappingContext
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.runtime import RecoverySource
 from autoagent.core.runtime.reducer import StateReducer
 
 
@@ -125,7 +127,7 @@ class TerminalRecoveryTests(unittest.TestCase):
         failed=app.invoke(Workflow('recover-never',nodes=[Node('bad',bad)]),{'value':0})
         source=RecoverySource.from_events(tuple(sink.events))
         before=len(sink.events)
-        from autoagent import RuntimeTransitionError
+        from autoagent.core.errors import RuntimeTransitionError
         with self.assertRaisesRegex(RuntimeTransitionError,'changed'):
             app.recover(failed.ref,source=source,expected_version=0)
         with self.assertRaisesRegex(RuntimeTransitionError,'recomputation'):
@@ -156,7 +158,8 @@ class TerminalRecoveryTests(unittest.TestCase):
 
     def test_partial_graph_preparation_survives_lost_ack_and_process_replacement(self):
         """A persisted Root plan finishes after a Child reopen ACK is lost, before running any Operator."""
-        from autoagent import Spawn, Wait, RuntimeInfrastructureError
+        from autoagent import Spawn, Wait
+        from autoagent.core.errors import RuntimeInfrastructureError
         from autoagent.core import SessionCheckpoint
         from tests.graph_fixtures import graph_bundle, load_graph
         class Broken(Events):
@@ -357,7 +360,8 @@ class TerminalRecoveryTests(unittest.TestCase):
 
     def test_completed_parallel_waits_are_not_requested_again(self):
         """Parallel Wait recovery keeps accepted responses and replaces only outstanding Wait IDs."""
-        from autoagent import Wait, RuntimeTransitionError
+        from autoagent import Wait
+        from autoagent.core.errors import RuntimeTransitionError
         def start(value:Value)->Value:
             return value
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
@@ -379,7 +383,7 @@ class TerminalRecoveryTests(unittest.TestCase):
 
     def test_stale_or_incomplete_history_never_reopens_an_execution(self):
         """Canonical history must be contiguous and match every acknowledged Session frontier."""
-        from autoagent import RuntimeTransitionError
+        from autoagent.core.errors import RuntimeTransitionError
         def work(value:Value)->Value:
             raise ValueError('failure')
         sink=Events(); app=AutoAgentApp(runtime_event_sink=sink)
@@ -395,7 +399,7 @@ class TerminalRecoveryTests(unittest.TestCase):
 
     def test_lost_root_reopen_ack_continues_the_accepted_round(self):
         """Retrying a lost final reopen ACK starts prepared work once without deadlocking Root admission."""
-        from autoagent import RuntimeInfrastructureError
+        from autoagent.core.errors import RuntimeInfrastructureError
         class Broken(Events):
             broken=False
             async def append(self,event):
@@ -423,7 +427,7 @@ class TerminalRecoveryTests(unittest.TestCase):
 
     def test_duplicate_accepted_request_does_not_restart_a_later_interruption(self):
         """After dispatch begins, repeating its old request ID observes state; a new request recovers interruption."""
-        from autoagent import RuntimeInfrastructureError
+        from autoagent.core.errors import RuntimeInfrastructureError
         class Broken(Events):
             broken=False
             async def append(self,event):

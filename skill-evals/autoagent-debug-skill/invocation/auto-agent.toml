@@ -1,0 +1,10 @@
+schema_version = 1
+
+[project]
+name = "debug-quote-review"
+
+[[workflows]]
+entrypoint = "workflows:quote_review"
+
+[[evaluations]]
+entrypoint = "evaluations:quote_cases"

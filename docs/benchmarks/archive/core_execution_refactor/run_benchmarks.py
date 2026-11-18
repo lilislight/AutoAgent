@@ -1,15 +1,16 @@
 """Run interleaved comparisons against a pre-change source snapshot.
 
-Usage: .venv/bin/python artifacts/core_execution_refactor/run_benchmarks.py /path/to/baseline
+Usage: .venv/bin/python docs/benchmarks/archive/core_execution_refactor/run_benchmarks.py /path/to/baseline
 """
 import sys
 import json
 import subprocess
 from pathlib import Path
-root=Path(__file__).resolve().parents[2]
+script=Path(__file__).resolve()
+root=script.parents[4]
 before=Path(sys.argv[1]).resolve()
 python=sys.executable
-out=root/'artifacts/core_execution_refactor/paired'
+out=script.parent/'paired'
 out.mkdir(exist_ok=True)
 for iteration in range(3):
     for side, cwd in ([('before',before),('after',root)] if iteration%2==0 else [('after',root),('before',before)]):

@@ -8,7 +8,8 @@ from unittest.mock import patch
 from typing import Literal
 from typing_extensions import TypedDict, NotRequired
 from pydantic import BaseModel, field_validator
-from autoagent import AutoAgentApp, Node, Workflow
+from autoagent import Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.operators.contract import ValueContract
 
 

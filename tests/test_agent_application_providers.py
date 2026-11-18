@@ -1,5 +1,7 @@
 """Agent product defaults and read-only Host model discovery remain separate from SDK bindings."""
+from base64 import b64decode
 import json
+from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
@@ -11,6 +13,37 @@ from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 class ProviderContracts:
     product = SessionControlContracts.product
     database_url = SessionControlContracts.database_url
+
+    async def test_catalog_deepseek_gets_workspace_image_from_read_file(self):
+        """The configured transport's tool-media support reaches the Agent history projection."""
+        from tests.test_agent_providers import chat_body
+
+        model = "deepseek/deepseek-flash"
+        photo = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jVn8AAAAASUVORK5CYII="
+        tool_reply = chat_body({"role": "assistant", "content": None,
+            "tool_calls": [{"type": "function", "id": "photo", "function": {"name": "read_file",
+                "arguments": '{"path":"camera.png"}'}}]})
+        tool_reply["choices"][0]["finish_reason"] = "tool_calls"
+        sdk = SimpleNamespace(acompletion=AsyncMock(side_effect=[tool_reply,
+            chat_body({"role": "assistant", "content": "Seen"})]))
+        async with self.product(ScriptedProvider()) as (host, client):
+            (host.root / "camera.png").write_bytes(b64decode(photo))
+            (host.root / "providers.json").write_text(json.dumps({"default_model": {"provider": "deepseek", "model": model},
+                "providers": {"deepseek": {"backend": "litellm", "protocol": "openai.chat_completions",
+                    "base_url": "https://api.deepseek.com", "models": [{"id": model}]}}}))
+            await host.providers.reload()
+            with patch("autoagent.agent.providers.litellm.load_litellm_sdk", return_value=sdk):
+                started = await client.post("/api/v2/agent/messages", json={"session_id": "camera", "message": "Read the photo"})
+                self.assertEqual(started.status_code, 202, started.text)
+                result = await host.join(started.json()["invocation_id"])
+            self.assertEqual(result.status, "completed", result.error)
+        requests = sdk.acompletion.await_args_list
+        self.assertEqual(len(requests), 2)
+        messages = requests[1].kwargs["messages"]
+        images = [part["image_url"]["url"] for message in messages if isinstance(message.get("content"), list)
+            for part in message["content"] if part.get("type") == "image_url"]
+        self.assertEqual(images, ["data:image/png;base64," + photo])
+        self.assertNotIn("historical_media_reference", str(messages))
 
     async def test_providers_are_read_only_and_defaults_are_host_owned(self):
         """The product lists Host metadata, rejects connection writes, and reads defaults from project JSON."""

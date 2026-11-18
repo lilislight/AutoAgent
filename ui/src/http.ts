@@ -1,5 +1,5 @@
 interface Config { apiPrefix: string; uiBase: string; pageSize: number; defaultView?: 'agents' | 'workflows' }
-const element = document.getElementById("autoagent-config");
+const element = typeof document === 'undefined' ? null : document.getElementById("autoagent-config");
 export const config: Config = element?.textContent
   ? JSON.parse(element.textContent) as Config
   : { apiPrefix: "/api/v2", uiBase: "/", pageSize: 50 };

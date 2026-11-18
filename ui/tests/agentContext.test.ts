@@ -67,11 +67,12 @@ test('capacity respects the model limit, unknown capacity stays neutral and exce
   assert.equal(contextUsage(emptyConversation(), 200_000).usedTokens, 0);
 });
 
-test('the ring is an accessible button and its English details show occupancy rather than billing', () => {
+test('the ring is a keyboard-focusable indicator with occupancy details and no dialog trigger', () => {
   const value = contextUsage(applyEvents(emptyConversation(), [response(1, 100_000, 10_000)]), 480_000);
   const html = renderToStaticMarkup(createElement(ContextIndicator, { value }));
   assert.match(html, /aria-label="Context window: 23% used"/);
-  assert.match(html, /aria-haspopup="dialog"/);
+  assert.match(html, /role="img" tabindex="0"/);
+  assert.doesNotMatch(html, /<button|aria-haspopup|aria-expanded/);
   const details = renderToStaticMarkup(createElement(ContextFacts, { value }));
   assert.match(details, /77% remaining/);
   assert.match(details, /110K/);

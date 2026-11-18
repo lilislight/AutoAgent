@@ -1,10 +1,14 @@
 import type { ReactNode } from 'react';
 
-export type AgentIconName = 'folder-add' | 'new' | 'panel' | 'task' | 'tools' | 'skills' | 'settings' | 'send' | 'shield' | 'access' | 'sparkles' | 'folder' | 'chevron' | 'file' | 'search' | 'terminal' | 'edit' | 'agent' | 'message' | 'wrench' | 'stop' | 'alert' | 'usage' | 'pause' | 'play' | 'check' | 'down' | 'close' | 'activity';
+export type AgentIconName = 'folder-add' | 'new' | 'task' | 'tools' | 'skills' | 'settings' | 'send' | 'shield' | 'access' | 'sparkles' | 'folder' | 'chevron' | 'file' | 'search' | 'terminal' | 'edit' | 'agent' | 'message' | 'wrench' | 'stop' | 'alert' | 'usage' | 'pause' | 'play' | 'check' | 'down' | 'close' | 'activity' | 'link' | 'back' | 'more' | 'plus';
 const paths: Record<AgentIconName, ReactNode> = {
   'folder-add': <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="M8 14h8M12 10v8" /></>,
+  back: <path d="m15 5-7 7 7 7" />,
+  more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
   down: <path d="M12 5v14m-6-6 6 6 6-6" />,
   close: <path d="m6 6 12 12M6 18 18 6" />,
+  plus: <path d="M12 5v14M5 12h14" />,
+  link: <path d="M10 13a4 4 0 0 0 6 0l4-4a4 4 0 0 0-6-6l-2 2M14 11a4 4 0 0 0-6 0l-4 4a4 4 0 0 0 6 6l2-2" />,
   activity: <><path d="M5 15V9M12 19V5M19 15V9" /></>,
   check: <path d="m5 12 4 4L19 6" />,
   pause: <><path d="M8 5v14M16 5v14" /></>,
@@ -22,7 +26,6 @@ const paths: Record<AgentIconName, ReactNode> = {
   alert: <><circle cx="12" cy="12" r="9" /><path d="M12 7v6M12 17h.01" /></>,
   folder: <path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />,
   new: <><path d="M12 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7M16 3l5 5M10 14l2-5 7-7 5 5-7 7-5 2Z" /></>,
-  panel: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M9 4v16" /></>,
   task: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
   tools: <><path d="m12 3 9 5-9 5-9-5 9-5ZM3 8v9l9 5 9-5V8M12 13v9" /></>,
   skills: <><path d="M12 5C8 2 4 3 2 4v15c3-2 6-1 10 1 4-2 7-3 10-1V4c-2-1-6-2-10 1ZM12 5v15" /></>,

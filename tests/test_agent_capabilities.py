@@ -11,9 +11,10 @@ from pathlib import Path
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp, Node, Operator, Stream, TimeoutPolicy, UserEventContext,
+    Node, Operator, Stream, TimeoutPolicy, UserEventContext,
     UserEventSpec, ValueContract, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     EMBEDDING, LLM_CALL, EmbeddingProvider, EmbeddingRequest, EmbeddingResponse,
     EmbeddingVector, LLMMessage, LLMProvider, LLMRequest, LLMResponse,
@@ -21,7 +22,8 @@ from autoagent.agent import (
 )
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 from autoagent.agent.integration.llm import LLMStreamState
-from autoagent import StreamContext, WorkflowCompiler
+from autoagent import StreamContext
+from autoagent.core.compiler import WorkflowCompiler
 
 
 class TextAnswer(TypedDict):

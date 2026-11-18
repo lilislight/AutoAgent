@@ -15,7 +15,8 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from autoagent import Workflow, WorkflowCompiler
+from autoagent import Workflow
+from autoagent.core.compiler import WorkflowCompiler
 
 from .models import ProjectCheck, ProjectError
 

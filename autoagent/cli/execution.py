@@ -108,7 +108,7 @@ def action_options(options, controls, value=None):
 
 def local_error(error):
     from pydantic import ValidationError
-    from autoagent import RuntimeTransitionError, WorkflowCompileError
+    from autoagent.core.errors import RuntimeTransitionError, WorkflowCompileError
     from autoagent.host import HostError, HostCapacityError, HostNotFoundError, HostRunConflict, ProjectError
     from autoagent.host.persistence.models import ConflictError
 

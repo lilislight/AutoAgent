@@ -12,11 +12,13 @@ from unittest.mock import patch
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp, BackoffPolicy, Capability, ConditionContext, Edge,
+    BackoffPolicy, Capability, ConditionContext, Edge,
     InputMappingContext, Map, Node, Operator, OutputBindingContext,
     Recovery, ResourcePolicy, RetryPolicy, Stream, StreamContext,
-    TimeoutPolicy, Wait, Workflow, WorkflowCompiler, WorkflowDefinitionSnapshot,
+    TimeoutPolicy, Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from autoagent.core.operators import OperatorCallContext
 from autoagent.core.runtime import (
     NodeStarted, OperatorCallFailed, OperatorCallStarted, RuntimeEvent,

@@ -1,0 +1,11 @@
+schema_version = 1
+
+[project]
+name = "release-note-assistant"
+lifespan = "workflows:resources"
+
+[[workflows]]
+entrypoint = "workflows:release_note_workflow"
+
+[[evaluations]]
+entrypoint = "evaluations:release_note_cases"

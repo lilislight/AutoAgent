@@ -15,7 +15,9 @@ from dataclasses import replace
 from sqlalchemy.engine import make_url
 from pydantic import TypeAdapter
 
-from autoagent import InvocationResult, InvocationWait, RuntimeErrorInfo, WorkflowCompiler
+from autoagent.core.app import InvocationResult, InvocationWait
+from autoagent.core.compiler import WorkflowCompiler
+from autoagent.core.runtime import RuntimeErrorInfo
 
 from .models import HostError, HostSettings, HostCapacityError, HostNotFoundError, HostRunConflict, ProjectCheck
 from .persistence import DatabaseSink
@@ -213,8 +215,6 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 workflows, declared_lifespan = self._project.load(self.environment)
                 lifespan = lifespan or declared_lifespan
             # Static checks precede creating databases or project resources.
-            from autoagent import WorkflowCompiler
-
             for application in self.applications.values():
                 workflows = application.prepare_workflows(workflows)
             self._discover_applications(workflows)
@@ -738,13 +738,13 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         return await self._execute(workflow_id, value, revision_id=revision_id, session_id=session_id,
             session_context=session_context, entry_node_id=entry_node_id)
 
-    async def execute_json(self, workflow_id, value, *, revision_id, entry_node_id, session_id=None, session_context=None, require_existing_session=False, require_new_session=False):
+    async def execute_json(self, workflow_id, value, *, revision_id, entry_node_id, session_id=None, session_context=None, require_existing_session=False, require_new_session=False, before_start=None):
         """Decode JSON against the registered Entry contract before normal Root admission."""
         return await self._execute(workflow_id, value, revision_id=revision_id, session_id=session_id,
             session_context=session_context, entry_node_id=entry_node_id, json_input=True,
-            require_existing_session=require_existing_session, require_new_session=require_new_session)
+            require_existing_session=require_existing_session, require_new_session=require_new_session, before_start=before_start)
 
-    async def _execute(self, workflow_id, value, *, revision_id=None, session_id=None, session_context=None, entry_node_id=None, json_input=False, require_existing_session=False, require_new_session=False):
+    async def _execute(self, workflow_id, value, *, revision_id=None, session_id=None, session_context=None, entry_node_id=None, json_input=False, require_existing_session=False, require_new_session=False, before_start=None):
         async def execute():
             if require_new_session and require_existing_session:
                 raise ValueError("Choose either a new or an existing Session.")
@@ -801,6 +801,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                     submission = await self._runtime.app.asubmit_invoke(
                         revision, incoming, session_id=sid,
                         session_context=session_context, entry_node_id=entry_node_id,
+                        before_start=before_start,
                     )
                     for child in old_children:
                         self._runtime.owners.pop(child, None)

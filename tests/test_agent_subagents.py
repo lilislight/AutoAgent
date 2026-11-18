@@ -67,22 +67,19 @@ class RoutedProvider:
 
 class SubagentConfigurationTests(unittest.TestCase):
     def test_distinct_endpoints_share_the_same_message_contract(self):
-        """Every Agent has a user Endpoint; enabled collaboration adds a distinct identical contract."""
+        """Both Signal Endpoints remain declared with the same contract when collaboration is disabled."""
         root = WorkflowCompiler().compile_or_raise(agent_workflow())
         enabled = WorkflowCompiler().compile_or_raise(agent_workflow(user_signal_endpoint="user.inbox",
             subagents=SubagentsConfig(enabled=True, signal_endpoint="team.inbox"), include_ask_user=True))
-        self.assertEqual([name for name, _ in root.signal_endpoints], ["agent.user"])
+        self.assertEqual(set(dict(root.signal_endpoints)), {"agent.user", SubagentsConfig().signal_endpoint})
         contracts = dict(enabled.signal_endpoints)
         self.assertEqual(set(contracts), {"user.inbox", "team.inbox"})
         self.assertIs(contracts["user.inbox"].annotation, AgentSignalMessage)
         self.assertIs(contracts["team.inbox"].annotation, AgentSignalMessage)
-        self.assertIn("prepare_wait_approved", {node.id for node in enabled.nodes})
         self.assertIn("prepare_wait", {node.id for node in enabled.nodes})
         self.assertEqual(enabled.node("prepare_wait").recovery_mode.mode, "never")
         self.assertEqual([(edge.source, edge.target) for edge in enabled.edges if edge.target == "wait_tools"],
             [("prepare_wait", "wait_tools")])
-        self.assertEqual([(edge.source, edge.target) for edge in enabled.edges if edge.target == "wait_tools_approved"],
-            [("prepare_wait_approved", "wait_tools_approved")])
         self.assertEqual([edge.target for edge in enabled.edges if edge.source == "tool_execute_approved"],
             ["complete_round"])
         with self.assertRaises(ValueError):
@@ -325,8 +322,8 @@ class SubagentContracts:
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(len(relations), 2)
 
-    async def test_collaboration_approval_then_native_select(self):
-        """Always Ask authorizes both calls before dispatch or native Select."""
+    async def test_collaboration_ignores_tool_approval_mode_and_deny(self):
+        """Native collaboration uses direct execution and Select under Always Ask and a deny rule."""
         def done(request):
             item = results(request)[-1]
             self.assertFalse(item.is_error, item)
@@ -335,15 +332,29 @@ class SubagentContracts:
             return answer()
         provider = RoutedProvider([response(call("get_agents", {}, "get"), call("wait_for", {
             "timeout_seconds": 0.01, "wake_on_message": False}, "wait")), done])
-        async with self.host(provider, defaults=settings(mode="always_ask")) as host:
-            waiting = await self.run_agent(host)
-            batch = restore(AgentApprovalRequest, waiting.waits[0].request)
-            self.assertEqual([request.call.name for request in batch.requests], ["get_agents", "wait_for"])
-            self.assertTrue(all(not request.operations for request in batch.requests))
-            await host.respond(waiting.invocation_id, waiting.waits[0].id, AgentApprovalResponse(
-                decisions=tuple(request.respond(approved=True) for request in batch.requests)).model_dump(mode="json"))
-            result = await self.settled(host, waiting.invocation_id)
+        async with self.host(provider, defaults=settings(mode="always_ask",
+                access=AgentAccess(default="deny", allowed_tools=()))) as host:
+            first = await self.run_agent(host)
+            result = await self.settled(host, first.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
+
+    async def test_project_tool_with_collaboration_name_uses_ordinary_approval(self):
+        """An enabled collaboration feature never grants its routing or exemption to a project Tool."""
+        def spawn_agent(text: str) -> str:
+            return text
+
+        provider = RoutedProvider([response(call("spawn_agent", {"text": "project result"}, "project")), answer()])
+        async with self.host(provider, root_config=SubagentsConfig(enabled=True),
+                defaults=settings(mode="always_ask"), tools=(Tool(spawn_agent),)) as host:
+            waiting = await self.run_agent(host)
+            self.assertEqual(waiting.status, "waiting", waiting.error)
+            self.assertEqual([wait.request["kind"] for wait in waiting.waits], ["agent.tool_approval"])
+            approval = restore(AgentApprovalRequest, waiting.waits[0].request)
+            self.assertEqual(approval.requests[0].call.name, "spawn_agent")
+            await host.respond(waiting.invocation_id, waiting.waits[0].id, AgentApprovalResponse(
+                decisions=(approval.requests[0].respond(approved=True),)).model_dump(mode="json"))
+            self.assertEqual((await self.settled(host, waiting.invocation_id)).status, "completed")
+            self.assertIn("project result", str(results(provider.requests[-1])[-1]))
 
     async def test_waits_register_and_wake_before_slow_tool_and_unrelated_approval_finish(self):
         """Independent Select Map wakes while a slow ordinary Tool and approval remain unfinished, then joins all results once."""

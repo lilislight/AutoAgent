@@ -10,7 +10,8 @@ import httpx
 from sqlalchemy import select, update
 from typing_extensions import TypedDict
 
-from autoagent import Edge, Node, Operator, Workflow, WorkflowDefinitionSnapshot
+from autoagent import Edge, Node, Operator, Workflow
+from autoagent.core.compiler import WorkflowDefinitionSnapshot
 from autoagent.core.compiler.snapshot import WORKFLOW_DEFINITION_SNAPSHOT_SCHEMA_VERSION, definition_digest
 from autoagent.host import AutoAgentHost, HostNotFoundError, HostSettings
 from autoagent.host.persistence.reading import SourceReader

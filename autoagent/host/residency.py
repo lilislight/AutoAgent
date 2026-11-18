@@ -10,7 +10,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
-from autoagent import RuntimeTransitionError
+from autoagent.core.errors import RuntimeTransitionError
 
 from .models import HostCapacityError
 from .memory_resources import MemoryResources

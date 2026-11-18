@@ -20,7 +20,6 @@ from typing_extensions import TypedDict
 
 from autoagent import (
     AggregationContext,
-    AutoAgentApp,
     ConditionContext,
     Edge,
     InputMappingContext,
@@ -28,10 +27,11 @@ from autoagent import (
     Node,
     OutputBindingContext,
     Recovery,
-    RuntimeTransitionError,
     Wait,
     Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeTransitionError
 from autoagent.core import (
     RuntimeRepository,
     RecoveryApplied,

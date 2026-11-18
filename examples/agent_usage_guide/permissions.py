@@ -9,7 +9,8 @@ import json
 
 from pydantic import BaseModel, ConfigDict
 
-from autoagent import AutoAgentApp, ConditionContext, Edge, InputMappingContext, Node, Wait, Workflow
+from autoagent import ConditionContext, Edge, InputMappingContext, Node, Wait, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     LLMToolCall, LLMToolResult, Tool, ToolApproval, ToolApprovalRequest,
     ToolContext, ToolDecision, ToolSet,

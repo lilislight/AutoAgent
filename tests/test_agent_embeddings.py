@@ -19,7 +19,8 @@ except ImportError:
     httpx = None
     AsyncOpenAI = None
 
-from autoagent import AutoAgentApp, Node, ValueContract, Workflow
+from autoagent import Node, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     EmbeddingProviderError, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage,
     EmbeddingVector, OpenAIEmbeddingAdapter, OpenAIEmbeddingProvider,

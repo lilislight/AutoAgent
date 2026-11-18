@@ -45,8 +45,8 @@
 从仓库根目录执行（覆盖本目录对应的运行输出）：
 
 ```bash
-.venv/bin/python artifacts/core_runtime_review/run_examples.py > artifacts/core_runtime_review/examples_run.log 2>&1
-.venv/bin/python artifacts/core_runtime_review/verify_exports.py
+.venv/bin/python docs/benchmarks/archive/core_runtime_review/run_examples.py > docs/benchmarks/archive/core_runtime_review/examples_run.log 2>&1
+.venv/bin/python docs/benchmarks/archive/core_runtime_review/verify_exports.py
 ```
 
 导出器通过 `runtime_event_sink` 接收 Runtime Events；`stream()` 中的 User Events 不作为 Runtime Events 混入文件。文件 Sink 对每条记录 flush/fsync 后才返回，因此测得的本次示例耗时包含文件持久化开销；独立基准未使用该文件 Sink。

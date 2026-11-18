@@ -13,7 +13,6 @@ from pydantic import BaseModel, ConfigDict
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp,
     Edge,
     InputMappingContext,
     Map,
@@ -21,6 +20,7 @@ from autoagent import (
     Wait,
     Workflow,
 )
+from autoagent.core.app import AutoAgentApp
 from autoagent.core import ValueContract
 
 

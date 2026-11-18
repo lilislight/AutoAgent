@@ -5,7 +5,8 @@ import statistics
 import time
 import tracemalloc
 
-from autoagent import AutoAgentApp, Node, Workflow
+from autoagent import Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from tests.benchmarks.benchmark_core_audit import identity
 
 

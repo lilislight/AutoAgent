@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 OUT = Path(__file__).resolve().parent
-sys.path.insert(0, str(OUT.parents[1]))
+sys.path.insert(0, str(OUT.parents[3]))
 from autoagent.core.runtime import RuntimeEvent, RuntimeState, StateReducer, SessionCheckpoint
 
 cases = ('approved_recovery_child', 'approval_rejected', 'manual_review')

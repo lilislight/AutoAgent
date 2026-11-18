@@ -14,7 +14,8 @@ from unittest.mock import patch
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from autoagent import AutoAgentApp, Edge, Node, ValueContract, Workflow
+from autoagent import Edge, Node, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     ImageContent, LLMMessage, LLMRequest, LLMResponse, LLMToolCall,
     LLMToolDefinition, LLMToolResult, OpenAIChatCompletionsProvider,

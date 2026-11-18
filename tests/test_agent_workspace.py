@@ -81,7 +81,7 @@ class WorkspaceContracts:
             self.assertIn('execute_command', {tool['name'] for tool in resources.json()['tools']})
             chosen['model'].update(model='draft-model')
             sent = await client.post('/api/v2/agent/queue', json={'session_id': 'loose', 'message': 'General question',
-                'request_id': uuid4().hex, 'workspace_id': None, 'initial_settings': chosen})
+                'item_id': uuid4().hex, 'workspace_id': None, 'initial_settings': chosen})
             self.assertEqual(sent.status_code, 202, sent.text)
             result = await host.join(sent.json()['invocation_id'])
             self.assertEqual(result.status, 'completed', result.error)
@@ -187,7 +187,7 @@ class WorkspaceContracts:
             self.assertEqual(usage.json()['session'], (await host.token_usage(session_id=sid)).model_dump(mode='json'))
 
     async def test_turn_usage_sums_nested_agents_without_other_turns_or_siblings(self):
-        """Turn totals include cross-Session descendants once and treat missing prices as zero."""
+        """Session usage and subagent browsing include descendants; turn totals stay isolated."""
         steps = iter([response(call('run_agent', {'type': 'agent', 'task': 'child leaf', 'wait_timeout_seconds': 30})),
                       answer('worker done')])
         class Provider(RoutedProvider):
@@ -225,17 +225,42 @@ class WorkspaceContracts:
                 await host._persistence.record_llm_call(record)
                 await host._persistence.record_llm_call(record)
             async def usage(iid, sid):
-                result = await client.get('/api/v2/agent/usage', params=dict(invocation_id=iid, session_id=sid))
+                params = dict(session_id=sid)
+                if iid is not None:
+                    params['invocation_id'] = iid
+                result = await client.get('/api/v2/agent/usage', params=params)
                 self.assertEqual(result.status_code, 200, result.text)
                 return result.json()
             totals = await usage(root.invocation_id, root.session_id)
             self.assertEqual((totals['invocation']['call_count'], totals['invocation']['total_tokens']), (5, 25))
             self.assertEqual(totals['invocation']['cost_usd'], '0.000045')
-            self.assertEqual(totals['session']['call_count'], 3)
+            session = (await usage(None, root.session_id))['session']
+            self.assertEqual(totals['session'], session)
+            self.assertEqual((session['call_count'], session['total_tokens'], session['cost_usd']), (6, 30, '0.000054'))
             own = await host.token_usage(invocation_id=root.invocation_id)
             self.assertEqual((own.call_count, own.total_tokens), (2, 10))
             subtree = (await usage(worker['invocation_id'], worker['session_id']))['invocation']
             self.assertEqual((subtree['call_count'], subtree['total_tokens'], subtree['cost_usd']), (2, 10, '0.000018'))
+            self.assertEqual((await usage(None, worker['session_id']))['session'], subtree)
+            agents, cursor = [], None
+            while True:
+                params = dict(session_id=root.session_id, limit=1)
+                if cursor:
+                    params['cursor'] = cursor
+                page = await client.get('/api/v2/agent/subagents', params=params)
+                self.assertEqual(page.status_code, 200, page.text)
+                payload = page.json()
+                agents.extend(payload['items'])
+                cursor = payload['next_cursor']
+                if not cursor:
+                    break
+                self.assertLess(len(agents), 4)
+            self.assertCountEqual([item['invocation_id'] for item in agents],
+                                  [item['invocation_id'] for item in (worker, sibling, leaf)])
+            self.assertCountEqual([item['task'] for item in agents], ['child worker', 'child sibling', 'child leaf'])
+            branch = await client.get('/api/v2/agent/subagents', params=dict(session_id=worker['session_id']))
+            self.assertEqual(branch.status_code, 200, branch.text)
+            self.assertEqual([item['invocation_id'] for item in branch.json()['items']], [leaf['invocation_id']])
             await host._persistence.record_llm_call(completed(running(llm_call_id='unpriced', requested_model='unknown',
                 invocation_id=leaf['invocation_id'], session_id=leaf['session_id'])))
             partial = (await usage(root.invocation_id, root.session_id))['invocation']

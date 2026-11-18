@@ -167,9 +167,12 @@ class AgentApplication:
         registered, callbacks = (), False
         if tool_id is not None:
             from autoagent.core.operators import run_sync
+            from autoagent.agent.workflow.builtins import tool_kind
             resources = self.context.shared_resources
             entry = await resources.describe(workspace_id, tool_id=tool_id,
                 scope="mcp" if tool_id.startswith("mcp/") else None)
+            if tool_kind(entry) != "tool":
+                raise ValueError("This native Agent tool has no configurable permissions.")
             call = LLMToolCall(name=entry.name, call_id="policy-preview", arguments=json.dumps(arguments))
             tool = resources._executable(entry.value)
             prepared = await run_sync(ToolSet((tool,))._prepare, call, current)
@@ -306,33 +309,11 @@ class AgentApplication:
         return await self.context.list_conversation_sessions(workspace_id, **kwargs)
 
     async def list_sessions(self, *, workspace_id=None, unbound=False, limit=20, cursor=None):
-        import asyncio
-        from autoagent.host import HostNotFoundError
         from autoagent.host.persistence.models import Page
         if not self.enabled:
             return Page(())
-        page = await self.context.list_conversation_sessions(workspace_id, limit=limit, cursor=cursor) if workspace_id is not None or unbound else (
-            await self.host.list_execution_sessions(workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,), limit=limit, cursor=cursor))
-        async def describe(row):
-            if row['workflow_count'] != 1:
-                return None
-            try:
-                info = await self.context.workspace_session(row['session_id'])
-            except HostNotFoundError:
-                return None
-            if info['parent_invocation_id'] is not None:
-                return None
-            current = await self.host.list_session_invocations(row['session_id'], limit=1, workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,))
-            if not current.items:
-                return None
-            record = await self.context.get_settings(row['session_id'])
-            return dict(session_id=row['session_id'], title=record.title or 'Chat', invocation_id=current.items[0]['invocation_id'],
-                status=current.items[0]['status'], control_state=current.items[0]['control_state'],
-                last_sequence=current.items[0]['last_sequence'],
-                updated_at_us=row['updated_at_us'], invocation_count=row['invocation_count'],
-                workspace_id=record.workspace.workspace_id if record.workspace else None, metadata_version=record.metadata_version)
-        items = await asyncio.gather(*(describe(row) for row in page.items))
-        return Page(tuple(item for item in items if item is not None), page.next_cursor)
+        return await self.context.list_conversation_summaries(workspace_id,
+            all_workspaces=workspace_id is None and not unbound, limit=limit, cursor=cursor)
 
     async def execution(self, invocation_id):
         import asyncio
@@ -354,9 +335,14 @@ class AgentApplication:
             family = await self.workspace_invocation(invocation_id)
             if family['current']['session_id'] != session_id:
                 raise ValueError('Execution belongs to another conversation.')
-        session = await self.host.token_usage(session_id=session_id)
+        session = await self.host.token_usage(session_id=session_id, include_descendants=True)
         invocation = await self.host.token_usage(invocation_id=invocation_id, include_descendants=True) if invocation_id else None
         return dict(session=session, invocation=invocation)
+
+    async def list_subagents(self, session_id, *, limit, cursor):
+        await self.workspace_session(session_id)
+        return await self.host._perform(lambda: self.context.storage(
+            "conversation_subagents", session_id, limit=limit, cursor=cursor))
 
     @asynccontextmanager
     async def runtime_scope(self, setup):

@@ -40,7 +40,7 @@ class Service:
         return None
 
     def catalog(self, snapshot):
-        return {item.name: SimpleNamespace(version="1", resource_id="test/tool/" + item.name)
+        return {item.name: SimpleNamespace(name=item.name, version="1", resource_id="test/tool/" + item.name)
             for item in self.definitions}, ()
 
     def finalize_catalog(self, snapshot, catalog, skills):

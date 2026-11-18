@@ -49,6 +49,8 @@ def measure(kind):
 def main():
     report={'calls':COUNT,'method':'5 timing samples without counters; separate instrumentation run; noop handler; 1 worker; pool creation/shutdown included',
         **{kind:measure(kind) for kind in ('burst_pool','persistent_pool_reference','completed_future')}}
-    Path('artifacts/core_performance_audit/dispatch.json').write_text(json.dumps(report,indent=2)+'\n')
+    output = Path('.autoagent/benchmarks/core_performance_audit/dispatch.json')
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(report, indent=2) + '\n')
     print(json.dumps(report,indent=2))
 if __name__=='__main__':main()

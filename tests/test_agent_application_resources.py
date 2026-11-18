@@ -176,7 +176,13 @@ class ApplicationResourceContracts:
             inventory = await manager.describe()
             builtin = [row for row in inventory['resources'] if row['origin'] == 'builtin']
             self.assertTrue(builtin)
-            self.assertTrue(all(row['permissions_editable'] for row in builtin))
+            native = [row for row in builtin if row["group_id"] in {"builtin/collaboration", "builtin/interaction"}]
+            self.assertEqual(len(native), 7)
+            self.assertTrue(all(not row["permissions_editable"] and not row["registered_policies"] for row in native))
+            self.assertTrue(all(row["permissions_editable"] for row in builtin if row not in native))
+            with self.assertRaisesRegex(ValueError, "disabled"):
+                await manager.save(ResourceControl(name="Ask user", resource_id="builtin/tool/ask_user",
+                    permissions=ToolPolicy(default="deny")))
             groups = [row for row in inventory['groups'] if row['origin'] == 'builtin']
             self.assertTrue(all(not row['permissions_editable'] for row in groups))
             entry = next(row for row in builtin if row['name'] == 'read_file')
@@ -211,6 +217,39 @@ class ApplicationResourceContracts:
             denied = await host.join(await application.start_conversation('denied', 'Read the test file'))
             self.assertEqual(denied.status, 'completed', denied.error)
             self.assertIn('tool_access_denied', str(provider.requests[-1].input))
+
+    async def test_target_based_read_rules_apply_to_search_but_not_listing(self):
+        """Protecting a file from reads also excludes it from direct and recursive content search."""
+        from autoagent.agent import LLMResponse, LLMToolCall, LLMToolResult, ToolPolicy
+        from tests.test_agent_workflow import answer
+
+        (self.root / "secret.txt").write_text("TOKEN=Q")
+        (self.root / "public.txt").write_text("TOKEN=Q")
+        operations = (
+            ("search_files", {"query": "TOKEN=Q"}),
+            ("search_files", {"path": "secret.txt", "query": "TOKEN=Q"}),
+            ("list_files", {}),
+            ("manage_files", {"request": {"operation": "copy", "path": "secret.txt", "destination": "copy.txt"}}),
+        )
+        provider = ScriptedProvider(LLMResponse(model="offline", finish_reason="tool_calls", output=tuple(
+            LLMToolCall(name=name, call_id=str(index), arguments=json.dumps(arguments))
+            for index, (name, arguments) in enumerate(operations)
+        )), answer())
+        async with self.product(provider=provider) as host:
+            app = host.applications["agent"]
+            policy = ToolPolicy(rules=[dict(
+                when=dict(field='operation["attributes"].path', op="equals", value="secret.txt"), decision="deny")])
+            await app.context.shared_resources.save(ResourceControl(name="Read files",
+                resource_id="builtin/tool/read_file", permissions=policy))
+            result = await host.join(await app.start_conversation("search", "Search and list"))
+            self.assertEqual(result.status, "completed", result.error)
+            results = [item.structured_content for item in provider.requests[-1].input if isinstance(item, LLMToolResult)]
+            self.assertIn("public.txt", str(results[0]))
+            self.assertNotIn("secret.txt", str(results[0]))
+            self.assertEqual(results[1]["error"]["kind"], "tool_access_denied")
+            self.assertIn("secret.txt", str(results[2]))
+            self.assertEqual(results[3]["error"]["kind"], "tool_access_denied")
+            self.assertFalse((self.root / "copy.txt").exists())
 
     async def test_stored_builtin_overrides_cannot_change_native_permissions(self):
         """The Host lock keeps stored Built-in overrides dormant while switches remain editable."""

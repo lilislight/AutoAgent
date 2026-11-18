@@ -1,5 +1,6 @@
 """Construct complete graph bundles from recorded per-Session test prefixes."""
-from autoagent import AppCheckpoint, RuntimeGraphCheckpoint
+from autoagent.core.app import AppCheckpoint
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 
 def graph_bundle(sessions):
@@ -34,7 +35,7 @@ def session_checkpoints(checkpoint):
 
 def load_graph(app, checkpoint):
     """Wrap a single-Root recorded prefix for tests of non-graph behavior."""
-    from autoagent import SessionCheckpoint
+    from autoagent.core.runtime import SessionCheckpoint
     if isinstance(checkpoint, SessionCheckpoint):
         checkpoint = RuntimeGraphCheckpoint(checkpoint.session_id, (checkpoint,))
     return app.load_checkpoint(checkpoint)
@@ -53,7 +54,7 @@ def child_refs(app, parent):
 
 def inspect_result(app, ref):
     """Read a Child's immutable State for assertions without a public Child API."""
-    from autoagent import InvocationResult, InvocationWait
+    from autoagent.core.app import InvocationResult, InvocationWait
     from autoagent.core.runtime import thaw
     sid = ref.session_id
     async def run():
@@ -103,7 +104,7 @@ async def async_children(app, ref):
 
 async def async_join_observed(app, ref, timeout=None):
     import asyncio
-    from autoagent import InvocationResult, InvocationWait
+    from autoagent.core.app import InvocationResult, InvocationWait
     from autoagent.core.runtime import thaw
     sid = ref.session_id
     if sid not in app._child_owners:
@@ -128,7 +129,7 @@ async def async_resume_graph_wait(app, ref, wait_id, response):
 
 
 async def resume_graph_wait_internal(app, ref, wait_id, response, *, wait_for_boundary=True):
-    from autoagent import InvocationResult, InvocationWait
+    from autoagent.core.app import InvocationResult, InvocationWait
     from autoagent.core.runtime import thaw
     root = app._root_session_id(ref.session_id)
     root_ref = app._ref_for_invocation(root, app._repository.state(root).invocation)

@@ -13,7 +13,8 @@ class ApplicationResources(AgentResources):
         if context is None:
             return self.catalog()
         service = self.service
-        workflow_id = service.workflow_options(context).workflow_id
+        options = service.workflow_options(context)
+        workflow_id = options.workflow_id
         from .workflow import BUILTIN_AGENT_WORKFLOW_ID
         if workflow_id != BUILTIN_AGENT_WORKFLOW_ID:
             raise ValueError("Application resources are restricted to the Agent application.")
@@ -21,8 +22,15 @@ class ApplicationResources(AgentResources):
             tools, skills = self.catalog()
             workspace_tools, workspace_skills = service._workspaces.catalog(context, workflow_id)
             tools, skills = (*tools, *workspace_tools), (*skills, *workspace_skills)
-            managed_tools, managed_skills = service.shared_resources.catalog((tools, skills))
+            managed_tools, managed_skills = self.managed_catalog(options, tools, skills)
             return ((*tools, *managed_tools), service.shared_resources.filter((*skills, *managed_skills)))
+
+    def managed_catalog(self, options, tools, skills):
+        names = {"ask_user"} if options.include_ask_user else set()
+        if options.subagents.enabled:
+            from autoagent.agent.workflow.builtins import _resources
+            names.update(_resources(options.subagents.model_dump_json()))
+        return self.service.shared_resources.catalog((tools, skills), tool_names=names)
 
     def filter_tools(self, tools, *, context=None):
         return self.service.shared_resources.filter(tools)

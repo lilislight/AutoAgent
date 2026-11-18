@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import type { WorkflowGraphData } from '../types';
 import { Tooltip, ValueTip } from './Tooltip';
 import { ToolButton, CopyIcon, CheckIcon } from './ToolButton';
+import { copyText } from '../clipboard';
 
 type Identity = Pick<WorkflowGraphData, 'workflow_id' | 'workflow_version' | 'workflow_revision_id'>;
 
@@ -14,14 +15,9 @@ export function WorkflowIdentityDetails({ workflow }: { workflow: Identity }) {
   const [feedback, setFeedback] = useState<{ value: string; failed: boolean } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  const copy = async (value: string) => {
+  const copy = async (trigger: HTMLButtonElement, value: string) => {
     clearTimeout(timer.current);
-    try {
-      await navigator.clipboard.writeText(value);
-      setFeedback({ value, failed: false });
-    } catch {
-      setFeedback({ value, failed: true });
-    }
+    setFeedback({ value, failed: !await copyText(value, trigger) });
     timer.current = setTimeout(() => setFeedback(null), 2000);
   };
   return <div className="workflow-identity-details">
@@ -30,7 +26,7 @@ export function WorkflowIdentityDetails({ workflow }: { workflow: Identity }) {
       ['Version', workflow.workflow_version],
       ['Revision ID', workflow.workflow_revision_id],
     ].map(([label, value]) => <div className="workflow-identity-field" key={label}>
-      <dt>{label}</dt><dd><code>{value}</code><ToolButton className="workflow-identity-copy" label={`Copy ${label}`} onClick={() => void copy(value)}>{feedback?.value===value&&!feedback.failed?<CheckIcon/>:<CopyIcon/>}</ToolButton></dd>
+      <dt>{label}</dt><dd><code>{value}</code><ToolButton className="workflow-identity-copy" label={`Copy ${label}`} onClick={event => void copy(event.currentTarget, value)}>{feedback?.value===value&&!feedback.failed?<CheckIcon/>:<CopyIcon/>}</ToolButton></dd>
     </div>)}</dl>
     <div className="workflow-identity-feedback" role="status">{feedback ? feedback.failed ? 'Could not copy. Select the value and copy it.' : 'Copied' : null}</div>
   </div>;

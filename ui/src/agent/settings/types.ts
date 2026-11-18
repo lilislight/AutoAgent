@@ -18,13 +18,13 @@ export interface Resource {
   origin: 'builtin' | 'project' | 'mcp' | 'manual' | 'workspace' | 'shared'; source_id?: string; workspace_id?: string; remote_name?: string;
   description: string; location?: string; input_schema?: Record<string, unknown>; operation_schema?: Record<string, unknown> | null;
   available: boolean; enabled: boolean; enabled_editable?: boolean; custom_policy?: Policy | null;
-  registered_policies?: { source: 'code' | 'group' | 'source'; policy: Policy }[];
+  registered_policies?: { source: 'code' | 'group' | 'source' | 'file_read'; policy: Policy }[];
   permissions_editable: boolean; policy_in_code?: boolean;
-  mcp_status?: 'ready' | 'offline' | 'removed' | 'connecting' | 'review';
+  mcp_status?: 'ready' | 'offline' | 'removed' | 'connecting' | 'review' | 'conflict';
   schema_version?: string; approved_schema?: Record<string, unknown> | null;
 }
 export interface Group { id: string; name: string; origin: Resource['origin']; resources: Resource[]; enabled: boolean; permissions: Policy | null; permissions_editable: boolean }
-export interface Inventory { items: ConfigRecord[]; resources: Resource[]; groups: Group[]; workspace_id: string; revision: number; edit_code_permissions: boolean; policy_schema: Record<string, unknown> }
+export interface Inventory { items: ConfigRecord[]; resources: Resource[]; groups: Group[]; skill_diagnostics?: { location: string; message: string }[]; workspace_id: string; revision: number; edit_code_permissions: boolean; policy_schema: Record<string, unknown> }
 export interface ConfiguredModel {
   id: string; name: string; enabled: boolean; url: string | null;
   reasoning_effort: { values: string[]; default: string } | null;

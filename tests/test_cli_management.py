@@ -402,7 +402,7 @@ class RemoteManagementTests(ManagementFixture, unittest.IsolatedAsyncioTestCase)
         from tests.test_exploration import identity
         # Register an additional saved Revision through the owned Persistence,
         # without changing the Host's currently registered catalog.
-        from autoagent import WorkflowCompiler, WorkflowDefinitionSnapshot
+        from autoagent.core.compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
         ir = WorkflowCompiler().compile_or_raise(Workflow('cli-diff', version='2', nodes=[Node('entry', identity)]))
         snapshot = WorkflowDefinitionSnapshot.from_workflow_ir(ir)
         await self.host._persistence.register_workflow(snapshot)

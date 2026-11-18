@@ -8,7 +8,8 @@ import statistics
 import time
 import tracemalloc
 from typing_extensions import TypedDict
-from autoagent import AutoAgentApp, Workflow, Node, Map, InputMappingContext
+from autoagent import Workflow, Node, Map, InputMappingContext
+from autoagent.core.app import AutoAgentApp
 
 
 class Input(TypedDict):

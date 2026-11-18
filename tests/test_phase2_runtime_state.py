@@ -1,7 +1,7 @@
 """Canonical Event, Delta, Repository and stage recovery boundaries."""
 from __future__ import annotations
 
-from autoagent import RuntimeGraphCheckpoint
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 from tests.graph_fixtures import (
     load_graph,
@@ -15,9 +15,20 @@ from dataclasses import replace
 from unittest.mock import patch
 from typing_extensions import TypedDict
 
-from autoagent import (AutoAgentApp, ContextOperation, ContextPatch, Edge, Map, Node,
-    Workflow, InputMappingContext, OutputBindingContext, ConditionContext, AggregationContext,
-    RuntimeInfrastructureError, RuntimeTransitionError)
+from autoagent import (
+    ContextOperation,
+    ContextPatch,
+    Edge,
+    Map,
+    Node,
+    Workflow,
+    InputMappingContext,
+    OutputBindingContext,
+    ConditionContext,
+    AggregationContext,
+)
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError, RuntimeTransitionError
 from autoagent.core.runtime import (RuntimeEvent, RuntimeState, StateReducer, StateDelta,
     StateOperation, RuntimeRepository, SessionOpened,
     InvocationStarted, InputMapped, OperatorCallStarted, OperatorCallCompleted,

@@ -14,7 +14,8 @@ import json
 import os
 from unittest.mock import patch
 
-from autoagent import AutoAgentApp, Node, Stream, ValueContract, Workflow
+from autoagent import Node, Stream, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     DeepSeekProvider, DeepSeekProviderConfig, LiteLLMProvider, LiteLLMProviderConfig,
     LLM_CALL, LLMMessage, LLMProviderOptions, LLMRequest, LLMResponse,

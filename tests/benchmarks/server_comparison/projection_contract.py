@@ -6,7 +6,17 @@ import json
 from pathlib import Path
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, AggregationContext, ConditionContext, Edge, InputMappingContext, Map, Node, Wait, Workflow
+from autoagent import (
+    AggregationContext,
+    ConditionContext,
+    Edge,
+    InputMappingContext,
+    Map,
+    Node,
+    Wait,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.compiler.snapshot import WorkflowDefinitionSnapshot
 from autoagent.core.runtime.events import RuntimeEvent
 from autoagent.host.persistence import DatabaseSink, PersistenceConfig

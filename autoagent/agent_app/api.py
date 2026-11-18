@@ -1,8 +1,9 @@
 """Agent application configuration and chat routes over reusable Host capabilities."""
 
-from typing import Literal
+import asyncio
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Path, Query, Response
 from fastapi.routing import APIRoute
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -13,6 +14,7 @@ from autoagent.agent_app.resource_config import AgentResourceConfig
 from autoagent.agent import ToolPolicy
 from autoagent.agent import ToolOperation
 from autoagent.host.persistence import ConflictError
+from .images import MAX_IMAGES, ImageUpload, prepare_uploads
 
 
 class ConfigureAgent(BaseModel):
@@ -25,13 +27,20 @@ class ConfigureAgent(BaseModel):
 class AgentMessage(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     session_id: str = Field(min_length=1, max_length=512)
-    message: str = Field(min_length=1)
+    message: str
+    images: list[ImageUpload] = Field(default_factory=list, max_length=MAX_IMAGES)
     workspace_id: str | None = Field(None, min_length=1, max_length=512)
     model: AgentModelSelection | None = None
 
+    @model_validator(mode="after")
+    def _message_content(self):
+        if not self.message.strip() and not self.images:
+            raise ValueError("Provide a message or an image.")
+        return self
+
 
 class QueuedAgentMessage(AgentMessage):
-    request_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
+    item_id: str = Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_-]+$")
     send_to: str | None = Field(None, min_length=1, max_length=512)
     initial_settings: ApplicationSessionSettings | None = None
 
@@ -174,9 +183,20 @@ def agent_router(application, settings, query, *, user_events):
 
     @router.post('/agent/messages', status_code=202)
     async def send_message(body: AgentMessage):
-        ref = await agent_query(application.start_conversation(body.session_id, body.message, body.workspace_id,
-            unbound="workspace_id" in body.model_fields_set and body.workspace_id is None, model=body.model))
+        async def send():
+            uploads = await asyncio.to_thread(prepare_uploads, body.session_id, body.images) if body.images else ()
+            return await application.start_conversation(body.session_id, body.message, body.workspace_id,
+                unbound="workspace_id" in body.model_fields_set and body.workspace_id is None, model=body.model, uploads=uploads)
+        ref = await agent_query(send())
         return dict(accepted=True, invocation_id=ref.invocation_id, session_id=ref.session_id)
+
+    @router.get('/agent/images/{image_id}')
+    async def read_image(image_id: Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")]):
+        asset = await agent_query(application.storage.context("image", image_id))
+        if asset is None:
+            raise HTTPException(404, detail="Image is unavailable.")
+        return Response(asset.data, media_type=asset.mime_type,
+            headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
     @router.get('/agent/queue')
     async def message_queue(session_id: str = Query(min_length=1, max_length=512)):
@@ -184,9 +204,12 @@ def agent_router(application, settings, query, *, user_events):
 
     @router.post('/agent/queue', status_code=202)
     async def queue_message(body: QueuedAgentMessage):
-        return await agent_query(application.queue_submit(body.session_id, body.message,
-            body.request_id, body.workspace_id, send_to=body.send_to,
-            unbound="workspace_id" in body.model_fields_set and body.workspace_id is None, initial_settings=body.initial_settings, model=body.model))
+        async def send():
+            uploads = await asyncio.to_thread(prepare_uploads, body.session_id, body.images) if body.images else ()
+            return await application.queue_submit(body.session_id, body.message, body.item_id, body.workspace_id,
+                send_to=body.send_to, unbound="workspace_id" in body.model_fields_set and body.workspace_id is None,
+                initial_settings=body.initial_settings, model=body.model, uploads=uploads)
+        return await agent_query(send())
 
     @router.post('/agent/queue/actions')
     async def queue_action(body: QueueAction):
@@ -211,6 +234,14 @@ def agent_router(application, settings, query, *, user_events):
     @router.patch('/agent/sessions/{session_id}/title')
     async def rename_conversation(session_id: str, body: RenameConversation):
         return await agent_query(application.rename_conversation(session_id, body.title, expected_version=body.expected_version))
+
+    @router.get('/agent/subagents')
+    async def subagents(session_id: str = Query(min_length=1, max_length=512),
+                        cursor: str | None = Query(None, max_length=4096),
+                        limit: int = Query(20, ge=1, le=100)):
+        scope = ["agent.subagents", session_id]
+        page = await agent_query(application.list_subagents(session_id, limit=limit, cursor=_browse_cursor(cursor, scope)))
+        return dict(items=page.items, next_cursor=_browse_encode(page.next_cursor, scope))
 
     @router.get('/agent/invocations')
     async def invocations(session_id: str = Query(min_length=1, max_length=512),

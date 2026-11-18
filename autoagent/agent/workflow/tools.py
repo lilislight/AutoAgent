@@ -1,17 +1,15 @@
 """Shared dynamic Tool dispatch for both Map branches."""
 
-import json
-
 from ..context import current_agent_context, plain
 from ..models import LLMToolResult
-from ..tools import ToolApprovalRequired, ToolExecutionError, ToolOutputError
+from ..tools import ToolApprovalRequired, ToolContext, ToolExecutionError, ToolOutputError
 from ..tools.execution import error_result
 from ..tools.context import tool_context
 from .context import definition_hash
-from .models import ApprovedTools, AuthorizationObservation, ToolBranchResult, ToolTask
-from .builtins import workflow_catalog
+from .models import AuthorizationObservation, ToolBranchResult, ToolTask
+from .builtins import tool_kind, workflow_catalog
 from .resources import resource_permissions
-from .subagents import BUILTIN_NAMES, WaitPreparation, DeferredToolWait
+from .subagents import WaitPreparation, DeferredToolWait
 
 
 def authorization_binding(task):
@@ -25,27 +23,12 @@ def binding_error(service, snapshot, task, *, catalog=None):
     entry = catalog.get(task.call.name)
     if entry is None:
         return error_result(task.call, "tool_unavailable", "The Tool is no longer registered.")
-    options = service.workflow_options(snapshot)
-    kind = ("ask_user" if options.include_ask_user and task.call.name == "ask_user" else
-        "agent_builtin" if options.subagents.enabled and task.call.name in BUILTIN_NAMES else "tool")
-    if task.binding.kind != kind:
+    if task.binding.kind != tool_kind(entry):
         return error_result(task.call, "tool_binding_changed", "The Tool execution kind changed.")
     if (entry.resource_id != task.binding.resource_id or entry.version != task.binding.version
             or definition_hash(entry.value.definition) != task.binding.definition_hash):
         return error_result(task.call, "tool_binding_changed", "The Tool binding changed after the model request.")
     return None
-
-
-def route_tool(task, *, allow, questions, waits):
-    if task.binding.kind == "ask_user":
-        questions.append(task)
-    elif task.binding.kind == "agent_builtin" and (
-        task.call.name in {"run_agent", "wait_for"}
-        or task.call.name == "send_message" and json.loads(task.call.arguments).get("wait_timeout_seconds") is not None
-    ):
-        waits.append(task)
-    else:
-        allow.append(task)
 
 
 async def branch_tools(value):
@@ -70,6 +53,21 @@ async def branch_tools(value):
         if error is not None:
             immediate.append(error)
             continue
+        if task.binding.kind != "tool":
+            checked = catalog[call.name].value._prepare(call)
+            if isinstance(checked, LLMToolResult):
+                immediate.append(checked)
+                continue
+            decisions.append(AuthorizationObservation(call_id=call.call_id,
+                approval_mode=snapshot.settings.approval_mode, effective_action="allow"))
+            if task.binding.kind == "ask_user":
+                questions.append(task)
+            elif call.name in {"run_agent", "wait_for"} or (
+                    call.name == "send_message" and checked[0]["wait_timeout_seconds"] is not None):
+                waits.append(task)
+            else:
+                allow.append(task)
+            continue
         tools = service.toolset(snapshot, binding=authorization_binding(task), catalog=catalog)
         tools.context = await service.tool_context(snapshot, call, context=tools.context, phase="preflight")
         with tool_context(tools.context):
@@ -87,7 +85,7 @@ async def branch_tools(value):
         elif decision.action == "ask":
             ask.append(task.model_copy(update={"approval_request": decision.approval_request}))
         else:
-            route_tool(task, allow=allow, questions=questions, waits=waits)
+            allow.append(task)
     return ToolBranchResult(allow=tuple(allow), ask=tuple(ask), questions=tuple(questions), waits=tuple(waits),
         immediate=tuple(immediate), decisions=tuple(decisions))
 
@@ -100,6 +98,14 @@ async def execute_tool(task: ToolTask) -> LLMToolResult:
     return result
 
 
+async def _prepare_tool_workspace(service, snapshot, task):
+    prepare = getattr(service, "prepare_tool_workspace", None)
+    if prepare is not None:
+        await prepare(snapshot, task.binding.resource_id)
+    else:
+        await service.prepare_workspace(snapshot)
+
+
 async def _invoke_tool(task: ToolTask) -> LLMToolResult:
     if task.observation is not None:
         return task.observation
@@ -108,11 +114,13 @@ async def _invoke_tool(task: ToolTask) -> LLMToolResult:
         return approval_denied_result(task.call, task.approval)
     service = current_agent_context()
     snapshot = await service.snapshot()
-    await service.prepare_workspace(snapshot)
+    await _prepare_tool_workspace(service, snapshot, task)
     catalog, _ = workflow_catalog(service, snapshot)
     error = binding_error(service, snapshot, task, catalog=catalog)
     if error is not None:
         return error
+    if task.binding.kind != "tool":
+        return await _invoke_native_tool(task, snapshot, catalog[task.call.name].value)
     tools = service.toolset(snapshot, binding=authorization_binding(task), catalog=catalog,
         observations=task.observed_versions)
     tools.context = await service.tool_context(snapshot, task.call, context=tools.context, phase="execution")
@@ -125,7 +133,7 @@ async def _invoke_tool(task: ToolTask) -> LLMToolResult:
             self.result = result
     async def verify_binding(call, context):
         if snapshot.settings.workspace is not None:
-            await service.prepare_workspace(snapshot)
+            await _prepare_tool_workspace(service, snapshot, task)
         error = binding_error(service, snapshot, task)
         if error is not None:
             raise BindingChanged(error)
@@ -156,7 +164,20 @@ async def _invoke_tool(task: ToolTask) -> LLMToolResult:
     except ToolExecutionError as error:
         return error_result(task.call, "tool_execution_error", str(error))
 
-    if task.binding.kind == "agent_builtin" and not result.is_error:
+    return result
+
+
+async def _invoke_native_tool(task, snapshot, tool):
+    context = ToolContext(session_id=snapshot.session_id,
+        services={"agent_snapshot": snapshot, "agent_observations": task.observed_versions})
+    try:
+        with tool_context(context):
+            result = await tool.ainvoke(task.call, context=context)
+    except ToolOutputError as error:
+        return error_result(task.call, "tool_output_error", str(error))
+    except ToolExecutionError as error:
+        return error_result(task.call, "tool_execution_error", str(error))
+    if not result.is_error:
         record = dict(result.structured_content)
         versions = record.pop("_agent_versions", {})
         result = result.model_copy(update={"structured_content": record,
@@ -164,23 +185,9 @@ async def _invoke_tool(task: ToolTask) -> LLMToolResult:
     return result
 
 
-async def route_approved_tools(batch: ApprovedTools) -> ToolBranchResult:
-    """Route authorized system calls into their native Workflow nodes."""
-    allow, questions, waits, immediate = [], [], [], []
-    for task in batch.tasks:
-        if task.binding.kind == "ask_user":
-            # The question handler only validates and prepares the native Wait input.
-            result = await _invoke_tool(task)
-            if result.is_error or task.observation is not None:
-                immediate.append(result)
-                continue
-        route_tool(task, allow=allow, questions=questions, waits=waits)
-    return ToolBranchResult(allow=tuple(allow), questions=tuple(questions), waits=tuple(waits), immediate=tuple(immediate))
-
-
 async def prepare_tool_wait(task: ToolTask) -> WaitPreparation:
     """Perform only the nonblocking prelude and produce a native Select request."""
-    if task.binding.kind != "agent_builtin":
+    if task.binding.kind != "agent_builtin" or task.call.name not in {"run_agent", "wait_for", "send_message"}:
         raise ValueError("Only waiting collaboration calls enter prepare_wait.")
     result = await _invoke_tool(task)
     if not result.is_error:

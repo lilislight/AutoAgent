@@ -16,7 +16,8 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from autoagent import AutoAgentApp, Node, ValueContract, Workflow
+from autoagent import Node, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     AudioContent, FileContent, ImageContent, LLMMessage, LLMRequest, LLMToolCall,
     LLMToolResult, OpenAIChatCompletionsProvider, OpenAIProviderConfig, OpenAIResponsesProvider,

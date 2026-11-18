@@ -7,6 +7,10 @@ Python 环境中共存；安装 V2 wheel 会按正常升级语义替换旧版本
 全部属于 V2。完整 V1 项目归档在 `v1/`，其中包含旧源码、测试、UI、文档、Skills、
 Skill Evals、示例与构建文件，仅供历史参考，不参与 V2 导入、构建或测试。
 
+- [设计和评审](designs/)保存设计稿、评审和 UI 原型。
+- [基准报告](benchmarks/)保存基准结果，[早期记录](benchmarks/archive/)包含对应的报告、日志和复现脚本。
+- 当前基准脚本位于 `tests/benchmarks/`，默认写文件的 Core 基准将本次结果放在 `.autoagent/benchmarks/`。
+
 V2 是独立的 Workflow Runtime，当前包含 Core、Host、本地持久化和只读 Tracing：
 
 - Workflow 静态定义、名义值契约、Compiler、Revision 与不可变 `WorkflowIR`；

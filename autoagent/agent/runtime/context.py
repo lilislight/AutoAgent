@@ -475,6 +475,8 @@ class AgentRuntime:
             # its original response; future dispatch still checks availability.
             return None
         adapter = getattr(provider, "adapter", None)
+        supports_tool_media = getattr(provider, "supports_tool_media", None)
+        tool_media = supports_tool_media(model) if callable(supports_tool_media) else getattr(adapter, "tool_media", False)
         config = getattr(provider, "config", None)
         def identity(value):
             return type(value).__module__ + "." + type(value).__qualname__ if value is not None else None
@@ -484,7 +486,7 @@ class AgentRuntime:
         }, sort_keys=True).encode()).hexdigest()
         return HistoryRoute(provider=provider_name or snapshot.settings.model.provider, version=version, model=model,
             provider_id=getattr(provider, "provider_id", None), protocol=getattr(provider, "protocol", None),
-            connection=connection, tool_media=getattr(adapter, "tool_media", False),
+            connection=connection, tool_media=tool_media,
             context_role=provider.context_message_role(model) if callable(getattr(provider, "context_message_role", None)) else "user")
 
     async def resolve_selection(self, request):
@@ -507,6 +509,9 @@ class AgentRuntime:
             version=snapshot.bindings["provider"])
         return LLMSelection(resource.value, request.model)
 
+    async def resolve_request_media(self, request):
+        return request
+
     def install_operators(self, setup, workflows):
         """Route managed requests without changing custom/non-Agent selection."""
         if not any(getattr(getattr(node.executable, "handler", None), "__autoagent_options__", None) is not None
@@ -520,8 +525,10 @@ class AgentRuntime:
         async def invoke(request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
             snapshot = await self.snapshot()
             selection = await self.resolve_selection(request)
-            origin = self.for_call().history_route(snapshot, request.model, provider=selection.provider,
+            context = self.for_call()
+            origin = context.history_route(snapshot, request.model, provider=selection.provider,
                 provider_name=request.routing.get("compaction_provider"))
+            request = await context.resolve_request_media(request)
             source = _invoke_provider(selection.provider, request)
             try:
                 async for chunk in source:

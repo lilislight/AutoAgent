@@ -9,7 +9,15 @@ from unittest.mock import patch
 
 from typing_extensions import TypedDict
 from autoagent import Await, Edge, Node, Spawn, Wait, Workflow, Map, Recovery, InputMappingContext, ConditionContext
-from autoagent import SignalEndpoint, ReceiveSignal, SendSignal, OwnerHandle, AutoAgentApp, UserEventContext, UserEventSpec
+from autoagent import (
+    SignalEndpoint,
+    ReceiveSignal,
+    SendSignal,
+    OwnerHandle,
+    UserEventContext,
+    UserEventSpec,
+)
+from autoagent.core.app import AutoAgentApp
 from autoagent.host import AutoAgentHost, HostSettings, HostRunConflict
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 

@@ -163,14 +163,19 @@ class LLMCallStorage:
         for key in ("invocation_id", "node_id", "session_id", "workflow_id", "workflow_revision_id", "kind", "provider_id", "requested_model"):
             value = getattr(query, key)
             if value is not None:
-                if key == "invocation_id" and query.include_descendants:
+                if query.include_descendants and (key == "invocation_id" or
+                        key == "session_id" and query.invocation_id is None):
                     # Select a subtree, including descendants in other Sessions.
                     # UNION keeps each Invocation once even for malformed cycles.
                     invocations = meta.tables["invocations"]
-                    family = select(literal(value).cast(invocations.c.invocation_id.type).label("invocation_id")).cte(recursive=True)
+                    seed = (select(invocations.c.invocation_id).where(invocations.c.session_id == value)
+                            if key == "session_id" else
+                            select(literal(value).cast(invocations.c.invocation_id.type).label("invocation_id")))
+                    family = seed.cte(recursive=True)
                     family = family.union(select(invocations.c.invocation_id).join(
                         family, invocations.c.parent_invocation_id == family.c.invocation_id))
-                    clauses.append(llm_calls.c.invocation_id.in_(select(family.c.invocation_id)))
+                    descendants = llm_calls.c.invocation_id.in_(select(family.c.invocation_id))
+                    clauses.append(or_(llm_calls.c.session_id == value, descendants) if key == "session_id" else descendants)
                 else:
                     clauses.append(llm_calls.c[key] == value)
         if query.start is not None:

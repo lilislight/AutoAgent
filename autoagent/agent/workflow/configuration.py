@@ -18,8 +18,7 @@ AgentNodeId = Literal[
     "start", "prepare_context", "compact_context", "build_request", "llm_call",
     "tool_branch", "tool_execute", "wait_approval", "tool_execute_approved",
     "complete_round", "finish",
-    "ask_user", "prepare_wait", "wait_tools", "collect_wait_results", "route_approved",
-    "ask_user_approved", "prepare_wait_approved", "wait_tools_approved", "collect_wait_results_approved",
+    "ask_user", "prepare_wait", "wait_tools", "collect_wait_results",
 ]
 
 NODE_IDS = frozenset(get_args(AgentNodeId))

@@ -11,7 +11,8 @@ from unittest.mock import patch
 
 from sqlalchemy import event, select
 
-from autoagent import UsagePolicy, ResourceBudgetExceeded, UsageAccountingError
+from autoagent import UsagePolicy
+from autoagent.core.usage import ResourceBudgetExceeded, UsageAccountingError
 from autoagent.agent import LocalTokenPricing, TokenPrice, TokenUsageQuery
 from autoagent.agent.usage import TokenUsageCheck
 from autoagent.core.money import usd_units, units_usd

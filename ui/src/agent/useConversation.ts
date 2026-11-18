@@ -84,6 +84,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
     const visible = () => {
       cancelAnimationFrame(frame); frame = 0; pending = [];
       if (!document.hidden) {
+        if (source.readyState === EventSource.CLOSED) setEpoch(value => value + 1);
         dispatch({ type: 'reset' });
         void client.invalidateQueries({ queryKey: ['agent-history', session] });
         void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
@@ -91,8 +92,17 @@ export function useConversation(session: string, invocations: AgentInvocation[],
         void client.invalidateQueries({ queryKey: ['agent-queue', session] });
       }
     };
+    const restored = (event: PageTransitionEvent) => { if (event.persisted) setEpoch(value => value + 1); };
+    const online = () => { if (source.readyState !== EventSource.OPEN) setEpoch(value => value + 1); };
     document.addEventListener('visibilitychange', visible);
-    return () => { source.close(); clearTimeout(retry); cancelAnimationFrame(frame); document.removeEventListener('visibilitychange', visible); };
+    window.addEventListener('pageshow', restored);
+    window.addEventListener('online', online);
+    return () => {
+      source.close(); clearTimeout(retry); cancelAnimationFrame(frame);
+      document.removeEventListener('visibilitychange', visible);
+      window.removeEventListener('pageshow', restored);
+      window.removeEventListener('online', online);
+    };
   }, [session, active, client, epoch]);
   const refresh = useCallback(() => { if (connection !== 'live') setEpoch(value => value + 1); void client.invalidateQueries({ queryKey: ['agent-history', session] }); }, [client, session, connection]);
   const loading = queries.some((item, index) => item.isLoading || item.data !== undefined && loaded.current.get(invocations[index].invocation_id) !== item.dataUpdatedAt);

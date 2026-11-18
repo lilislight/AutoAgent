@@ -129,7 +129,7 @@ if args.version == 'v2':
 
     workflows = [build('comparison' if i == 0 else f'definition-{i}') for i in range(case.get('definitions', 1))]
     if config.get('no_persistence'):
-        from autoagent import AutoAgentApp
+        from autoagent.core.app import AutoAgentApp
         from memory_server import create_memory_app
         agent = AutoAgentApp(max_operator_concurrency=32)
         for workflow in workflows:

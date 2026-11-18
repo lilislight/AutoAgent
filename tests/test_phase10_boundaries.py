@@ -22,7 +22,6 @@ import autoagent.core as core_api
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp,
     Capability,
     ContextOperation,
     ContextPatch,
@@ -31,12 +30,9 @@ from autoagent import (
     Node,
     Operator,
     Recovery,
-    RuntimeErrorInfo,
-    UserEvent,
     UserEventSpec,
     Wait,
     Workflow,
-    WorkflowCompiler,
 )
 from autoagent.core import (
     NodeExecutor,
@@ -45,12 +41,15 @@ from autoagent.core import (
     SessionOpened,
     TaskRuntime,
 )
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.app.runtime_loop import RuntimeLoop
+from autoagent.core.compiler import WorkflowCompiler
 from autoagent.core.context import apply_context_operation
 from autoagent.core.errors import RuntimeTransitionError
 from autoagent.core.executor.future import await_concurrent_future
-from autoagent.core.sinks import RuntimeEventSink
+from autoagent.core.runtime import RuntimeErrorInfo, UserEvent
 from autoagent.core.runtime.values import freeze, thaw
+from autoagent.core.sinks import RuntimeEventSink
 from autoagent.core.workflow import SubWorkflow
 
 
@@ -76,7 +75,7 @@ def fail(_value: Value) -> Value:
 
 class DefinitionBoundaryTests(unittest.TestCase):
     def test_public_exports_preserve_sdk_core_and_host_boundaries(self) -> None:
-        """Verify public exports do not leak canonical State or legacy Server APIs."""
+        """Keep the package root focused on Workflow authoring, including explicit imports."""
         for module in (sdk_api, core_api):
             with self.subTest(module=module.__name__):
                 self.assertEqual(len(module.__all__), len(set(module.__all__)))
@@ -85,26 +84,25 @@ class DefinitionBoundaryTests(unittest.TestCase):
                 )
 
         self.assertTrue(
-            {"AutoAgentApp", "Workflow", "SessionCheckpoint", "UserEvent"}
+            {
+                "Workflow", "Node", "Edge", "Operator", "ContextPatch", "Recovery",
+                "Wait", "Spawn", "CommandInvoker", "TimerRequest", "SelectResult",
+                "UserEventSpec",
+            }
             <= set(sdk_api.__all__)
         )
-        self.assertFalse(
-            {
-                "RuntimeEvent",
-                "RuntimeState",
-                "StateOperation",
-                "StateReducer",
-                "RuntimeRepository",
-                "RuntimeEventSink",
-                "AutoAgentServer",
-                "RuntimeStore",
-                "AutoAgentSettings",
-                "Backoff",
-                "Retry",
-                "OperatorPolicy",
-            }
-            & set(sdk_api.__all__)
-        )
+        for name in (
+            "AutoAgentApp", "AppCheckpoint", "InvocationResult", "InvocationControlSnapshot",
+            "GraphResidencyInfo", "WorkflowCompiler", "CompileResult", "WorkflowDefinitionSnapshot",
+            "RuntimeGraphCheckpoint", "SessionCheckpoint", "RecoverySource", "ForkPlan",
+            "RuntimeErrorInfo", "UserEvent", "RuntimeTransitionError", "ResourceBudgetExceeded",
+            "SystemCommand", "SuspensionInfo", "RuntimeEvent", "RuntimeState", "StateOperation",
+            "StateReducer", "RuntimeRepository", "RuntimeEventSink", "AutoAgentServer",
+            "RuntimeStore", "AutoAgentSettings", "Backoff", "Retry", "OperatorPolicy",
+        ):
+            with self.subTest(name=name):
+                self.assertNotIn(name, sdk_api.__all__)
+                self.assertFalse(hasattr(sdk_api, name))
         self.assertTrue(
             {"RuntimeEvent", "RuntimeState", "StateOperation", "StateReducer"}
             <= set(core_api.__all__)

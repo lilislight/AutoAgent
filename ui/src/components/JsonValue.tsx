@@ -2,28 +2,38 @@ import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type Focu
 import { fieldWindow, jsonMatchRanges, jsonPath, jsonPreview, jsonTextPreview, pathStartsWith, searchJson, type JsonMatch, type JsonPath } from '../jsonInspection.js';
 import { ToolButton, CheckIcon, CopyIcon, DownloadIcon, PathIcon, SearchValueIcon } from './ToolButton.js';
 import { LoadingIndicator } from './LoadingState.js';
+import { copyText } from '../clipboard.js';
+import { ManualCopyText } from './ManualCopyText.js';
 
 function useJsonClipboard(scope: unknown) {
-  const [feedback, setFeedback] = useState<{ key: string; failed: boolean } | null>(null);
+  const [feedback, setFeedback] = useState<{ key: string; failed: boolean; manualText?: string } | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const attempt = useRef(0);
   useEffect(() => () => clearTimeout(timer.current), []);
   useEffect(() => { attempt.current++; clearTimeout(timer.current); setFeedback(null); }, [scope]);
-  const copy = async (key: string, value: unknown, path = false) => {
+  const dismiss = () => { attempt.current++; clearTimeout(timer.current); setFeedback(null); };
+  const copy = async (trigger: HTMLButtonElement, key: string, value: unknown, path = false) => {
     clearTimeout(timer.current);
     const current = ++attempt.current;
-    try { await navigator.clipboard.writeText(path ? String(value) : JSON.stringify(value, null, 2) ?? 'undefined'); if (current === attempt.current) setFeedback({ key, failed: false }); }
-    catch { if (current === attempt.current) setFeedback({ key, failed: true }); }
-    if (current === attempt.current) timer.current = setTimeout(() => setFeedback(null), 1600);
+    let manualText: string | undefined;
+    let copied = false;
+    try {
+      manualText = path ? String(value) : JSON.stringify(value, null, 2) ?? 'undefined';
+      copied = await copyText(manualText, trigger);
+    } catch { /* JSON serialization failed. */ }
+    if (current !== attempt.current) return;
+    const manual = key === 'root' && !copied ? manualText : undefined;
+    setFeedback({ key, failed: !copied, manualText: manual });
+    if (manual === undefined) timer.current = setTimeout(() => setFeedback(null), 1600);
   };
-  return { feedback, copy };
+  return { feedback, copy, dismiss };
 }
 
 function FieldActions({ value, path }: { value: unknown; path: JsonPath }) {
   const { feedback, copy } = useJsonClipboard(value), location = jsonPath(path);
   return <span className="json-node-actions" onClick={event => { event.stopPropagation(); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') event.stopPropagation(); }}>
-    <ToolButton label={`Copy value at ${location}`} tooltip={feedback?.key==='value' ? feedback.failed?'Copy failed':'Copied value' : `Copy value at ${location}`} onClick={event => { event.preventDefault(); void copy('value', value); }}>{feedback?.key==='value'&&!feedback.failed?<CheckIcon/>:<CopyIcon/>}</ToolButton>
-    <ToolButton label={`Copy path ${location}`} tooltip={feedback?.key==='path' ? feedback.failed?'Copy failed':'Copied path' : location} onClick={event => { event.preventDefault(); void copy('path', location, true); }}>{feedback?.key==='path'&&!feedback.failed?<CheckIcon/>:<PathIcon/>}</ToolButton>
+    <ToolButton label={`Copy value at ${location}`} tooltip={feedback?.key==='value' ? feedback.failed?'Copy failed':'Copied value' : `Copy value at ${location}`} onClick={event => { event.preventDefault(); void copy(event.currentTarget, 'value', value); }}>{feedback?.key==='value'&&!feedback.failed?<CheckIcon/>:<CopyIcon/>}</ToolButton>
+    <ToolButton label={`Copy path ${location}`} tooltip={feedback?.key==='path' ? feedback.failed?'Copy failed':'Copied path' : location} onClick={event => { event.preventDefault(); void copy(event.currentTarget, 'path', location, true); }}>{feedback?.key==='path'&&!feedback.failed?<CheckIcon/>:<PathIcon/>}</ToolButton>
     <span className="sr-only" role="status">{feedback ? feedback.failed?'Copy failed. Select the content and copy it.':'Copied' : ''}</span>
   </span>;
 }
@@ -79,7 +89,7 @@ function TreeNode({ value, name, path, focus, focusKey, query }: { value: unknow
 }
 
 export function JsonValue({ value, label = 'root' }: { value: unknown; label?: string }) {
-  const { feedback, copy } = useJsonClipboard(value);
+  const { feedback, copy, dismiss } = useJsonClipboard(value);
   const [searchOpen,setSearchOpen]=useState(false),[query,setQuery]=useState(''),[mode,setMode]=useState<'matches'|'tree'>('matches');
   const [result,setResult]=useState<{value:unknown;query:string;matches:JsonMatch[];truncated:boolean;error?:string}|null>(null);
   const [selection,setSelection]=useState<{value:unknown;path:JsonPath;index:number}|null>(null);
@@ -107,10 +117,11 @@ export function JsonValue({ value, label = 'root' }: { value: unknown; label?: s
   const closeSearch=()=>{setSearchOpen(false);setQuery('');setSelection(null);setResult(null);searchButton.current?.focus({preventScroll:true});};
   const download=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json'}));const link=document.createElement('a');link.href=url;link.download=`${label}.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
   return <div className="json-tree-shell">
-    <div className="json-actions"><ToolButton ref={searchButton} label="Search JSON" aria-expanded={searchOpen} onClick={()=>searchOpen?closeSearch():setSearchOpen(true)}><SearchValueIcon/></ToolButton><ToolButton label={feedback?.key==='root'?feedback.failed?'Copy failed':'Copied JSON':'Copy JSON'} onClick={()=>void copy('root',value)}>{feedback?.key==='root'&&!feedback.failed?<CheckIcon/>:<CopyIcon/>}</ToolButton><ToolButton label="Download JSON" onClick={download}><DownloadIcon/></ToolButton></div>
+    <div className="json-actions"><ToolButton ref={searchButton} label="Search JSON" aria-expanded={searchOpen} onClick={()=>searchOpen?closeSearch():setSearchOpen(true)}><SearchValueIcon/></ToolButton><ToolButton label={feedback?.key==='root'?feedback.failed?'Copy failed':'Copied JSON':'Copy JSON'} onClick={event=>void copy(event.currentTarget,'root',value)}>{feedback?.key==='root'&&!feedback.failed?<CheckIcon/>:<CopyIcon/>}</ToolButton><ToolButton label="Download JSON" onClick={download}><DownloadIcon/></ToolButton></div>
+    {feedback?.manualText !== undefined && <ManualCopyText label="JSON to copy" text={feedback.manualText} onDismiss={dismiss} />}
     {searchOpen?<div className="json-search"><div className="json-search-input"><SearchValueIcon/><input ref={input} type="search" aria-label="Search JSON fields and values" aria-controls={resultsVisible?resultsId:undefined} placeholder="Search fields and values…" value={query} onChange={event=>{setQuery(event.target.value);setMode('matches');setSelection(null);setVisible(100);}} onKeyDown={event=>{if(event.key==='Escape'){event.preventDefault();event.stopPropagation();closeSearch();}else if(event.key==='Enter'&&matches.length){event.preventDefault();const index=selection && selection.value===value?selection.index:(event.shiftKey?0:-1);reveal((index+(event.shiftKey?-1:1)+matches.length)%matches.length);}}}/>{searching?<LoadingIndicator small decorative label="Searching JSON"/>:null}</div><div className="json-search-status"><span role="status">{searching?'Searching…':current?.error??(needle?`${matches.length}${current?.truncated?'+':''} ${matches.length===1&&!current?.truncated?'match':'matches'}`:'Search the loaded JSON')}</span>{needle&&mode==='tree'?<button type="button" onClick={()=>setMode('matches')}>Back to results</button>:null}<button type="button" onClick={closeSearch}>Close search</button></div></div>:null}
     {resultsVisible?<div id={resultsId} className="json-search-results" aria-label="JSON search results" aria-busy={searching}>{matches.slice(0,visible).map((match,index)=><div className="json-search-result" key={jsonPath(match.path)}><button type="button" className="json-match-open" aria-label={`Show ${jsonPath(match.path)} in JSON`} onClick={()=>reveal(index)}><code><JsonSearchText text={jsonPath(match.path)} query={needle}/></code><span><JsonSearchText text={jsonPreview(match.value,160,needle)} query={needle}/></span></button><FieldActions value={match.value} path={match.path}/></div>)}{!searching&&!current?.error&&!matches.length?<p>No matching fields or values.</p>:null}{matches.length>visible?<button type="button" className="json-expand" onClick={()=>setVisible(count=>count+100)}>More matches</button>:null}{current?.truncated?<p>Showing the first 1,000 matches. Refine your search for more specific results.</p>:null}</div>:null}
     <div className="json-tree" hidden={resultsVisible} inert={resultsVisible}><TreeNode value={value} name={label} path={[]} focus={focus} focusKey={focusKey} query={needle}/></div>
-    <span className="sr-only" role="status">{feedback?feedback.failed?'Copy failed. Select the content and copy it.':'Copied JSON':''}</span>
+    <span className="sr-only" role="status">{feedback && feedback.manualText === undefined ? feedback.failed?'Copy failed. Select the content and copy it.':'Copied JSON':''}</span>
   </div>;
 }

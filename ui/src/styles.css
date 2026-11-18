@@ -162,6 +162,8 @@ a {
   display:flex;
   flex-direction:column;
   min-width:760px;
+  padding:env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+    env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
 }
 
 .topbar {
@@ -2187,3 +2189,12 @@ html,body,.app-shell,.app-shell :where(div,nav,main,header,aside,section,button,
   .topbar { height:auto; min-height:64px; flex-wrap:wrap; padding:8px 12px; gap:8px; }
   .topbar .topbar-actions { gap:10px; }
 }
+
+.clipboard-fallback { position:fixed; top:0; left:0; width:1px; height:1px; padding:0; border:0; opacity:0; pointer-events:none; font-size:16px; }
+.manual-copy-text { display:grid; gap:6px; margin:6px 0 8px; color:var(--muted); font-size:12px; }
+.json-tree-shell>.manual-copy-text { margin-top:34px; }
+.inspector-view-links>.manual-copy-text { flex-basis:100%; }
+.manual-copy-text p { margin:0; }
+.manual-copy-text textarea { width:100%; min-width:0; padding:6px; border:1px solid var(--line-strong); border-radius:6px; background:var(--surface); color:var(--text); font:inherit; resize:vertical; }
+.manual-copy-text button { justify-self:end; padding:4px 8px; color:var(--accent); border-radius:4px; }
+.manual-copy-text button:hover { background:var(--surface-muted); }

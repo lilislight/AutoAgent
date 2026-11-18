@@ -7,7 +7,8 @@ import unittest
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
-from autoagent import AutoAgentApp, Node, Workflow, ValueContract
+from autoagent import Node, Workflow, ValueContract
+from autoagent.core.app import AutoAgentApp
 from autoagent.core import OperatorCallContext
 from autoagent.core.operators.context import operator_call_context
 from autoagent.agent import (

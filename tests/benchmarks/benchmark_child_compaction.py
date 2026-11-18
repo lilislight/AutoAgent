@@ -8,7 +8,8 @@ import threading
 import time
 import tracemalloc
 from typing_extensions import TypedDict
-from autoagent import AutoAgentApp, InputMappingContext, Map, Node, Workflow
+from autoagent import InputMappingContext, Map, Node, Workflow
+from autoagent.core.app import AutoAgentApp
 
 
 class BigInput(TypedDict):

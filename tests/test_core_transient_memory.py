@@ -9,8 +9,18 @@ from unittest.mock import patch
 from enum import Enum
 from typing_extensions import TypedDict
 from pydantic import BaseModel, ConfigDict, Field, field_serializer
-from autoagent import (AggregationContext, AutoAgentApp, ContextPatch, InputMappingContext,
-                       Map, Node, OutputBindingContext, Recovery, RuntimeInfrastructureError, Workflow)
+from autoagent import (
+    AggregationContext,
+    ContextPatch,
+    InputMappingContext,
+    Map,
+    Node,
+    OutputBindingContext,
+    Recovery,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError
 from autoagent.core import NodeExecutor, ValueContract, WorkflowCompiler
 from autoagent.core.runtime import RuntimeEvent, SessionCheckpoint, StateReducer
 from tests.test_core_payload_retention import Collector, Data, produce
@@ -94,7 +104,7 @@ class TransientMemoryTests(unittest.TestCase):
     def test_aggregation_cannot_clear_a_still_running_call(self):
         """An invalid early aggregate transition leaves live Call input and State unchanged."""
         from autoagent.core.runtime import Aggregated, OperatorCallStarted
-        from autoagent import RuntimeTransitionError
+        from autoagent.core.errors import RuntimeTransitionError
         from tests.test_phase3_scheduler import Harness
         harness = Harness(Workflow('aggregate-active', nodes=[Node('work', produce)]), entry='work')
         harness.start('work@root')

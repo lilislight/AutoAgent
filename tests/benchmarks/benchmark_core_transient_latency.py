@@ -16,7 +16,8 @@ def main():
     args = parser.parse_args()
     if args.package_root:
         sys.path.insert(0, str(args.package_root.resolve()))
-    from autoagent import AutoAgentApp, Edge, Node, Workflow
+    from autoagent import Edge, Node, Workflow
+    from autoagent.core.app import AutoAgentApp
     from tests.benchmarks.benchmark_full_core import identity
     import autoagent
     rows = {}

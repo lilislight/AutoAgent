@@ -26,19 +26,20 @@ from typing import TypeVar, cast, get_args
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AppCheckpoint,
-    AutoAgentApp,
     Edge,
-    InvocationRef,
-    InvocationResult,
-    InvocationStatus,
     Node,
     Recovery,
-    RuntimeInfrastructureError,
-    RuntimeTransitionError,
     Wait,
     Workflow,
 )
+from autoagent.core.app import (
+    AppCheckpoint,
+    AutoAgentApp,
+    InvocationRef,
+    InvocationResult,
+    InvocationStatus,
+)
+from autoagent.core.errors import RuntimeInfrastructureError, RuntimeTransitionError
 from autoagent.core import (
     RuntimeRepository,
     InvocationCancelled,

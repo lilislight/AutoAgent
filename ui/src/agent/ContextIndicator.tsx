@@ -1,6 +1,4 @@
-import { useCallback, useRef, useState } from 'react';
 import { Tooltip } from '../components/Tooltip.js';
-import { AgentPopover } from './AgentPopover.js';
 import { compactTokens, contextPercentage, type ContextUsage } from './contextUsage.js';
 
 const unknown: ContextUsage = { usedTokens: null, windowTokens: null, source: 'unavailable', compacting: false };
@@ -15,17 +13,15 @@ export function ContextFacts({ value, loading = false }: { value: ContextUsage; 
   </div>;
 }
 
-/** A static occupancy ring, not an execution spinner. Touch opens the same details. */
+/** Display context occupancy with details on hover or keyboard focus. */
 export function ContextIndicator({ value = unknown, loading = false }: { value?: ContextUsage; loading?: boolean }) {
-  const [open, setOpen] = useState(false), trigger = useRef<HTMLButtonElement>(null);
-  const close = useCallback(() => setOpen(false), []);
   const percent = loading ? null : contextPercentage(value);
   const used = percent === null ? 0 : Math.max(0, Math.min(100, percent));
   const label = percent === null ? 'Context window: usage unavailable' : `Context window: ${Math.round(percent)}% used`;
-  return <><Tooltip placement="top" disabled={open} content={<div className="agent-context-hint"><strong>Context window</strong><ContextFacts value={value} loading={loading} /></div>}>
-    <button ref={trigger} type="button" className="agent-context-indicator" data-level={percent !== null && percent >= 100 ? 'full' : percent !== null && percent >= 80 ? 'high' : 'normal'}
-      aria-label={loading ? 'Context window: loading usage' : label} aria-busy={loading || undefined} aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(value => !value)}>
+  return <Tooltip placement="top" content={<div className="agent-context-hint"><strong>Context window</strong><ContextFacts value={value} loading={loading} /></div>}>
+    <span role="img" tabIndex={0} className="agent-context-indicator" data-level={percent !== null && percent >= 100 ? 'full' : percent !== null && percent >= 80 ? 'high' : 'normal'}
+      aria-label={loading ? 'Context window: loading usage' : label} aria-busy={loading || undefined}>
       <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle className="agent-context-track" cx="12" cy="12" r="9" /><circle className="agent-context-fill" cx="12" cy="12" r="9" pathLength="100" opacity={used > 0 ? 1 : 0} strokeDasharray={`${used} 100`} transform="rotate(-90 12 12)" /></svg>
-    </button>
-  </Tooltip>{open ? <AgentPopover anchor={trigger} label="Context window" className="agent-context-popover" onClose={close}><ContextFacts value={value} loading={loading} /></AgentPopover> : null}</>;
+    </span>
+  </Tooltip>;
 }

@@ -1,9 +1,11 @@
 """Resource ownership, ordinary Tool groups and product-only Skill switches."""
 
 from contextlib import asynccontextmanager
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from sqlalchemy import inspect
 from autoagent.agent import (AgentInput, AgentResources, FileTools, Skill,
@@ -66,6 +68,31 @@ class RegistryBoundaryTests(unittest.TestCase):
                     set_enabled(current, False, roots=(root,))
             finally:
                 path.chmod(0o644)
+
+    def test_skill_switch_rejects_a_directory_swapped_for_a_symlink(self):
+        """A concurrent symlink swap cannot redirect a Skill edit to another directory."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            managed, external = root / 'managed', root / 'external'
+            skill = make_skill(managed)
+            make_skill(external)
+            target = external / 'sample' / 'SKILL.md'
+            original = target.read_bytes()
+            parent = managed / 'sample'
+            replaced = managed / 'old-sample'
+            fsync = os.fsync
+
+            def swap_after_staging(fd):
+                fsync(fd)
+                parent.rename(replaced)
+                parent.symlink_to(target.parent, target_is_directory=True)
+
+            with patch('autoagent.agent_app.skills.os.fsync', side_effect=swap_after_staging):
+                with self.assertRaises(OSError):
+                    set_enabled(skill, False, roots=(managed,))
+            self.assertEqual(target.read_bytes(), original)
+            self.assertEqual((replaced / 'SKILL.md').read_bytes(), original)
+            self.assertEqual(list(replaced.glob('.SKILL.*')), [])
 
 
 class RegistryExecutionContracts:

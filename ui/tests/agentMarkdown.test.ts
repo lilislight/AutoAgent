@@ -36,6 +36,13 @@ test('streaming responses tolerate unfinished markdown', () => {
   assert.match(render('Text with **unfinished'), /Text with \*\*unfinished/);
 });
 
+test('copy controls belong to block code and preserve Mermaid source before rendering', () => {
+  const html = render('Use `inline`.\n\n```\nplain\n```\n\n```mermaid\ngraph LR\n  A --> B\n```');
+  assert.match(html, /<code>inline<\/code>/);
+  assert.deepEqual([...html.matchAll(/aria-label="(Copy [^"]+)"/g)].map(match => match[1]), ['Copy code', 'Copy Mermaid source']);
+  assert.match(html, /<pre><code class="language-mermaid">graph LR\n  A --&gt; B/);
+});
+
 test('raw HTML and unsafe URLs cannot become executable markup', () => {
   const html = render('<script>alert(1)</script>\n\n<img src=x onerror=alert(1)>\n\n[unsafe](javascript:alert%281%29) ![bad](data:image/svg+xml;base64,QQ==) [safe](https://example.com/path)');
   assert.doesNotMatch(html, /<script|<img|javascript:|onerror=|data:image\/svg/);

@@ -7,10 +7,12 @@ import time
 import unittest
 
 from autoagent import (
-    AutoAgentApp, Await, AwaitSignal, Edge, InputMappingContext, Map, Node,
-    OutputBindingContext, Recovery, RuntimeInfrastructureError, RuntimeTransitionError, Select, SignalCase,
+    Await, AwaitSignal, Edge, InputMappingContext, Map, Node,
+    OutputBindingContext, Recovery, Select, SignalCase,
     SignalEndpoint, Spawn, Timer, TimerCase, TimerRequest, Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError, RuntimeTransitionError
 from autoagent.core import ContextPatch, RuntimeEvent, RuntimeGraphCheckpoint
 from autoagent.core.runtime import GraphPaused, GraphPauseRequested, GraphResumed
 from tests.test_system_commands import Collector, Value, identity

@@ -11,7 +11,9 @@ from unittest.mock import patch
 import httpx
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, Await, Edge, Node, Spawn, Wait, Workflow, RuntimeTransitionError
+from autoagent import Await, Edge, Node, Spawn, Wait, Workflow
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeTransitionError
 from autoagent.host import AutoAgentHost, HostRunConflict, HostSettings
 from autoagent.host.persistence.reading import SourceReader
 from autoagent.server import create_app
@@ -197,7 +199,7 @@ class CheckpointManagementTests(unittest.IsolatedAsyncioTestCase):
             # Exercise the version key independently of Root progress; saving
             # a new snapshot still validates its actual Event frontiers.
             from autoagent.host.persistence.checkpoints import checkpoint_key
-            from autoagent import RuntimeGraphCheckpoint, SessionCheckpoint
+            from autoagent.core.runtime import RuntimeGraphCheckpoint, SessionCheckpoint
             graph = await host._runtime.app.acapture_checkpoint(ref)
             state = next(s for s in graph.sessions if s.session_id == child_member['session_id'])
             advanced = SessionCheckpoint.from_state(replace(state.state, sequence=state.sequence + 1))

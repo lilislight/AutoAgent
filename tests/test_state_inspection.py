@@ -10,8 +10,19 @@ from unittest.mock import patch
 from sqlalchemy import update
 from typing_extensions import TypedDict
 
-from autoagent import (AutoAgentApp, Await, ContextOperation, ContextPatch, Edge, Node, Recovery,
-    OutputBindingContext, Spawn, Wait, Workflow)
+from autoagent import (
+    Await,
+    ContextOperation,
+    ContextPatch,
+    Edge,
+    Node,
+    Recovery,
+    OutputBindingContext,
+    Spawn,
+    Wait,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime.events import RuntimeEvent
 from autoagent.core.runtime.reducer import StateReducer
 from autoagent.core.runtime.state import RuntimeState

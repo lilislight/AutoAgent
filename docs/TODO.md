@@ -1,6 +1,6 @@
 # AutoAgent V2 后续事项
 
-更新日期：2026-11-09。
+更新日期：2026-11-16。
 
 本文记录当前确认的推进顺序、阶段边界和验收目标，不代表下面的 API 已经实现。
 当前源码和测试是具体行为的依据；V1 只用于参考，不保留旧 API 或数据模型兼容层。
@@ -182,10 +182,10 @@ Scenario 使用 `wait_for()` 等待业务条件，`respond()` 回复指定审批
 深入读取执行历史需要保留报告中标识的数据库。外部服务/dataset 条件通过 `Suite.conditions`
 显式声明，自动采集仅包含可确认且不泄露凭据的配置身份。
 
-本轮专项验收：89 项 Eval/ExecutionView/CLI 测试和 28 项历史状态检查测试通过，包含实际
-SQLite/PostgreSQL；订单示例通过真实 CLI，wheel 已核对新查询模块及旧接口移除。
-整个 V2 的通用回归尚未通过：另有 Server/Fork Timeline 用例失败和 CLI 执行模块超时，
-已停止该轮通用回归，不能把本轮专项通过解释为整个仓库全绿。上述问题需要单独处理。
+Evaluation 专项验收通过了 89 项 Eval/ExecutionView/CLI 测试和 28 项历史状态检查测试，
+涵盖 SQLite 和 PostgreSQL。CLI 订单示例通过，wheel 已核对新查询模块及旧接口移除。
+随后修复了 Server/Fork Timeline 用例和 CLI 执行超时。当时的 V2 全量回归按模块隔离运行，
+137 个模块共 2,373 项测试通过，其中 PostgreSQL 538 项，零跳过。该结果对应修复时的版本。
 当前 Eval 报告为 schema_version=2；不保留旧 Evidence/EventCount 接口及旧报告模型兼容。
 
 ### 后续事项
@@ -207,11 +207,32 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 这是项目开发指导，与业务 Agent 使用的 `autoagent.agent.skills` 不同，
 也不依赖第 5 阶段的原生 Coding Agent 已完成。
 
+当前 Workflow SDK、CLI 和业务 Evaluation 已支持首版 Skill 所需的编写、诊断和验证流程。
+首版采用 Workflow 编写、Invocation 诊断两个入口，在定稿 Skill 参考前确认 SDK 的公开导入路径。
+
+### SDK 公开入口
+
+- [x] 初审 V2 根包、Core、Host、Agent、Evaluation 的导出和示例用法。根包目前同时导出
+  Workflow 声明类型、编译器、嵌入运行类型及恢复模型。V1 已单列 Workflow 编写契约，
+  仍保留部分旧根属性。V2 整理时直接迁移导入路径。
+- [ ] 确认 `autoagent` 的 Workflow 编写入口，覆盖图、Operator、Context/Hook、值契约、
+  策略和 Workflow 内使用的 System Command。按真实用法审查配套类型，例如 `TimerRequest`
+  用于 Input Mapping，`SelectResult` 用于下游处理。
+- [ ] 让嵌入运行、编程式编译、Event Sink 和恢复等能力从所属 Core 模块访问。
+  检查 `autoagent.core` 的聚合导出，区分明确支持的集成协议和内部执行、调度、状态实现。
+  Host、Agent、Evaluation 和 Server 保留各自的公开入口；首版只核对 Skill 涉及的接口。
+- [ ] 迁移框架内部、示例和测试的导入，确认拟移除的根属性无需保留旧别名。用安装后的 wheel
+  验证公开导入、离线项目可运行和旧根属性已移除，再定稿 Skill 的 SDK 参考。
+
+### Skill 首版
+
 - [ ] 编写 V2 Workflow authoring Skill，覆盖图、值契约、Context 和恢复边界。
 - [ ] 提供最小项目模板、规范示例及按需读取的 SDK/CLI 参考，明确 SDK 版本。
-- [ ] 定义 Debug/Optimization 流程：读代码、检查编译、查看证据、修复、评测和比较。
+- [ ] 编写 Invocation 诊断 Skill，从执行摘要或失败的 Eval Case 出发定位证据，结合代码
+  做最小修复，重新检查编译，并用同一组业务规则比较基线与候选结果。
 - [ ] 指导何时查询摘要、Node/Call 详情或精确历史 Context，避免一次读取完整 Event/大值。
-- [ ] 用任务集验证 LLM 的编写、定位、最小修复和回归验证能力。
+- [ ] 用两道仓库外任务验证：从零编写一个 Workflow；修复一个最终结果正确但中间业务行为
+  违规的 Workflow。提供安装后的 V2、Skill 和任务材料，核对代码、检查结果和执行证据。
 - [ ] 确定 Skill、参考材料和示例的分发方式，使仓库外项目也能获取准确说明。
 - [ ] 随 Harness、ReAct 和 Coding Agent API 增量更新 Skill 和任务集。
 
@@ -227,7 +248,7 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 - [x] 区分完整历史和模型本次输入，支持 Context Policy、输入估算和长 Context 压缩。
 - [x] 显式 `compact_context` Node，记录摘要覆盖范围，保留原始历史；支持分批摘要。
 - [x] ToolSet、MCP、Skill 的允许、拒绝、审批以及参数级操作权限组合。
-- [x] 审批和 Ask User 使用 Core Wait；Session Settings 持久化，执行快照固定设置。
+- [x] 审批和 Ask User 使用 Core Wait；Agent App 持久化 Session 设置。模型、Provider 和推理强度按提交绑定，审批模式可以在执行期间更新。
 - [x] 参数验证、业务错误作为 Tool Result 返回，模型在轮次上限内自行修正；
   与网络重试、Node Retry 和 Recovery 分开处理。
 - [ ] 结构化输出自动修正策略；目前结构校验失败显式报错，不隐式修复或重试。
@@ -249,12 +270,17 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 - [x] `agent_workflow(...)` 构建 API，支持指令、模型、Tool/MCP/Skill、Workspace 和执行策略。
 - [x] 普通 Workflow 图：Context 准备、可选压缩、Request 构建、模型调用、工具分流、
   并行执行、审批、Ask User、子任务等待和轮次完成；统一 Back Edge。
-- [x] 多轮 Session、父子调用、动态资源刷新和按 Workflow 授权的 Host 资源。
+- [x] 多轮 Session、父子调用和统一资源注册器。SDK 支持固定资源及可更新的注册器，Agent App 负责产品资源的运行期刷新。
 - [x] LLM 输出和聚合 Tool Result 就近提交历史；处理审批拒绝和预算耗尽。
 - [x] User Event 区分流式临时内容和持久化完整结果，复用 Trace、Checkpoint、恢复和 Fork。
 - [x] 提供 `examples/agent_workflow`、`examples/agent_server_demo` 等示例。
-- [x] SDK 内置 Agent 可通过环境变量注册；独立 `/agent` 页面复用 Host API、User Event 和共享标题栏。
-- [x] Workspace 管理和 Session 绑定、资源侧栏、模型/审批/访问权限设置；旧聊天查询当前资源目录。
+- [x] `AgentApplication` 管理独立的 `/agent` 产品。普通 Agent Workflow 通过 SDK 显式配置资源，Host 持有 Provider 等通用资源。
+- [x] Workspace 管理和 Session 绑定、资源设置、模型选择及审批；旧聊天查询当前资源目录。
+- [x] 固定首条消息标题并支持重命名。会话列表先排除子 Agent 和混合 Workflow Session，再分页并批量读取状态与元数据。
+- [x] 服务端持久化消息队列。立即发送的请求绑定原目标，原样重试返回同一回执，换目标返回冲突。
+  已有队列在启动时补齐历史立即发送回执的目标。
+- [x] MCP 工具目录支持离线查看和 Schema 变更审核。同名工具冲突在设置中显示，同组其他工具照常可用。
+- [x] Agent App 通过 `SKILL.md` 的 `metadata.autoagent-app-enabled` 管理 Skill 开关。单个 Workspace Skill 解析失败时显示文件和原因，可继续使用其他 Skill 和聊天。
 - [ ] 补齐开发 Skill 中对应的编写、调试说明。
 - [ ] 调试产品默认 Instructions 和通用 Skills，验证真实任务质量。
 
@@ -266,11 +292,11 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 目标：组合 ReAct、AutoAgent 开发 Skill、CLI 和 Evaluation，形成可验证的本地开发闭环。
 
 - [x] 本地 Workspace 解析、项目指令发现、Skill 发现及三个按需读取工具。
-- [x] Python 文件工具：目录浏览、搜索、读取、写入、定点编辑和文件管理；
-  参数级路径策略、敏感文件审批、版本检查和文件修改并发控制。
-- [x] `execute_command` / `manage_process`：exec、Bash/Pwsh、共享命令规则、参数匹配、
+- [x] Python 文件工具：目录浏览、搜索、读取、写入、定点编辑和文件管理。
+  Agent App 默认对 Workspace 外部文件操作发起审批。支持自定义路径规则、可选版本检查和文件修改并发控制。
+- [x] `execute_command` / `manage_process`：exec、Bash/Pwsh、统一 ToolPolicy 参数匹配、
   进程超时、清理、有界输出、stdin 和游标读取；Git/测试可通过 CLI 执行。
-- [x] 可替换 Workspace/Execution 接口和本地实现；Workspace 绑定后才暴露相关内置工具。
+- [x] 可替换 Workspace/Execution 接口和本地实现；文件工具需要绑定 Workspace，CLI 支持无 Workspace 的会话。
 - [x] 组合模型、Tool、Skill、Context 管理、Ask User 和子 Agent 协作。
 - [x] 提供本地可监督使用方式及可交互测试示例。
 - [ ] 独立补丁应用/交付流程及完整 Coding Agent 任务验收。
@@ -291,7 +317,7 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
   与输出读取等待、启动等待和进程运行超时分别表达。
 - [x] `log_path` 保存有上限的完整命令日志，返回短预览及真实进程退出码，禁止覆盖已有日志；
   Shell 仍保留自身退出语义，不把最后一个命令的状态冒充内部所有命令的状态。
-- [x] 搜索结果合并相邻/重叠 Context，匹配位置与共享文本分开返回，减少重复源代码。
+- [x] 搜索只返回定位信息。内容搜索、文件复制等读取操作共享 `read_file` 针对目标的规则，各工具的参数规则独立。
 - [x] 可选 Workspace 缓存/临时目录配置，重定向常用缓存及临时目录环境变量，复用文件权限校验。
 
 ### 明确暂缓

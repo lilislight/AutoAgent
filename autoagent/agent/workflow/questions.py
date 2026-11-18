@@ -158,6 +158,8 @@ def with_ask_user(catalog):
 
 
 def question_request(task) -> AskUserRequest:
+    if task.binding.kind != "ask_user" or task.call.name != "ask_user":
+        raise ValueError("Only the native ask_user Tool can create an Ask User request.")
     arguments = AskUserArguments.model_validate_json(task.call.arguments)
     return AskUserRequest(request_id=task.request_id, call_id=task.call.call_id, questions=arguments.questions)
 

@@ -9,7 +9,8 @@ import tracemalloc
 from unittest.mock import patch
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, Edge, InputMappingContext, Map, Node, Workflow
+from autoagent import Edge, InputMappingContext, Map, Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import RuntimeEvent, RuntimeState, StateReducer
 
 

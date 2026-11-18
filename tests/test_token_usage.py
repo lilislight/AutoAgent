@@ -6,7 +6,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from autoagent import UsagePolicy, ResourceBudgetExceeded, UsageAccountingError
+from autoagent import UsagePolicy
+from autoagent.core.usage import ResourceBudgetExceeded, UsageAccountingError
 from autoagent.agent import TimeRange, UsageWindow, TokenUsageQuery
 from autoagent.agent.usage import TokenUsageCheck
 from autoagent.host.persistence import DatabaseSink

@@ -22,9 +22,17 @@ from dataclasses import replace
 from types import CodeType
 from unittest.mock import patch
 
-from autoagent import (AutoAgentApp, ContextOperation, ContextPatch, Map, Node,
-                       SessionCheckpoint, Wait, Workflow, OutputBindingContext)
-from autoagent.core.runtime import RuntimeEvent, RuntimeState, StateReducer
+from autoagent import (
+    ContextOperation,
+    ContextPatch,
+    Map,
+    Node,
+    Wait,
+    Workflow,
+    OutputBindingContext,
+)
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.runtime import RuntimeEvent, RuntimeState, SessionCheckpoint, StateReducer
 from tests.benchmarks.benchmark_core_audit import Value, identity, items
 
 

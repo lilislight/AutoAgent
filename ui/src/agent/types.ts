@@ -1,6 +1,7 @@
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 export interface QueuedMessage {
   id: string; session_id: string; position: number; message: string;
+  images?: Content[] | null;
   state: 'queued' | 'starting' | 'started' | 'sending' | 'sent' | 'cancelled' | 'blocked';
   invocation_id: string | null; error: string | null;
 }
@@ -21,6 +22,7 @@ export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[
 export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number; workspace_id?: string | null; status?: string; control_state?: string; last_sequence?: number }
 export interface Page<T> { items: T[]; next_cursor: string | null }
 export interface AgentInvocation { invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number | null; completed_at_us?: number | null; [key: string]: unknown }
+export interface SessionSubagent { invocation_id: string; session_id: string; task: string | null; status: string }
 export interface PendingWait { invocation_id: string; wait_id: string; node_id?: string; occurrence_id: string }
 export interface Controls {
   root_invocation_id: string; root_session_id: string; status: string; control_state: string; expected_version: number;

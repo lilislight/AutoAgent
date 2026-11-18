@@ -171,6 +171,16 @@ class HistoryProjectionTests(unittest.TestCase):
         for target in (route(protocol="openai.responses"), route().model_copy(update={"tool_media": True})):
             self.assertEqual(project_history(history, target)[1].content, (image,))
 
+    def test_corrected_media_capability_preserves_native_replay_on_the_same_route(self):
+        """Discovering tool-media support keeps opaque reasoning from previously saved responses."""
+        origin = route()
+        improved = origin.model_copy(update={"tool_media": True})
+        reasoning = LLMReasoning(text="Recorded reasoning", native=LLMNativeData(
+            provider_id=origin.provider_id, protocol=origin.protocol, payload={"_group_id": "saved"}))
+        conversation = Conversation().append(reasoning, origin=origin)
+        self.assertEqual(project_history(conversation, improved), (reasoning,))
+        self.assertFalse(improved.model_copy(update={"version": "2"}).accepts(origin))
+
     def test_route_fingerprint_changes_with_endpoint_or_adapter_without_retaining_secrets(self):
         """Restarting a default registration at another endpoint invalidates its old replay affinity."""
         snapshot = SimpleNamespace(bindings={"provider": "1"}, settings=AgentHostSettings(

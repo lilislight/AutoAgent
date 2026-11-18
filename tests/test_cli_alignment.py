@@ -11,7 +11,8 @@ from unittest.mock import patch
 import httpx
 from sqlalchemy import update
 
-from autoagent import Node, Workflow, WorkflowCompiler, WorkflowDefinitionSnapshot
+from autoagent import Node, Workflow
+from autoagent.core.compiler import WorkflowCompiler, WorkflowDefinitionSnapshot
 from autoagent.cli import CliError
 from autoagent.cli.history import run_query
 from autoagent.cli.main import build_parser, main

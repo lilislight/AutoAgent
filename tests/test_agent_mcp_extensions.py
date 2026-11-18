@@ -15,7 +15,17 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
-from autoagent import UserEventContext, UserEventSpec, AutoAgentApp, Capability, Node, Operator, Stream, ValueContract, Workflow
+from autoagent import (
+    UserEventContext,
+    UserEventSpec,
+    Capability,
+    Node,
+    Operator,
+    Stream,
+    ValueContract,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     ChatCompletionsAdapter, LLMRequest, LLMToolCall, LLMToolResult,
     MCPCallbacks, MCPClient, MCPClientError, MCPFileTokenStorage,

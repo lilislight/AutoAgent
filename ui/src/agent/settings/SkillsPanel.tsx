@@ -23,8 +23,26 @@ export function SkillsPanel({ inventory, workspace, workspaces, onWorkspace, act
   const skills = inventory?.resources.filter(resource => resource.kind === 'skill') ?? [];
   const row = (resource: Resource) => <div className="settings-resource-row" key={resource.management_id}><span className="settings-resource-symbol"><AgentIcon name="skills" /></span><div className="settings-row-copy"><strong>{resource.name}</strong><p>{resource.description}</p><small className="settings-path">{resource.location}</small></div><div className="settings-row-actions"><button type="button" onClick={() => onDocument(resource)}>View SKILL.md</button><Toggle label={`Enable skill ${resource.name}`} checked={resource.enabled} disabled={!!actions.pending || !resource.available || resource.enabled_editable === false} busy={actions.pending === resource.management_id} onChange={enabled => actions.run(resource.management_id, async () => { await actions.save({ kind: 'resource', name: resource.name, resource_id: resource.management_id, permissions: null, enabled }); })} /></div></div>;
   const selected = (values: Resource[]) => values.filter(skill => `${skill.name} ${skill.description}`.toLowerCase().includes(search.toLowerCase()));
+  const workspaceSkills = selected(skills.filter(skill => skill.origin === 'workspace'));
+  const diagnostics = inventory?.skill_diagnostics ?? [];
   return <><Search label="Search skills" value={search} onChange={setSearch} /><Fold title="Built-in and project" count={inventory ? selected(skills.filter(skill => ['builtin', 'project'].includes(skill.origin))).length : undefined}>{inventory ? selected(skills.filter(skill => ['builtin', 'project'].includes(skill.origin))).map(row) : <RowsSkeleton metadata />}{inventory && !selected(skills.filter(skill => ['builtin', 'project'].includes(skill.origin))).length ? <p className="settings-empty">No built-in or project skills.</p> : null}</Fold>
-    <Fold title="Workspace" count={inventory ? selected(skills.filter(skill => skill.origin === 'workspace')).length : undefined} actions={<select className="settings-workspace-select" aria-label="Workspace to manage skills" value={workspace ?? inventory?.workspace_id ?? ''} onChange={event => onWorkspace(event.target.value)}>{!workspaces.length ? <option value="">No workspaces available</option> : null}{workspaces.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>}>{inventory ? selected(skills.filter(skill => skill.origin === 'workspace')).map(row) : <RowsSkeleton metadata />}{inventory && !selected(skills.filter(skill => skill.origin === 'workspace')).length ? <p className="settings-empty">No skills discovered in this workspace.</p> : null}</Fold>
+    <Fold title="Workspace" count={inventory ? workspaceSkills.length : undefined} actions={
+      <select className="settings-workspace-select" aria-label="Workspace to manage skills"
+        value={workspace ?? inventory?.workspace_id ?? ''} onChange={event => onWorkspace(event.target.value)}>
+        {!workspaces.length && <option value="">No workspaces available</option>}
+        {workspaces.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+      </select>
+    }>
+      {inventory ? workspaceSkills.map(row) : <RowsSkeleton metadata />}
+      {diagnostics.map(diagnostic => <div className="settings-resource-row settings-skill-diagnostic" key={diagnostic.location}>
+        <span className="settings-resource-symbol"><AgentIcon name="skills" /></span>
+        <div className="settings-row-copy">
+          <strong className="settings-path">{diagnostic.location}</strong>
+          <FormError message={diagnostic.message} />
+        </div>
+      </div>)}
+      {inventory && !workspaceSkills.length && !diagnostics.length && <p className="settings-empty">No skills discovered in this workspace.</p>}
+    </Fold>
     {skills.some(skill => skill.origin === 'shared') ? <Fold title="Shared directory" count={inventory ? selected(skills.filter(skill => skill.origin === 'shared')).length : undefined}>{inventory ? selected(skills.filter(skill => skill.origin === 'shared')).map(row) : <RowsSkeleton metadata />}</Fold> : null}
     <Fold title="Added directories" count={inventory?.items.filter(item => item.configuration.kind === 'skills').length}>{inventory?.items.filter(item => item.configuration.kind === 'skills').map(item => <section className="settings-source" key={item.id}><div className="settings-resource-row"><span className="settings-resource-symbol"><AgentIcon name="folder" /></span><div className="settings-row-copy"><strong>{item.configuration.name}</strong><p className="settings-path">{item.configuration.path}</p><small>{item.state}{item.error ? ` · ${item.error}` : ''}</small></div><div className="settings-row-actions"><button type="button" disabled={!!actions.pending} onClick={() => onEditDirectory(item)}>Edit</button><button type="button" disabled={!!actions.pending} onClick={() => onDelete(item)}>Remove</button><Toggle label={`Enable directory ${item.configuration.name}`} checked={item.configuration.enabled} disabled={!!actions.pending} busy={actions.pending === item.id} onChange={enabled => actions.run(item.id, () => actions.save({ ...item.configuration, enabled }, item))} /></div></div>{selected(skills.filter(skill => skill.source_id === item.id)).map(row)}</section>)}{inventory && !inventory.items.some(item => item.configuration.kind === 'skills') ? <p className="settings-empty">No added directories.</p> : null}</Fold>
   </>;

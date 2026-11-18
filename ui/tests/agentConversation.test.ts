@@ -1,5 +1,5 @@
 import { executionStatus } from '../src/agent/executionState.js';
-import { newId } from '../src/agent/ids.js';
+import { newId } from '../src/ids.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyEvents, emptyConversation, entityKey, resetTransient, sortedRows } from '../src/agent/conversationState.js';
@@ -125,9 +125,11 @@ test('execution headings distinguish paused control from Invocation lifecycle', 
   assert.equal(executionStatus('running', paused), 'paused');
   assert.equal(executionStatus('waiting', paused), 'paused');
   assert.equal(executionStatus('completed', paused), 'completed');
-  assert.equal(executionStatus('running', { control_state: 'active', recovery_reason: 'interrupted' }), 'interrupted');
-  assert.equal(executionStatus('waiting', { control_state: 'active', recovery_reason: 'interrupted' }), 'waiting');
-  assert.equal(executionStatus('failed', { control_state: 'active', recovery_reason: 'failed' }), 'failed');
+  const recoveryHint = { control_state: 'active', recovery_reason: 'interrupted' };
+  assert.equal(executionStatus('running', recoveryHint), 'running');
+  assert.equal(executionStatus('waiting', recoveryHint), 'waiting');
+  assert.equal(executionStatus('failed', recoveryHint), 'failed');
+  assert.equal(executionStatus('cancelled', recoveryHint), 'cancelled');
 });
 
 
@@ -142,6 +144,6 @@ test('approval replies carry a trimmed denial reason only for rejected calls', (
 
 
 test('pause admission closure remains distinct from a fully paused execution', () => {
-  assert.equal(executionStatus('running', { control_state: 'pausing', recovery_reason: null }), 'pausing');
-  assert.equal(executionStatus('running', { control_state: 'paused', recovery_reason: 'paused' }), 'paused');
+  assert.equal(executionStatus('running', { control_state: 'pausing' }), 'pausing');
+  assert.equal(executionStatus('running', { control_state: 'paused' }), 'paused');
 });

@@ -6,11 +6,13 @@ import unittest
 from dataclasses import replace
 
 from autoagent import (
-    AutoAgentApp, Await, AwaitSignal, ChildCase, Edge, InputMappingContext, Node,
+    Await, AwaitSignal, ChildCase, Edge, InputMappingContext, Node,
     ReceiveSignal, RuntimeHandle, RuntimeObservation, Select, SelectResult, SendSignal,
     SelfHandle, SignalCase, SignalEndpoint, Spawn, Timer, TimerCase, TimerRequest,
-    Wait, Workflow, RuntimeTransitionError,
+    Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeTransitionError
 from autoagent.core import RuntimeEvent, RuntimeGraphCheckpoint
 from tests.test_system_commands import Value, Collector, identity
 
@@ -262,7 +264,8 @@ class SelectTests(unittest.TestCase):
 
     def test_definitions_and_compiler_reject_invalid_configuration(self):
         """Invalid cases and unsupported mapping/Map configuration fail before execution."""
-        from autoagent import Map, WorkflowCompiler
+        from autoagent import Map
+        from autoagent.core.compiler import WorkflowCompiler
         for factory in (lambda: Select({}), lambda: Select({'x': object()}), lambda: AwaitSignal('', 1),
                 lambda: SignalCase('x', 0), lambda: TimerCase(), lambda: ChildCase(None)):
             with self.assertRaises((ValueError, TypeError)):
@@ -336,7 +339,7 @@ class WaitRecoveryBoundaryTests(unittest.TestCase):
 
     def test_awakening_ack_failure_retries_exact_event(self):
         """A lost awakening acknowledgement cannot consume twice or replace its result."""
-        from autoagent import RuntimeInfrastructureError
+        from autoagent.core.errors import RuntimeInfrastructureError
         class Sink(Collector):
             failed = None
             retried = False

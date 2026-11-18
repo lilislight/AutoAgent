@@ -10,7 +10,8 @@ import asyncio
 import json
 import statistics
 import time
-from autoagent import AutoAgentApp, Map, Node, Wait, Workflow
+from autoagent import Map, Node, Wait, Workflow
+from autoagent.core.app import AutoAgentApp
 from tests.benchmarks.benchmark_core_audit import Value, identity, items
 
 

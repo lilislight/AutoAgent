@@ -9,12 +9,12 @@ import type { Usage } from './types.js';
 export type UsageLoader = (invocation: string, signal: AbortSignal) => Promise<{ invocation: Usage | null }>;
 const count = (value: number | null | undefined) => value == null ? '—' : new Intl.NumberFormat('en').format(value);
 
-export function UsageFacts({ usage }: { usage: Usage }) {
+export function UsageFacts({ usage, showCachedInput = false }: { usage: Usage; showCachedInput?: boolean }) {
   const priced = usage.cost_usd !== null && (usage.call_count === 0 || usage.missing_cost_calls < usage.call_count);
   return <><dl className="agent-usage-facts">
     <div><dt>Model calls</dt><dd>{count(usage.call_count)}</dd></div>
     <div><dt>Input tokens</dt><dd>{count(usage.input_tokens)}</dd></div>
-    {usage.cache_read_tokens != null && usage.cache_read_tokens > 0 ? <div className="agent-usage-subset"><dt>Cached input </dt><dd>{count(usage.cache_read_tokens)}</dd></div> : null}
+    {showCachedInput || (usage.cache_read_tokens ?? 0) > 0 ? <div className="agent-usage-subset"><dt>Cached input tokens</dt><dd>{count(usage.cache_read_tokens)}</dd></div> : null}
     <div><dt>Output tokens</dt><dd>{count(usage.output_tokens)}</dd></div>
     {usage.reasoning_tokens != null && usage.reasoning_tokens > 0 ? <div className="agent-usage-subset"><dt>Reasoning </dt><dd>{count(usage.reasoning_tokens)}</dd></div> : null}
     <div className="agent-usage-total"><dt>Total tokens</dt><dd>{count(usage.total_tokens)}</dd></div>
@@ -34,11 +34,11 @@ function UsageContent({ invocation, session, load }: { invocation: string; sessi
     {query.data?.invocation ? <UsageFacts usage={query.data.invocation} /> : query.isSuccess ? <p className="agent-usage-note">No usage recorded.</p> : null}
   </>;
 }
-export function UsageButton({ invocation, session, load, active }: { invocation: string; session: string; load?: UsageLoader; active: boolean }) {
+export function UsageButton({ invocation, session, load, active, mobile }: { invocation: string; session: string; load?: UsageLoader; active: boolean; mobile?: boolean }) {
   const [open, setOpen] = useState(false), trigger = useRef<HTMLButtonElement>(null);
   const close = useCallback(() => setOpen(false), []);
   useEffect(() => { if (!active) setOpen(false); }, [active]);
-  return <><Tooltip content="View usage for this turn" disabled={open}><button ref={trigger} type="button" className="agent-answer-copy" aria-label="View usage for this turn" aria-expanded={open} aria-haspopup="dialog" disabled={!load} onClick={() => setOpen(value => !value)}><AgentIcon name="usage" /></button></Tooltip>
-    {open && active && load ? <AgentPopover anchor={trigger} label="Turn usage" onClose={close}><UsageContent invocation={invocation} session={session} load={load} /></AgentPopover> : null}
+  return <><Tooltip content="View usage for this turn" disabled={mobile || open}><button ref={trigger} type="button" className="agent-answer-copy" aria-label="View usage for this turn" aria-expanded={open} aria-haspopup="dialog" disabled={!load} onClick={() => setOpen(value => !value)}><AgentIcon name="usage" /></button></Tooltip>
+    {open && active && load ? <AgentPopover sheet={mobile} anchor={trigger} label="Turn usage" onClose={close}><UsageContent invocation={invocation} session={session} load={load} /></AgentPopover> : null}
   </>;
 }

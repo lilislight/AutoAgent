@@ -9,8 +9,10 @@ import json
 import threading
 import unittest
 from dataclasses import replace
-from autoagent import (AutoAgentApp, AppCheckpoint, RuntimeHandle, InvocationRef, Map,
-    Node, Workflow, Wait, RuntimeGraphCheckpoint, RuntimeTransitionError, Recovery)
+from autoagent import RuntimeHandle, Map, Node, Workflow, Wait, Recovery
+from autoagent.core.app import AutoAgentApp, AppCheckpoint, InvocationRef
+from autoagent.core.errors import RuntimeTransitionError
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 from autoagent.core import SessionCheckpoint, StateReducer, RuntimeState
 from tests.benchmarks.benchmark_core_audit import Value, identity, items
 
@@ -330,7 +332,7 @@ class RuntimeGraphTests(unittest.TestCase):
 
     def test_cancel_after_child_sink_failure_clears_resolved_drive_error(self):
         """A successful cancellation resolves old infrastructure errors after exact ACK retry."""
-        from autoagent import RuntimeInfrastructureError
+        from autoagent.core.errors import RuntimeInfrastructureError
         class FailOnce:
             def __init__(self): self.failed = False
             async def append(self, event):

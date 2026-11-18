@@ -176,7 +176,8 @@ class ToolContextTests(unittest.IsolatedAsyncioTestCase):
         """Context-enabled sync Tools keep Core worker and cancellation ownership."""
         import threading
         from unittest.mock import patch
-        from autoagent import AutoAgentApp, Node, Workflow
+        from autoagent import Node, Workflow
+        from autoagent.core.app import AutoAgentApp
 
         events = []
         def lookup(value: int, ctx: ToolContext) -> str:
@@ -199,7 +200,8 @@ class ToolContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_core_supports_async_hooks_for_sync_tools_on_owned_workers(self):
         """Async hooks run before synchronous Tools dispatched through the Core bridge."""
         import threading
-        from autoagent import AutoAgentApp, Node, Workflow
+        from autoagent import Node, Workflow
+        from autoagent.core.app import AutoAgentApp
         events = []
         def lookup(value: int) -> str:
             events.append("execute")

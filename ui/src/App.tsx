@@ -18,7 +18,7 @@ import brandIcon from "./autoagent.svg";
 import { MemoryMonitorButton } from './components/MemoryMonitor';
 import { ApplicationSwitch } from './components/ApplicationSwitch';
 import AgentWorkspace from "./agent/AgentWorkspace";
-import { AgentIcon } from './agent/AgentIcon';
+import { useAgentViewport } from './agent/useAgentViewport';
 import { useAgentSidebar } from './agent/useAgentSidebar';
 import type { AcceptedExecution, ExecutionTrace, LocationState, Selection, TraceRow, WorkflowGraphData } from "./types";
 
@@ -185,6 +185,8 @@ export default function App() {
   const [location, navigate, views] = useLocation();
   const [theme, toggleTheme] = useTheme();
   const agentSidebar = useAgentSidebar(location.view === 'agents');
+  const agentMobile = location.view === 'agents' && agentSidebar.narrow;
+  useAgentViewport(agentMobile);
   const lastDeveloperView = useRef<'workflows' | 'executions'>(location.view === 'executions' ? 'executions' : 'workflows');
   useEffect(() => { if (location.view !== 'agents') lastDeveloperView.current = location.view; }, [location.view]);
   const previousView = useRef(location.view);
@@ -212,8 +214,8 @@ export default function App() {
     if (view !== location.view) navigate(views[view] ?? { view, execution: null, workflow: null, revision: null, session: null, selection: null });
   }, [location.view, navigate, views]);
   const developerView = location.view === 'agents' ? lastDeveloperView.current : location.view;
-  return <div className={`app-shell ${location.view === 'agents' ? 'agent-mode' : ''}`}>
-    <header className="topbar"><div className="topbar-leading">{location.view === 'agents' ? <button id="agent-sidebar-toggle" type="button" className="agent-sidebar-toggle" aria-label={`${agentSidebar.open ? 'Hide' : 'Show'} conversations`} title={`${agentSidebar.open ? 'Hide' : 'Show'} conversations`} aria-controls="agent-conversations" aria-expanded={agentSidebar.open} onClick={agentSidebar.toggle}><AgentIcon name="panel" /></button> : null}<a className="brand" href={config.uiBase} aria-label="AutoAgent Tracing"><img className="brand-symbol" src={brandIcon} width="36" height="36" alt="" /><span className="brand-name">AutoAgent<span className="brand-extra"> Tracing</span></span></a></div>
+  return <div className={`app-shell ${location.view === 'agents' ? 'agent-mode' : ''}${agentMobile ? ' agent-mobile' : ''}${agentMobile && agentSidebar.open ? ' agent-mobile-directory-open' : ''}`}>
+    <header className="topbar"><div className="topbar-leading"><a className="brand" href={config.uiBase} aria-label="AutoAgent Tracing"><img className="brand-symbol" src={brandIcon} width="36" height="36" alt="" /><span className="brand-name">AutoAgent<span className="brand-extra"> Tracing</span></span></a></div>
       <ApplicationSwitch agent={location.view === 'agents'} agentHref={writePageLocation(views.agents ?? { view: 'agents', session: null, execution: null, workflow: null, revision: null, selection: null }, config.uiBase, config.defaultView)} workflowHref={writePageLocation(views[developerView] ?? { view: developerView, session: null, execution: null, workflow: null, revision: null, selection: null }, config.uiBase, config.defaultView)} onChange={agent => changeView(agent ? 'agents' : developerView)} />
       <div className="topbar-actions"><MemoryMonitorButton /><span className="local-badge"><span />Local</span>
       <button className="theme-switch" role="switch" aria-checked={theme === "dark"} aria-label="Dark theme" onClick={toggleTheme} title={`Switch to ${theme === "light" ? "dark" : "light"} theme`}>
@@ -222,7 +224,7 @@ export default function App() {
         <span className="theme-switch-thumb" aria-hidden="true" />
       </button></div></header>
     <div className="workspace-tabs">
-      {Object.values(views).map(value => value.view === 'agents' ? <AgentWorkspace key="agents" sidebar={agentSidebar} session={value.session} invocation={value.execution} workspace={value.agentWorkspace} active={value.view === location.view} onNavigate={(session, execution, replace, workspace) => updateWorkspace({ view: 'agents', session, execution, workflow: null, revision: null, selection: null, agentWorkspace: workspace }, replace)} /> : <BrowserWorkspace key={value.view} location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} theme={theme} accepted={accepted} onRunAccepted={runAccepted} onTraceSaved={traceSaved} onOpenWorkflow={openWorkflow} />)}
+      {Object.values(views).map(value => value.view === 'agents' ? <AgentWorkspace key="agents" theme={theme} sidebar={agentSidebar} session={value.session} invocation={value.execution} workspace={value.agentWorkspace} active={value.view === location.view} onNavigate={(session, execution, replace, workspace) => updateWorkspace({ view: 'agents', session, execution, workflow: null, revision: null, selection: null, agentWorkspace: workspace }, replace)} /> : <BrowserWorkspace key={value.view} location={value} active={value.view === location.view} navigate={updateWorkspace} changeView={changeView} theme={theme} accepted={accepted} onRunAccepted={runAccepted} onTraceSaved={traceSaved} onOpenWorkflow={openWorkflow} />)}
     </div>
   </div>;
 }

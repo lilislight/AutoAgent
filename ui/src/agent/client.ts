@@ -1,17 +1,38 @@
-import { newId } from './ids';
+import { newId } from '../ids';
 import { config, request } from '../http';
-import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution, AgentInvocation, AgentResources, AgentSession, AgentWorkspaceInfo, Controls, Operation, Page, SessionSettings, SettingsRecord, Usage } from './types';
+import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution, AgentInvocation, AgentResources, AgentSession, AgentWorkspaceInfo, Controls, Operation, Page, SessionSettings, SessionSubagent, SettingsRecord, Usage } from './types';
+
+function imageUpload(file: File): Promise<{ mime_type: string; data: string }> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error(`Could not read ${file.name}.`));
+    reader.onload = () => {
+      const url = String(reader.result);
+      resolve({ mime_type: file.type, data: url.slice(url.indexOf(',') + 1) });
+    };
+    reader.readAsDataURL(file);
+  });
+}
 
 // All commands use Host operations. This module has no Graph/Trace dependencies.
 export const agentClient = {
   queue: (sid: string, signal: AbortSignal) => request<import('./types').MessageQueue>(`/agent/queue?${new URLSearchParams({ session_id: sid })}`, signal),
-  enqueue: (sid: string, message: string, requestId: string, workspace: string | null, signal: AbortSignal, sendTo?: string, initialSettings?: SessionSettings) => request<import('./types').QueuedMessage>('/agent/queue', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, message, request_id: requestId, workspace_id: workspace, ...(sendTo ? { send_to: sendTo } : {}), ...(initialSettings ? { initial_settings: initialSettings } : {}) }) }),
+  enqueue: async (sid: string, message: string, itemId: string, workspace: string | null, signal: AbortSignal, sendTo?: string, initialSettings?: SessionSettings, files: File[] = []) => {
+    const images = files.length ? await Promise.all(files.map(imageUpload)) : undefined;
+    signal.throwIfAborted();
+    return request<import('./types').QueuedMessage>('/agent/queue', signal, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sid, message, item_id: itemId, workspace_id: workspace, images, send_to: sendTo, initial_settings: initialSettings }),
+    });
+  },
   queueAction: (sid: string, itemId: string, action: 'cancel' | 'send_now' | 'continue', signal: AbortSignal, invocationId?: string) => request<import('./types').QueuedMessage>('/agent/queue/actions', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, item_id: itemId, action, ...(invocationId ? { invocation_id: invocationId } : {}) }) }),
   catalog: (signal: AbortSignal) => request<AgentCatalog>('/agent/catalog', signal),
   workspaces: (signal: AbortSignal) => request<{ items: AgentWorkspaceInfo[] }>('/agent/workspaces', signal),
   createWorkspace: (value: { name: string; path: string }, signal: AbortSignal) => request<AgentWorkspaceInfo>('/agent/workspaces', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }),
   sessions: (workspace: string | null, cursor: string | null, signal: AbortSignal) => request<Page<AgentSession>>(`/agent/sessions?${new URLSearchParams({ ...(workspace ? { workspace_id: workspace } : {}), ...(cursor ? { cursor } : {}) })}`, signal),
   invocations: (session: string, cursor: string | null, signal: AbortSignal) => request<Page<AgentInvocation>>(`/agent/invocations?${new URLSearchParams({ session_id: session, ...(cursor ? { cursor } : {}) })}`, signal),
+  subagents: (session: string, cursor: string | null, signal: AbortSignal) => request<Page<SessionSubagent>>(`/agent/subagents?${new URLSearchParams({ session_id: session, ...(cursor ? { cursor } : {}) })}`, signal),
+  rename: (session: string, title: string, version: number, signal: AbortSignal) => request<SettingsRecord>(`/agent/sessions/${encodeURIComponent(session)}/title`, signal, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, expected_version: version }) }),
   controls: (iid: string, cursor: string | null, signal: AbortSignal) => request<Controls>(`/execution-controls?${new URLSearchParams({ invocation_id: iid, ...(cursor ? { cursor } : {}) })}`, signal),
   execution: (iid: string, signal: AbortSignal) => request<AgentExecution>(`/agent/execution?${new URLSearchParams({ invocation_id: iid })}`, signal),
   settings: (sid: string, signal: AbortSignal, workspace?: string | null) => request<SettingsRecord>(`/agent/settings?${new URLSearchParams({ session_id: sid, ...(workspace ? { workspace_id: workspace } : workspace === null ? { unbound: 'true' } : {}) })}`, signal),

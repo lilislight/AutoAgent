@@ -127,7 +127,8 @@ class DatabaseProjectionContracts:
 
     async def test_sql_prefix_same_invocation_tail(self):
         """A running Invocation combines its persisted prefix with resumed Event tail."""
-        from autoagent import AutoAgentApp, Node, Wait, Workflow
+        from autoagent import Node, Wait, Workflow
+        from autoagent.core.app import AutoAgentApp
         from tests.test_host_persistence import Value
         sink = await self.sink(projection_worker_enabled=False, projection_cache_enabled=False)
         wf = Workflow('prefix-wait', nodes=[Node('approval', Wait(Value, Value))])
@@ -345,7 +346,8 @@ class DatabaseProjectionContracts:
 
     async def test_chunked_projection_cache_eviction_preserves_loop_ordinals(self):
         """Small projection pages and cache eviction keep repeated Node ordinals and replay identical."""
-        from autoagent import AutoAgentApp, Edge, Node, ResourcePolicy, Workflow
+        from autoagent import Edge, Node, ResourcePolicy, Workflow
+        from autoagent.core.app import AutoAgentApp
         from tests.test_host_persistence import again, finished, identity, shorten
         for budget in (4 * 1024 * 1024, 64):
             with self.subTest(budget=budget):

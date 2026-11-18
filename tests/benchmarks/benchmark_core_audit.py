@@ -11,7 +11,16 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 from typing_extensions import TypedDict
-from autoagent import AutoAgentApp, ConditionContext, ContextOperation, Edge, InputMappingContext, Map, Node, Workflow
+from autoagent import (
+    ConditionContext,
+    ContextOperation,
+    Edge,
+    InputMappingContext,
+    Map,
+    Node,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import NodeCompleted, OccurrencePlan, SchedulerDelta, StateDelta, StateOperation, TransitionPlanner, freeze
 from autoagent.core.runtime.operations import apply_runtime_delta
 from autoagent.core.runtime.transitions import _apply_context_operations
@@ -19,7 +28,7 @@ from autoagent.core.runtime.state import ChildInvocationPlan, ChildUnitState
 from autoagent.core.runtime.events import ChildInvocationPhaseChanged
 from autoagent.core.operators.contract import ValueContract
 
-OUT=Path('artifacts/core_performance_audit')
+OUT=Path('.autoagent/benchmarks/core_performance_audit')
 class Value(TypedDict):
     value: int
 class Document(TypedDict):

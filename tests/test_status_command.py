@@ -3,10 +3,12 @@ import asyncio
 import unittest
 
 from autoagent import (
-    AutoAgentApp, Await, Edge, InputMappingContext, Map, Node, Operator,
-    RuntimeHandle, RuntimeInfrastructureError, RuntimeObservation,
-    RuntimeTransitionError, Spawn, Status, Wait, Workflow,
+    Await, Edge, InputMappingContext, Map, Node, Operator,
+    RuntimeHandle, RuntimeObservation,
+    Spawn, Status, Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError, RuntimeTransitionError
 from autoagent.core import ChildResult, RuntimeEvent, RuntimeGraphCheckpoint
 from tests.test_system_commands import Collector, Value, identity
 
@@ -271,7 +273,7 @@ class StatusCommandTests(unittest.TestCase):
                 raise AssertionError('pending result must settle without a new query')
             app._workflow_executor._status_runtime = unexpected
             handle = app._runtime_identity('root')[0]
-            from autoagent import InvocationRef
+            from autoagent.core.app import InvocationRef
             result = app.recover(InvocationRef(**handle.model_dump()))
             self.assertEqual(result.status, 'completed', result)
             self.assertEqual(result.output.status, 'running')

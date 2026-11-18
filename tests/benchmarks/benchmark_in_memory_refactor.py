@@ -15,7 +15,8 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, ContextOperation, ContextPatch, Edge, Node, OutputBindingContext, Workflow
+from autoagent import ContextOperation, ContextPatch, Edge, Node, OutputBindingContext, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import StateDelta, StateOperation
 from autoagent.core.runtime.operations import apply_runtime_delta
 

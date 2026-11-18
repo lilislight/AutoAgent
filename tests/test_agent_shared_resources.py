@@ -21,6 +21,52 @@ class SharedResourceContracts:
     product = SessionControlContracts.product
     database_url = SessionControlContracts.database_url
 
+    async def test_mcp_tool_name_conflict_matches_the_model_inventory(self):
+        """A colliding MCP Tool is marked unavailable while other Tools on that server remain usable."""
+        from contextlib import asynccontextmanager
+        from tests.test_agent_mcp import MCPHTTPTests, WireServer
+        from tests.test_agent_workflow import settings
+
+        provider = ScriptedProvider(answer())
+
+        def factory(config, **options):
+            wire = WireServer(legacy=True)
+            wire.rpc_override = lambda message: {"result": {"tools": [
+                wire.tool, {**wire.tool, "name": "multiply"}], "resultType": "complete"}} if message["method"] == "tools/list" else None
+            return MCPHTTPTests.client(self, wire, sse=True)[0]
+
+        @asynccontextmanager
+        async def setup(runtime):
+            def add(a: int, b: int) -> int:
+                return a + b
+            app = runtime.applications["agent"]
+            runtime.providers.register("offline", provider)
+            app.context.set_defaults(settings())
+            app.context.resources.register_tool(Tool(add), workflows={"autoagent.agent"})
+            yield
+
+        with tempfile.TemporaryDirectory() as directory, patch("autoagent.agent.MCPClient", side_effect=factory):
+            root = Path(directory)
+            url = await self.database_url(root)
+            async with AutoAgentHost(root=root, workflows=[builtin_agent_workflow(execution=False)],
+                    settings=HostSettings(database_url=url), environment={}, lifespan=setup) as host:
+                app = host.applications["agent"]
+                connection = await app.context.shared_resources.save(MCPResourceConfig(name="Wire", transport={
+                    "type": "sse", "server_id": "wire", "url": "https://server.test/sse"}))
+                inventory = await self.eventually(lambda: app.resource_configs(scope="mcp"), lambda data:
+                    any(tool["mcp_status"] == "conflict" for tool in data["resources"]))
+                rows = {row["remote_name"]: row for row in inventory["resources"]}
+                self.assertFalse(rows["add"]["available"])
+                self.assertTrue(rows["multiply"]["available"])
+                record = next(item for item in inventory["items"] if item["id"] == connection["id"])
+                self.assertEqual(record["state"], "conflict")
+                self.assertIn("conflict", record["error"])
+                result = await host.join(await app.start_conversation("chat", "Check tool catalog"))
+                self.assertEqual(result.status, "completed", result.error)
+                model_tools = {tool.name: tool for tool in provider.requests[0].tools}
+                self.assertIn("multiply", model_tools)
+                self.assertNotEqual(model_tools["add"].description, "Remote addition")
+
     async def test_mcp_catalog_survives_offline_restart_and_requires_schema_review(self):
         """A reconnected tool keeps custom rules and stays unpublished until its changed schema is reviewed."""
         from tests.test_agent_mcp import MCPHTTPTests, WireServer

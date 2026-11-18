@@ -12,7 +12,8 @@ import sys
 import threading
 from contextlib import asynccontextmanager
 
-from autoagent import AutoAgentApp, Node, TimeoutPolicy, Workflow
+from autoagent import Node, TimeoutPolicy, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     LLMToolCall, LLMToolResult, MCPClient, MCPStdioConfig, MCPOperations,
     MCPReadResourceRequest, MCPGetPromptRequest, MemorySkillSource, Skill, SkillSet,

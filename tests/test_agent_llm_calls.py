@@ -4,7 +4,8 @@ import asyncio
 from contextlib import aclosing
 import unittest
 
-from autoagent import AutoAgentApp, Edge, InputMappingContext, Node, ValueContract, Workflow
+from autoagent import Edge, InputMappingContext, Node, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     LLM_CALL, LLMRequest, LLMSelection, llm_call_operator,
 )

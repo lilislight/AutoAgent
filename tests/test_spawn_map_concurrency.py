@@ -7,7 +7,9 @@ import unittest
 
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, InputMappingContext, Map, Node, Spawn, Workflow, RuntimeInfrastructureError
+from autoagent import InputMappingContext, Map, Node, Spawn, Workflow
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError
 from tests.graph_fixtures import child_refs, load_graph
 from tests.test_child_sink_integrity import Collector, checkpoint_from_events
 

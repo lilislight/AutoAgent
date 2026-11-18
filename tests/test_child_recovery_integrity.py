@@ -17,7 +17,6 @@ from typing_extensions import TypedDict
 
 from autoagent import (
     AggregationContext,
-    AutoAgentApp,
     ConditionContext,
     ContextPatch,
     Edge,
@@ -26,10 +25,11 @@ from autoagent import (
     Node,
     OutputBindingContext,
     Recovery,
-    RuntimeInfrastructureError,
     Wait,
     Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError
 from autoagent.core import AppCheckpoint, SessionCheckpoint, RuntimeEvent, StateReducer
 
 

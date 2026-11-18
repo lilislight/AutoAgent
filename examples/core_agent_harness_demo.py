@@ -27,12 +27,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from autoagent import (
-    AutoAgentApp, AwaitSignal, ChildCase, ConditionContext, ContextOperation,
+    AwaitSignal, ChildCase, ConditionContext, ContextOperation,
     ContextPatch, Edge, InputMappingContext, Map, Node, OutputBindingContext,
     OwnerHandle, RuntimeHandle, RuntimeObservation, Select,
     SelectResult, SendSignal, SignalBatch, SignalCase, SignalEndpoint, Spawn,
     Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
 
 
 Scenario = Literal['approved', 'rejected', 'llm_failure', 'tool_failure']

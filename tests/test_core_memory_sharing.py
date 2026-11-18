@@ -13,7 +13,9 @@ from types import MappingProxyType
 from unittest.mock import patch
 from typing_extensions import TypedDict
 
-from autoagent import AutoAgentApp, ContextOperation, ContextPatch, Edge, Node, Workflow, OutputBindingContext, RuntimeTransitionError, RuntimeInfrastructureError
+from autoagent import ContextOperation, ContextPatch, Edge, Node, Workflow, OutputBindingContext
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeTransitionError, RuntimeInfrastructureError
 from autoagent.core.runtime import (
     RuntimeEvent, RuntimeRepository, RuntimeState, SessionState, SessionOpened,
     StateDelta, StateOperation, StateReducer, OperatorCallCompleted,

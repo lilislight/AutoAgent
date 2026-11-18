@@ -1,8 +1,13 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
+import { AgentSheet } from './AgentSheet.js';
 
 /** A non-modal, viewport-contained panel shared by conversation controls. */
-export function AgentPopover({ anchor, label, children, onClose, className = '' }: {
+export function AgentPopover({ sheet, ...props }: Parameters<typeof AnchoredPopover>[0] & { sheet?: boolean }) {
+  return sheet ? <AgentSheet {...props} /> : <AnchoredPopover {...props} />;
+}
+
+function AnchoredPopover({ anchor, label, children, onClose, className = '' }: {
   anchor: RefObject<HTMLButtonElement | null>; label: string; children: ReactNode; onClose: () => void; className?: string;
 }) {
   const panel = useRef<HTMLDivElement>(null), close = useRef<HTMLButtonElement>(null), title = useId();

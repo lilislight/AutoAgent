@@ -6,7 +6,9 @@ import threading
 import unittest
 from dataclasses import replace
 
-from autoagent import AutoAgentApp, Edge, Node, Workflow, Wait, RuntimeInfrastructureError
+from autoagent import Edge, Node, Workflow, Wait
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError
 from autoagent.core import RuntimeEvent, RuntimeState, StateReducer, SessionCheckpoint
 from tests.graph_fixtures import graph_bundle
 from tests.benchmarks.benchmark_core_audit import Value, identity

@@ -10,6 +10,7 @@ from .resources import ManagedAgentResources
 from .workspaces import ApplicationWorkspaces
 from .models import ApplicationSessionSettings
 from autoagent.host.models import HostNotFoundError
+from .images import IMAGE_URI_PREFIX
 
 
 class ApplicationContext(AgentRuntime):
@@ -76,6 +77,12 @@ class ApplicationContext(AgentRuntime):
         record = await self.storage("remember_model", session_id, model)
         return self._remember(record)
 
+    def bind_submission_model(self, selected):
+        selected = self.bind_model(selected)
+        if selected.provider != "default" and not self.host.providers.has(selected.provider):
+            raise ValueError(f"Unknown Agent Provider: {selected.provider!r}.")
+        return selected
+
     def default_preferences(self):
         result = ApplicationSessionSettings.from_runtime(self.defaults)
         selected = self.host.providers.default_model
@@ -127,6 +134,11 @@ class ApplicationContext(AgentRuntime):
 
     async def prepare_workspace(self, snapshot):
         return await self._workspaces.prepare(snapshot)
+
+    async def prepare_tool_workspace(self, snapshot, resource_id):
+        # Skill Tools depend on current document bytes. Other Tools only need
+        # the current Workspace and the catalog already refreshed by preflight.
+        return await self._workspaces.prepare(snapshot, refresh=resource_id.startswith("skills:"))
 
     def process_managers(self):
         managers = super().process_managers()
@@ -191,6 +203,10 @@ class ApplicationContext(AgentRuntime):
                 limit=limit, cursor=cursor)
         return await self.host._perform(read)
 
+    async def list_conversation_summaries(self, workspace_id, *, all_workspaces, limit, cursor):
+        return await self.host._perform(lambda: self.storage("conversation_summaries", workspace_id,
+            all_workspaces=all_workspaces, limit=limit, cursor=cursor))
+
 
     async def conversation_settings(self, session_id, workspace_id=None, *, unbound=False):
         """Preview a new chat's binding without mutating or rebinding existing chats."""
@@ -254,28 +270,57 @@ class ApplicationContext(AgentRuntime):
         return await self.host._perform(read)
 
 
-    async def start_conversation(self, session_id, message, workspace_id=None, *, request_id=None, unbound=False, model=None, remember_model=True):
+    async def start_conversation(self, session_id, message, workspace_id=None, *, unbound=False, model=None, images=(), uploads=(),
+                                 remember_model=True, before_start=None):
         from autoagent.agent_app.workflow import BUILTIN_AGENT_WORKFLOW_ID
         from autoagent.agent.workflow.models import AgentInput
         from autoagent.host.models import HostNotFoundError
-        input_value = AgentInput(message=message, request_id=request_id,
+        from autoagent.agent.models import ImageContent
+        input_value = AgentInput(message=message,
+            images=tuple(image.content() for image in uploads) if uploads else tuple(restore(ImageContent, image) for image in images),
             model=restore(AgentModelSelection, model) if model is not None else None)
         catalog = await self.workspace_catalog()
         if catalog["agent"] is None:
             raise HostNotFoundError("The Agent application is disabled for this project.")
         existing = await self.workspace_session(session_id, allow_new=True)
         record = await self.conversation_settings(session_id, workspace_id, unbound=unbound)
+        selected = self.bind_submission_model(input_value.model or record.settings.model)
         await self.approvals._run(lambda: self._workspaces.validate(record.workspace))
         async def initialize():
-            return await self.storage("initialize_settings", session_id, record.settings, record.workspace, message)
+            return await self.storage("initialize_settings", session_id, record.settings, record.workspace,
+                message or ("Image" if input_value.images else ""), uploads=uploads)
         await self.host._perform(initialize, control=True)
-        selected = self.bind_model(input_value.model or record.settings.model)
         if remember_model:
             await self.remember_model(session_id, selected.model_dump(mode="json"))
         input_value = input_value.model_copy(update={"model": selected})
         return await self.host.execute_json(BUILTIN_AGENT_WORKFLOW_ID, input_value.model_dump(mode="json"),
             revision_id=catalog["agent"]["revision_id"], entry_node_id="start", session_id=session_id,
-            require_existing_session=existing is not None, require_new_session=existing is None)
+            require_existing_session=existing is not None, require_new_session=existing is None, before_start=before_start)
+
+    async def resolve_request_media(self, request):
+        from autoagent.agent.models import AssetSource, ImageContent, LLMMessage
+        from autoagent.core import OperatorCallContext
+
+        sid = OperatorCallContext.current().session_id
+        resolved, inputs = {}, []
+        for item in request.input:
+            if not isinstance(item, LLMMessage) or item.role != "user":
+                inputs.append(item)
+                continue
+            parts = []
+            for part in item.content:
+                if isinstance(part, ImageContent) and isinstance(part.source, AssetSource) and part.source.uri.startswith(IMAGE_URI_PREFIX):
+                    key = part.source.uri.removeprefix(IMAGE_URI_PREFIX)
+                    if key not in resolved:
+                        asset = await self.storage("image", key, session_id=sid)
+                        if asset is None or asset.mime_type != part.source.mime_type:
+                            raise ValueError("An attached image is no longer available.")
+                        resolved[key] = asset.inline()
+                    part = part.model_copy(update={"source": resolved[key]})
+                parts.append(part)
+            inputs.append(item.model_copy(update={"content": tuple(parts)}) if any(
+                before is not after for before, after in zip(item.content, parts)) else item)
+        return request.model_copy(update={"input": tuple(inputs)}) if resolved else request
 
 
     async def rename_conversation(self, session_id, title, *, expected_version):

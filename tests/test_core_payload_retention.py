@@ -1,7 +1,7 @@
 """Payload lifetime across graph consumers, durable recovery and ACK failures."""
 from __future__ import annotations
 
-from autoagent import RuntimeGraphCheckpoint
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 from tests.graph_fixtures import (
     load_graph,
@@ -11,9 +11,22 @@ from tests.graph_fixtures import (
 import unittest
 from typing_extensions import TypedDict
 
-from autoagent import (AggregationContext, AutoAgentApp, ConditionContext, ContextOperation, ContextPatch, Edge,
-                       InputMappingContext, Map, Node, OutputBindingContext,
-                       Recovery, RuntimeInfrastructureError, Wait, Workflow)
+from autoagent import (
+    AggregationContext,
+    ConditionContext,
+    ContextOperation,
+    ContextPatch,
+    Edge,
+    InputMappingContext,
+    Map,
+    Node,
+    OutputBindingContext,
+    Recovery,
+    Wait,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError
 from autoagent.core.runtime import RuntimeEvent, RuntimeState, SessionCheckpoint, StateReducer
 from autoagent.core.runtime._execution_index import ExecutionIndex
 from autoagent.core.runtime.state import validate_runtime_state

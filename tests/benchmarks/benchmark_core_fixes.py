@@ -2,7 +2,8 @@
 import json
 from dataclasses import replace
 from types import MappingProxyType
-from autoagent import AutoAgentApp, ContextOperation, Map, Node, Workflow
+from autoagent import ContextOperation, Map, Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import StateDelta, StateOperation, TransitionPlanner
 from autoagent.core.runtime.operations import apply_runtime_delta
 from autoagent.core.runtime.state import ChildInvocationPlan, ChildUnitState

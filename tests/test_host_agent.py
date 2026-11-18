@@ -1,12 +1,13 @@
 """Shared Host JSON catalog, refresh, explicit embedding setup, and accounted calls."""
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 import json
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from openai import AsyncOpenAI
@@ -14,7 +15,7 @@ from openai import AsyncOpenAI
 from autoagent import Node, Workflow, InputMappingContext
 from autoagent.agent import LLM_CALL, EMBEDDING, embedding_operator, LLMRequest, EmbeddingRequest
 from autoagent.host import AutoAgentHost, HostSettings
-from autoagent.host.providers import CatalogProvider, ModelInfo
+from autoagent.host.providers import CatalogProvider, HostProviders, ModelInfo
 from tests.test_agent_providers import request, chat_body
 from tests.test_agent_capabilities import DemoEmbedding
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
@@ -26,6 +27,40 @@ class CatalogSchemaTests(unittest.TestCase):
         for data in ({'cache_creation_input_token_cost':1}, {'input_cost_per_token':-1}, {'max_input_tokens':0}):
             with self.subTest(data=data), self.assertRaises(ValueError):
                 ModelInfo.model_validate_json(json.dumps(data))
+
+
+class CatalogRetirementTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reload_drains_old_stream_and_closes_only_retired_transports(self):
+        """Reload publishes the new provider while the old stream drains safely."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            def write(model_name):
+                (root / "providers.json").write_text(json.dumps({"providers": {
+                    "local": {"models": [{"id": "tiny", "name": model_name}]}}}))
+
+            async def chunks(_):
+                yield "first"
+                yield "last"
+
+            transport = SimpleNamespace(astream=chunks, aclose=AsyncMock())
+            write("Before")
+            providers = HostProviders(SimpleNamespace(root=root, environment={}))
+            with patch.object(CatalogProvider, "_make_transport", return_value=transport):
+                async with providers.lifespan(None):
+                    previous = providers.get("local")
+                    async with aclosing(previous.astream(request(model="tiny"))) as stream:
+                        self.assertEqual(await anext(stream), "first")
+                        write("After")
+                        await providers._reload()
+                        self.assertIsNot(providers.get("local"), previous)
+                        with self.assertRaises(KeyError):
+                            providers.registration("local", version=previous.version)
+                        transport.aclose.assert_not_awaited()
+                        self.assertEqual(await anext(stream), "last")
+                    await asyncio.gather(*tuple(providers._draining))
+                    transport.aclose.assert_awaited_once()
+                    self.assertEqual(previous.clients, {})
+                    self.assertEqual(len(providers.instances), 1)
 
 
 class HostCatalogContracts:

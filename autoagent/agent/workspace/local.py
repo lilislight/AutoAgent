@@ -7,6 +7,7 @@ from pathlib import Path
 from ..skills import SkillLimits, SkillSet
 from ..skills.files import identity, read_bytes
 from ..skills.errors import SkillError
+from ..skills.skillset import _diagnostic
 from .models import WorkspaceBinding, WorkspaceDiscovery, WorkspaceError, WorkspaceInfo, WorkspaceInstruction
 
 
@@ -51,9 +52,9 @@ class LocalWorkspace:
         root, _ = self.directory(working_directory)
         return LocalExecutionService(root, working_directory=working_directory, config=config, manager=manager)
 
-    def discover(self, working_directory=".") -> WorkspaceDiscovery:
+    def discover(self, working_directory=".", *, skill_errors="raise") -> WorkspaceDiscovery:
         root, directory = self.directory(working_directory)
-        instructions, skills = [], []
+        instructions, skills, diagnostics = [], [], []
         limits = SkillLimits()
         ancestors = [root]
         ancestors.extend(root.joinpath(*directory.relative_to(root).parts[:index])
@@ -75,18 +76,24 @@ class LocalWorkspace:
             skill_root = current / ".agents" / "skills"
             if current == root and (skill_root.exists() or skill_root.is_symlink()):
                 selected = self._contained(skill_root, root)
-                found = SkillSet.discover([selected])
+                found = SkillSet.discover([selected], errors=skill_errors)
+                diagnostics.extend(found.diagnostics)
                 if self._contained(skill_root, root) != selected:
                     raise WorkspaceError("Workspace Skill directory changed during discovery.")
                 for item in found.metadata:
                     skill = found[item.name]
                     if not skill.source.directory.is_relative_to(root):
                         raise WorkspaceError("Discovered Skill is outside its Workspace.")
-                    skills.append(skill.freeze())
+                    try:
+                        skills.append(skill.freeze())
+                    except SkillError as error:
+                        if skill_errors == "raise":
+                            raise
+                        diagnostics.append(_diagnostic(skill.source.location, error))
         # Keep the same explicit collision rule as Build and Host resources.
         SkillSet(skills)
         return WorkspaceDiscovery(self.info, WorkspaceBinding(workspace_id=self.id,
-            working_directory=working_directory).working_directory, tuple(instructions), tuple(skills))
+            working_directory=working_directory).working_directory, tuple(instructions), tuple(skills), tuple(diagnostics))
 
     @staticmethod
     def _contained(path, root):
@@ -98,5 +105,5 @@ class LocalWorkspace:
         except (OSError, RuntimeError) as error:
             raise WorkspaceError("Workspace discovery path is unavailable.") from error
 
-    async def adiscover(self, working_directory=".") -> WorkspaceDiscovery:
-        return await asyncio.to_thread(self.discover, working_directory)
+    async def adiscover(self, working_directory=".", *, skill_errors="raise") -> WorkspaceDiscovery:
+        return await asyncio.to_thread(self.discover, working_directory, skill_errors=skill_errors)

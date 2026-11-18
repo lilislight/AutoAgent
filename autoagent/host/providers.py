@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from collections.abc import AsyncIterator
 from decimal import Decimal
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 from typing import Literal
@@ -19,6 +20,8 @@ from autoagent.agent.models._base import Model, NonEmpty
 from autoagent.agent.context import AgentModelSelection
 from autoagent.agent.models import LLMRequest, LLMStreamChunk
 from autoagent.agent.cost import PRICE_FIELDS, load_litellm_catalog, token_pricing_context
+
+logger = logging.getLogger(__name__)
 
 
 def connection_url(value):
@@ -115,6 +118,10 @@ class CatalogProvider:
         self.models, self.version = models, version
         self.clients = {}
         self._secrets = (config.api_key.get_secret_value(),) if config.api_key else ()
+        self._active = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._retired = False
 
     def _get(self, model):
         if model not in self.models or not self.models[model][0].enabled:
@@ -147,6 +154,14 @@ class CatalogProvider:
                 return owner._safe_error(super()._error(error))
         return Transport(configuration, **options)
 
+    def supports_tool_media(self, model: str) -> bool:
+        """Expose the selected transport's media contract before composing history."""
+        entry = self.models.get(model)
+        if entry is None or not entry[0].enabled:
+            return False
+        transport, _ = self._get(model)
+        return getattr(getattr(transport, "adapter", None), "tool_media", False)
+
     def _safe_error(self, error):
         from autoagent.agent import LLMProviderError, LLMStructuredOutputError, LLMUnsupportedRequest
         from autoagent.core.usage import UsageAccountingError
@@ -159,20 +174,32 @@ class CatalogProvider:
         return LLMProviderError(message or "Provider request failed.", provider_id=self.provider_id,
             protocol=self.protocol, status_code=getattr(error, "status_code", None), retryable=getattr(error, "retryable", None))
 
-    async def ainvoke(self, request):
+    @contextmanager
+    def _borrow(self, request):
+        if self._retired:
+            raise ValueError(f"Provider configuration has changed: {self.provider_id!r}.")
         client, prices = self._get(request.model)
-        request = self._request(request)
-        with token_pricing_context(prices):
+        self._active += 1
+        self._idle.clear()
+        try:
+            with token_pricing_context(prices):
+                yield client
+        finally:
+            self._active -= 1
+            if not self._active:
+                self._idle.set()
+
+    async def ainvoke(self, request):
+        with self._borrow(request) as client:
+            request = self._request(request)
             try:
                 return await client.ainvoke(request)
             except Exception as error:
                 raise self._safe_error(error) from None
 
     async def astream(self, request):
-        client, prices = self._get(request.model)
-        request = self._request(request)
-        with token_pricing_context(prices):
-            source = client.astream(request)
+        with self._borrow(request) as client:
+            source = client.astream(self._request(request))
             try:
                 async for chunk in source:
                     yield chunk
@@ -188,7 +215,10 @@ class CatalogProvider:
         return request
 
     async def aclose(self):
-        await asyncio.gather(*(client.aclose() for client in self.clients.values()))
+        self._retired = True
+        await self._idle.wait()
+        clients, self.clients = self.clients, {}
+        await asyncio.gather(*(client.aclose() for client in clients.values()))
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +239,7 @@ class HostProviders:
         self._provider_versions = {}
         self.records = {}
         self.instances = []
+        self._draining = set()
         self.managed_ids = set()
         self.version = ""
         self.default_model = None
@@ -281,19 +312,32 @@ class HostProviders:
                 provider_version = identity.hexdigest()
                 previous = self.records.get(name)
                 staged[name] = previous if previous is not None and previous.version == provider_version else CatalogProvider(name, config, models, provider_version)
-            for name in self.managed_ids - staged.keys():
+            for name in self.records.keys() - staged.keys():
                 self._registrations.pop(name, None)
+            for name, previous in self.records.items():
+                if staged.get(name) is not previous:
+                    self._provider_versions.pop((name, previous.version), None)
+                    task = asyncio.create_task(self._retire(previous))
+                    self._draining.add(task)
+                    task.add_done_callback(self._draining.discard)
             for name, value in staged.items():
                 if self.records.get(name) is value:
                     continue
                 entry = ProviderRegistration(name, value, value.version)
                 self._registrations[name] = entry
                 self._provider_versions[name, entry.version] = entry
-            self.instances.extend(value for name, value in staged.items() if self.records.get(name) is not value)
+            self.instances = list(staged.values())
             self.managed_ids.update(staged)
             self.records, self.version = staged, version
             self.default_model, self.compaction_model = data.default_model, data.compaction_model
             return self._describe()
+
+    @staticmethod
+    async def _retire(provider):
+        try:
+            await provider.aclose()
+        except Exception as error:
+            logger.warning("Could not close retired Provider %s (%s).", provider.provider_id, type(error).__name__)
 
     def _describe(self):
         items = []
@@ -397,5 +441,5 @@ class HostProviders:
         try:
             yield
         finally:
-            await asyncio.gather(*(value.aclose() for value in self.instances))
+            await asyncio.gather(*(value.aclose() for value in self.instances), *tuple(self._draining))
             self.instances.clear()

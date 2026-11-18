@@ -22,9 +22,10 @@ class HistoryRoute(Model):
     context_role: Literal["system", "user"] = "user"
 
     def accepts(self, origin: HistoryRoute | None) -> bool:
+        # Request composition metadata can improve without changing the route's native replay identity.
         return (self.provider_id is not None and self.protocol is not None and origin is not None
-            and (self == origin or (self.context_role != origin.context_role
-                and self.model_copy(update={"context_role": origin.context_role}) == origin)))
+            and (self == origin or self.model_copy(update={
+                "context_role": origin.context_role, "tool_media": origin.tool_media}) == origin))
 
 
 class HistoryOrigin(Model):

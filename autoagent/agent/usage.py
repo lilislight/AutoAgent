@@ -115,8 +115,8 @@ class TokenUsageQuery:
         TimeRange(self.start, self.end)
         if type(self.include_descendants) is not bool:
             raise TypeError("include_descendants must be a bool.")
-        if self.include_descendants and self.invocation_id is None:
-            raise ValueError("Descendant usage requires invocation_id.")
+        if self.include_descendants and self.invocation_id is None and self.session_id is None:
+            raise ValueError("Descendant usage requires invocation_id or session_id.")
         for key in ("invocation_id", "node_id", "session_id", "workflow_id", "workflow_revision_id", "provider_id", "requested_model"):
             value = getattr(self, key)
             if value is not None and (not isinstance(value, str) or not value.strip()):

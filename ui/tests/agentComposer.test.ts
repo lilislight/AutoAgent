@@ -3,6 +3,8 @@ import test from 'node:test';
 import { createElement, createRef } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { AgentComposer } from '../src/agent/AgentComposer.js';
+import { AddImages } from '../src/agent/ComposerImages.js';
+import { isHeifPhoto } from '../src/agent/mobilePhoto.js';
 import { UsageFacts } from '../src/agent/UsageButton.js';
 import { composerAction } from '../src/agent/composerActions.js';
 import { composerHeight } from '../src/agent/composerSizing.js';
@@ -10,7 +12,21 @@ import { MessageQueue } from '../src/agent/MessageQueue.js';
 import type { Usage } from '../src/agent/types.js';
 
 const defaults = { draft: '', canSend: false, running: false, lifecycle: 'completed', canPause: false, canResume: false, sending: false, pending: null } as const;
+const imageControls = { images: [], onPickImages() {}, onRemoveImage() {} };
 const usage: Usage = { input_tokens: 10000, output_tokens: 500, total_tokens: 10500, reasoning_tokens: 200, cache_read_tokens: 8000, call_count: 4, pending_calls: 0, unsettled_calls: 0, missing_usage_calls: 0, missing_cost_calls: 0, cost_usd: '0.001234' };
+
+test('mobile photo selection uses the native image picker and recognizes HEIC files', () => {
+  const render = (mobile: boolean, preparing = false) => renderToStaticMarkup(createElement(AddImages, {
+    mobile, preparing, disabled: false, onPick() {},
+  }));
+  assert.match(render(true), /accept="image\/\*" multiple/);
+  assert.doesNotMatch(render(true), /capture=/);
+  assert.match(render(false), /accept="image\/png,image\/jpeg,image\/gif,image\/webp"/);
+  assert.match(render(true, true), /aria-label="Preparing images" aria-busy="true"/);
+  assert.equal(isHeifPhoto(new File([], 'IMG_001.HEIC')), true);
+  assert.equal(isHeifPhoto(new File([], 'IMG_002', {type: 'image/heif-sequence'})), true);
+  assert.equal(isHeifPhoto(new File([], 'Screenshot.png', {type: 'image/png'})), false);
+});
 
 test('the single main action sends text, pauses running work, and resumes paused work', () => {
   assert.equal(composerAction({ ...defaults }).disabled, true);
@@ -50,7 +66,7 @@ test('composer sizing grows from two lines, caps at eight, then shrinks with sho
 
 test('the composer has two rows and its running control replaces a duplicate submit action', () => {
   const primary = composerAction({ ...defaults, running: true, lifecycle: 'running', canPause: true });
-  const html = renderToStaticMarkup(createElement(AgentComposer, { primary, onControl() {}, session: 'one', draft: '', busy: false, running: true, disabled: false, canSend: true, caption: 'Running', canCancel: true, inputRef: createRef<HTMLTextAreaElement>(), onDraft() {}, onSend() {} }));
+  const html = renderToStaticMarkup(createElement(AgentComposer, { ...imageControls, primary, onControl() {}, session: 'one', draft: '', busy: false, running: true, disabled: false, canSend: true, caption: 'Running', canCancel: true, inputRef: createRef<HTMLTextAreaElement>(), onDraft() {}, onSend() {} }));
   assert.match(html, /rows="2"/);
   assert.match(html, /type="button" class="agent-send" aria-label="Pause task"/);
   assert.match(html, /aria-label="Cancel task"/);
@@ -67,7 +83,7 @@ test('usage shows all recorded tokens and precise available cost without double-
 
 test('submitting shows only a spinner while an optional separate action sends an immediate update', () => {
   const primary = composerAction({ ...defaults, sending: true });
-  const html = renderToStaticMarkup(createElement(AgentComposer, { primary, onControl() {}, session: 'one', draft: 'Next task', busy: true, running: true, disabled: true, canSend: true, canSendNow: true, onSendNow() {}, caption: 'Running', inputRef: createRef<HTMLTextAreaElement>(), onDraft() {}, onSend() {} }));
+  const html = renderToStaticMarkup(createElement(AgentComposer, { ...imageControls, primary, onControl() {}, session: 'one', draft: 'Next task', busy: true, running: true, disabled: true, canSend: true, canSendNow: true, onSendNow() {}, caption: 'Running', inputRef: createRef<HTMLTextAreaElement>(), onDraft() {}, onSend() {} }));
   const button = html.match(/<button[^>]*class="agent-send"[^>]*>(.*?)<\/button>/)?.[1];
   assert.match(button ?? '', /loading-spinner/);
   assert.doesNotMatch(button ?? '', /<svg/);

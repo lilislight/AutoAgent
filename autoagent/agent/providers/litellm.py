@@ -15,6 +15,31 @@ from .responses import ResponsesAdapter
 from ._litellm_sdk import load_litellm_sdk
 
 
+def _deepseek_tool_images(messages):
+    """LiteLLM's DeepSeek transformer only preserves images on user messages."""
+    result, images = [], []
+    for message in messages:
+        if message["role"] != "tool" and images:
+            result.append({"role": "user", "content": images})
+            images = []
+        content = message.get("content")
+        if message["role"] == "tool" and isinstance(content, list):
+            visual = [part for part in content if part.get("type") == "image_url"]
+            if visual:
+                call_id = message["tool_call_id"]
+                images.extend(({"type": "text", "text": (
+                    f"Visual output of tool call {call_id}. Inspect the attached image pixels for this result. "
+                    "Earlier reference-only messages describe earlier results."
+                )}, *visual))
+                retained = [part for part in content if part.get("type") != "image_url"]
+                retained.append({"type": "text", "text": f"Image pixels attached after this tool batch with call ID {call_id}."})
+                message = {**message, "content": retained}
+        result.append(message)
+    if images:
+        result.append({"role": "user", "content": images})
+    return result
+
+
 class LiteLLMProviderConfig(OpenAIProviderConfig):
     """Connection settings; model_prefix selects a LiteLLM route, not a fallback.
 
@@ -81,6 +106,8 @@ class _LiteLLMTransport:
         params.update(params.pop("extra_body", {}))
         if self.config.model_prefix is not None:
             params["model"] = self.config.model_prefix.rstrip("/") + "/" + params["model"]
+        if operation == "acompletion" and params["model"].startswith("deepseek/"):
+            params["messages"] = _deepseek_tool_images(params["messages"])
         params.update(timeout=self.config.timeout_seconds, num_retries=0, max_retries=0, drop_params=False)
         if self.config.api_key is not None:
             params["api_key"] = self.config.api_key.get_secret_value()

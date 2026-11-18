@@ -11,7 +11,17 @@ import sys
 import time
 import tracemalloc
 
-from autoagent import AutoAgentApp, AggregationContext, ContextPatch, Edge, InputMappingContext, Map, Node, OutputBindingContext, Workflow
+from autoagent import (
+    AggregationContext,
+    ContextPatch,
+    Edge,
+    InputMappingContext,
+    Map,
+    Node,
+    OutputBindingContext,
+    Workflow,
+)
+from autoagent.core.app import AutoAgentApp
 from tests.benchmarks.benchmark_core_runtime_memory import Data, Seed, MIB, point, rss, available_worker_budget
 
 CASES = [

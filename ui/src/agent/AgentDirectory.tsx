@@ -11,13 +11,15 @@ function savedWidth() {
   return 300;
 }
 
-export function AgentDirectory({ active, open, narrow, onClose, children }: { active: boolean; open: boolean; narrow: boolean; onClose: () => void; children: ReactNode }) {
+export function AgentDirectory({ active, open, narrow, onClose, onNew, children }: {
+  active: boolean; open: boolean; narrow: boolean; onClose: () => void; onNew?: () => void; children: ReactNode;
+}) {
   const nav = useRef<HTMLElement>(null);
   const drag = useRef<{ pointer: number; x: number; width: number } | null>(null);
   const [preferred, setPreferred] = useState(savedWidth);
   const [available, setAvailable] = useState(() => window.innerWidth);
   const [resizing, setResizing] = useState(false);
-  const maximum = Math.max(1, narrow ? Math.min(360, available - 48) : Math.min(480, available - 280));
+  const maximum = Math.max(1, Math.min(480, available - 280));
   const minimum = Math.min(240, maximum);
   const width = Math.max(minimum, Math.min(maximum, preferred));
   const clamp = (value: number) => Math.max(minimum, Math.min(maximum, value));
@@ -42,36 +44,19 @@ export function AgentDirectory({ active, open, narrow, onClose, children }: { ac
     return () => document.body.classList.remove('agent-directory-resizing');
   }, [resizing]);
 
+  const mobileBack = useRef<HTMLButtonElement>(null);
   useLayoutEffect(() => {
-    const element = nav.current;
-    if (!active || !open || !narrow || !element) return;
-    const focusable = () => [...element.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],input:not(:disabled),select:not(:disabled),textarea:not(:disabled),[tabindex="0"]')]
-      .filter(item => item.getClientRects().length && !item.closest('[inert]'));
-    const frame = requestAnimationFrame(() => focusable()[0]?.focus({ preventScroll: true }));
-    const keydown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || document.querySelector('dialog[open]')) return;
-      if (event.key === 'Escape') { event.preventDefault(); onClose(); }
-      if (event.key !== 'Tab') return;
-      const items = focusable(), first = items[0], last = items.at(-1);
-      if (event.shiftKey && (document.activeElement === first || !element.contains(document.activeElement))) {
-        event.preventDefault(); last?.focus();
-      } else if (!event.shiftKey && (document.activeElement === last || !element.contains(document.activeElement))) {
-        event.preventDefault(); first?.focus();
-      }
-    };
-    document.addEventListener('keydown', keydown);
-    return () => {
-      cancelAnimationFrame(frame);
-      document.removeEventListener('keydown', keydown);
-      if (!document.querySelector('dialog[open]')) document.getElementById('agent-sidebar-toggle')?.focus({ preventScroll: true });
-    };
-  }, [active, open, narrow, onClose]);
+    if (active && open && narrow) mobileBack.current?.focus({ preventScroll: true });
+  }, [active, open, narrow]);
 
-  return <nav ref={nav} id="agent-conversations" className={`directory agent-directory ${open ? 'is-open' : 'is-collapsed'} ${narrow ? 'is-overlay' : ''} ${resizing ? 'is-resizing' : ''}`}
-    style={{ '--directory-expanded-width': `${width}px` } as CSSProperties} aria-label="Conversations"
-    role={narrow ? 'dialog' : undefined} aria-modal={narrow && open ? true : undefined} aria-hidden={!open} inert={!open}>
+  return <nav ref={nav} id="agent-conversations" className={`directory agent-directory ${narrow ? 'is-mobile-directory' : ''} ${resizing ? 'is-resizing' : ''}`}
+    style={narrow ? undefined : { '--directory-expanded-width': `${width}px` } as CSSProperties}
+    aria-label="Conversations" hidden={!open} inert={!open}
+    onKeyDown={event => { if (narrow && event.key === 'Escape' && !event.defaultPrevented) onClose(); }}>
     <div className="agent-directory-body">
-      {narrow ? <div className="agent-directory-mobile-header"><span>Conversations</span><button type="button" aria-label="Close conversations" onClick={onClose}><AgentIcon name="close" /></button></div> : null}
+      {narrow ? <div className="agent-directory-mobile-header"><button ref={mobileBack} type="button" aria-label="Back to chat" onClick={onClose}><AgentIcon name="back" /></button><h1>Conversations</h1>
+        <button type="button" aria-label="New conversation" disabled={!onNew} onClick={onNew}><AgentIcon name="new" /></button>
+      </div> : null}
       {children}
     </div>
     {!narrow ?

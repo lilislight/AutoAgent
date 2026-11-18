@@ -63,19 +63,21 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
     service = current_agent_context()
     snapshot = await service.snapshot()
     workspace = await service.prepare_workspace(snapshot)
-    from .builtins import workflow_catalog
-    from .subagents import BUILTIN_NAMES
+    from .builtins import tool_kind, workflow_catalog
     catalog, skills = workflow_catalog(service, snapshot, options)
     toolset = service.toolset(snapshot, catalog=catalog)
     from ..tools.context import tool_context
     with tool_context(toolset.context):
-        advertised = toolset.definitions
-    definitions = tuple(item for item in advertised
-        if snapshot.settings.access.rules.get(item.name, snapshot.settings.access.default) != "deny")
+        advertised = {item.name: item for item in toolset.definitions}
+    access = snapshot.settings.access
+    definitions = []
+    for name, entry in catalog.items():
+        if tool_kind(entry) != "tool":
+            definitions.append(entry.value.definition)
+        elif name in advertised and access.rules.get(name, access.default) != "deny":
+            definitions.append(advertised[name])
     bindings = tuple(ToolBinding(name=item.name, resource_id=catalog[item.name].resource_id, version=catalog[item.name].version,
-        definition_hash=definition_hash(item),
-        kind=("ask_user" if options.include_ask_user and item.name == "ask_user" else
-            "agent_builtin" if options.subagents.enabled and item.name in BUILTIN_NAMES else "tool")) for item in definitions)
+        definition_hash=definition_hash(item), kind=tool_kind(catalog[item.name])) for item in definitions)
     fixed = []
     if options.instructions.strip():
         fixed.append(message("system", options.instructions))
@@ -88,7 +90,7 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
         fixed.append(skill_catalog)
     settings = request_settings(snapshot, options.llm_options, role="agent", require_model=False)
     target = service.history_route(snapshot, settings.get("model"))
-    preparation = ContextPreparation(conversation=conversation, fixed_input=tuple(fixed), tools=definitions,
+    preparation = ContextPreparation(conversation=conversation, fixed_input=tuple(fixed), tools=tuple(definitions),
         bindings=bindings, settings=settings, generation_options=options.llm_options, snapshot_id=snapshot.snapshot_id,
         compaction_model=getattr(service, "compaction_model", None), replay_target=target,
         compaction_provider=getattr(service, "compaction_provider", None),

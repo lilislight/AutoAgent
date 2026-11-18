@@ -1,9 +1,11 @@
 """Run with .venv/bin/python -m examples.durable_waits_demo."""
 from pydantic import BaseModel, ConfigDict
 from autoagent import (
-    AutoAgentApp, AwaitSignal, Node, Select, SignalCase, SignalEndpoint,
-    TimerCase, Workflow, RuntimeGraphCheckpoint,
+    AwaitSignal, Node, Select, SignalCase, SignalEndpoint,
+    TimerCase, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 
 class Feedback(BaseModel):

@@ -113,7 +113,7 @@ class FileToolsTests(unittest.TestCase):
         self.assertEqual(full["total_count"], 3)
         (self.root / ".env").write_text("needle\n")
         protected = self.invoke("search_files", query="needle", mode="count", include_hidden=True).structured_content
-        self.assertEqual(protected["total_count"], 4)
+        self.assertEqual(protected["total_count"], 3)
 
     def test_read_metadata_and_failed_mutation_guidance_preserve_file(self):
         """Reads expose snapshot metadata and ambiguous or nonempty mutations give corrective feedback."""
@@ -371,14 +371,20 @@ class FileToolsTests(unittest.TestCase):
         result = self.invoke("search_files", path="sub", query="needle")
         self.assertEqual(result.structured_content["results"], [])
 
-    def test_search_returns_locations_while_direct_read_is_denied(self):
-        """Search reports a location and a direct Read is independently denied by the SDK policy."""
-        (self.root / "secret.txt").write_text("SECRET")
+    def test_search_cannot_probe_contents_of_a_read_denied_file(self):
+        """Directory search cannot confirm a secret prefix, while listing still exposes metadata."""
+        (self.root / "secret.txt").write_text("TOKEN=Q8Z")
+        (self.root / "public.txt").write_text("TOKEN=Q3")
         tools = ToolSet(FileTools(service=self.service).tools(), policy=ToolPolicy(rules=[path_rule("secret.txt", "deny", ("read",))]),
                         context=ToolContext(session_id="one"))
-        result = tools.invoke(call("search_files", query="SECRET"))
-        self.assertEqual(result.structured_content["results"], [dict(path="secret.txt", line=1, column=1)])
-        self.assertNotIn("SECRET", result.model_dump_json())
+        for mode in ("matches", "files", "count"):
+            with self.subTest(mode=mode):
+                result = tools.invoke(call("search_files", query="^TOKEN=Q", regex=True, mode=mode))
+                self.assertEqual([row["path"] for row in result.structured_content["results"]], ["public.txt"])
+                self.assertEqual(result.structured_content["match_count"], 1)
+                self.assertNotIn("Q8Z", result.model_dump_json())
+        listing = tools.invoke(call("list_files")).structured_content
+        self.assertIn("secret.txt", [row["path"] for row in listing["entries"]])
         denied = tools.invoke(call("read_file", path="secret.txt"))
         self.assertEqual(denied.structured_content["error"]["kind"], "tool_access_denied")
 

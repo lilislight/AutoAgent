@@ -13,9 +13,10 @@ from pathlib import Path
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp, BackoffPolicy, Capability, ConditionContext, Edge,
+    BackoffPolicy, Capability, ConditionContext, Edge,
     InputMappingContext, Node, Operator, ResourcePolicy, RetryPolicy, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
 from autoagent.host import AutoAgentHost, HostSettings
 
 

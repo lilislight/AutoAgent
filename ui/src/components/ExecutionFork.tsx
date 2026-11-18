@@ -6,6 +6,7 @@ import { ApiError, config, forkExecution, getForkPlan, listExecutionEvents, getS
 import { replayPositions } from '../replayPosition';
 import type { AcceptedFork, ExecutionTrace } from '../types';
 import { ToolButton } from './ToolButton';
+import { newId } from '../ids';
 
 export type OpenFork = (sequence:number, anchor:HTMLButtonElement, returnFocus?:HTMLElement|null) => void;
 export interface ForkTarget { sequence:number; bounds:DOMRect; returnFocus:HTMLElement|null }
@@ -50,7 +51,7 @@ export function ForkDialog({trace,target,onClose,onAccepted}:{trace:ExecutionTra
   const dialog=useRef<HTMLDialogElement>(null);
   const title=useId(),sessionLabel=useId();
   const [session,setSession]=useState('');
-  const [generated]=useState(()=>crypto.randomUUID());
+  const [generated]=useState(newId);
   const [submittedSession,setSubmittedSession]=useState<string|null>(null);
   const [checking,setChecking]=useState(false);
   const [checkError,setCheckError]=useState<string|null>(null);

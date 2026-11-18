@@ -17,9 +17,11 @@ from tests.postgres import POSTGRES_TEST_URL
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp, AwaitSignal, InputMappingContext, Map, Node, SignalEndpoint,
-    Spawn, Timer, TimerCase, SignalCase, Select, Wait, Workflow, RuntimeTransitionError,
+    AwaitSignal, InputMappingContext, Map, Node, SignalEndpoint,
+    Spawn, Timer, TimerCase, SignalCase, Select, Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.errors import RuntimeTransitionError
 from autoagent.host import AutoAgentHost, HostSettings, HostError, HostCapacityError
 from autoagent.host.persistence import PersistenceConfig
 

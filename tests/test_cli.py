@@ -19,7 +19,7 @@ try:
 except ModuleNotFoundError as error:
     raise unittest.SkipTest("Install autoagent[cli] to run CLI integration tests.") from error
 
-from autoagent import Diagnostic
+from autoagent.core.compiler import Diagnostic
 from autoagent.cli.main import main
 from autoagent.host import AutoAgentHost
 

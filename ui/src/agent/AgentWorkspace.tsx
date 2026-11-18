@@ -8,21 +8,24 @@ import { WorkspaceDialog } from './WorkspaceDialog';
 import type { Section as SettingsSection } from './settings/types';
 import { SettingsCenter } from './settings/SettingsCenter';
 import { agentClient } from './client';
-import { newId } from './ids';
+import { newId } from '../ids';
 import { config } from '../http';
 import { readDraft, saveDraft } from './drafts';
 import type { AgentSession as SessionRow, SettingsRecord } from './types';
 import type { AgentSidebarControls } from './useAgentSidebar';
+import { AgentDiagramTheme } from './MermaidDiagram';
+import type { Theme } from '../theme';
 import './agent.css';
+import './agent-mobile.css';
 
 const AgentSession = lazy(() => import('./AgentSession'));
 interface Props {
-  sidebar: AgentSidebarControls;
+  sidebar: AgentSidebarControls; theme: Theme;
   session: string | null; invocation: string | null; workspace?: string | null; active: boolean;
   onNavigate: (session: string | null, invocation: string | null, replace: boolean, workspace: string | null) => void;
 }
 
-export default function AgentWorkspace({ sidebar, session: selectedSession, invocation, workspace: requestedWorkspace, active, onNavigate }: Props) {
+export default function AgentWorkspace({ sidebar, theme, session: selectedSession, invocation, workspace: requestedWorkspace, active, onNavigate }: Props) {
   const catalog = useQuery({ queryKey: ['agent-catalog'], queryFn: ({ signal }) => agentClient.catalog(signal), enabled: active, refetchInterval: active ? 10000 : false });
   const [directoryTitle, setDirectoryTitle] = useState<{ session: string; title: string } | null>(null);
   const rememberTitle = useCallback((session: string, title: string) => setDirectoryTitle(current => current?.session === session && current.title === title ? current : { session, title }), []);
@@ -51,26 +54,31 @@ export default function AgentWorkspace({ sidebar, session: selectedSession, invo
   useEffect(() => {
     if (active && selectedSession && binding.isSuccess && requestedWorkspace !== workspace) onNavigate(selectedSession, invocation, true, workspace);
   }, [active, selectedSession, binding.isSuccess, requestedWorkspace, workspace, invocation, onNavigate]);
-  const openSettings = (value: SettingsSection) => { sidebar.dismiss(); setSettingsSection(value); };
+  const openSettings = (value: SettingsSection) => setSettingsSection(value);
+  const closeDirectory = () => {
+    sidebar.dismiss();
+    requestAnimationFrame(() => document.getElementById('agent-mobile-back')?.focus({ preventScroll: true }));
+  };
+  const showDirectory = sidebar.narrow ? sidebar.show : undefined;
+  const returnToParent = (sid: string, iid: string) => onNavigate(sid, iid, true, workspace);
   useEffect(() => { if (!active) { setAddingWorkspace(false); setSettingsSection(null); } }, [active]);
   const agent = catalog.data?.agent;
   const title = directoryTitle?.session === session ? directoryTitle.title : selectedSession ? 'Conversation' : 'New conversation';
 
-  return <section className={`workspace workspace-tab agent-workspace ${active ? '' : 'is-inactive'}`} data-workspace-view="agents" aria-hidden={!active} inert={!active}>
-    <button type="button" className={`agent-directory-backdrop ${sidebar.narrow && sidebar.open ? 'is-open' : ''}`} aria-label="Close conversations" tabIndex={-1} aria-hidden={!sidebar.narrow || !sidebar.open} disabled={!sidebar.narrow || !sidebar.open} onClick={sidebar.dismiss} />
-    <AgentDirectory active={active} open={sidebar.open} narrow={sidebar.narrow} onClose={sidebar.dismiss}>
-      <ConversationDirectory key={catalog.data?.project_workspace_id ?? 'loading'} items={workspaces.data?.items} loading={workspaces.isLoading} error={workspaces.error} onRetry={() => void workspaces.refetch()} onAddWorkspace={() => { sidebar.dismiss(); setAddingWorkspace(true); }} storageScope={`${config.apiPrefix}:${catalog.data?.project_workspace_id ?? 'loading'}`} canCreate={!!agent}
+  return <AgentDiagramTheme.Provider value={theme}><section className={`workspace workspace-tab agent-workspace ${active ? '' : 'is-inactive'}${sidebar.narrow ? ' is-mobile' : ''}${sidebar.narrow && sidebar.open ? ' is-directory-open' : ''}`} data-workspace-view="agents" aria-hidden={!active} inert={!active}>
+    <AgentDirectory active={active} open={sidebar.open} narrow={sidebar.narrow} onClose={closeDirectory} onNew={agent ? () => newConversation(null) : undefined}>
+      <ConversationDirectory key={catalog.data?.project_workspace_id ?? 'loading'} items={workspaces.data?.items} loading={workspaces.isLoading} error={workspaces.error} onRetry={() => void workspaces.refetch()} onAddWorkspace={() => setAddingWorkspace(true)} storageScope={`${config.apiPrefix}:${catalog.data?.project_workspace_id ?? 'loading'}`} canCreate={!!agent}
         workspace={bindingReady ? workspace : requestedWorkspace ?? null} session={selectedSession} active={active} load={agentClient.sessions} onSelect={selectConversation} onNew={newConversation} onTitle={rememberTitle} />
       <div className="agent-directory-footer"><button disabled={!agent} onClick={() => openSettings('tools')}><AgentIcon name="tools" />Tools & MCP</button><button disabled={!agent} onClick={() => openSettings('skills')}><AgentIcon name="skills" />Skills</button><button disabled={!agent} onClick={() => openSettings('providers')}><AgentIcon name="settings" />Settings</button></div>
     </AgentDirectory>
-    <div className="agent-app" inert={sidebar.narrow && sidebar.open}>{catalog.error && !catalog.data ? <AgentPageState title={title} error={catalog.error} retrying={catalog.isFetching} onRetry={() => void catalog.refetch()} />
-      : !catalog.data ? <AgentPageState title={title} loading />
-        : !agent ? <AgentPageState title={title} />
-          : binding.error && !binding.data ? <AgentPageState title={title} error={binding.error} onRetry={() => void binding.refetch()} />
-            : !bindingReady ? <AgentPageState title={title} loading />
-              : <Suspense fallback={<AgentPageState title={title} loading />}><AgentSession key={session} session={session} existing={!!selectedSession} invocation={invocation} title={title} agent={agent} workspace={workspace} workspaces={workspaces.data?.items} workspacesLoading={workspaces.isLoading} workspaceError={workspaces.error} onRetryWorkspaces={() => void workspaces.refetch()} onWorkspaceChange={changeWorkspace} catalog={catalog.data} active={active} onAccepted={iid => { if (session === newSession) { const saved = client.getQueryData<SettingsRecord>(['agent-settings', session, workspace]); if (saved) client.setQueryData(['agent-binding', session], saved); setNewSession(newId()); } select(session, iid); }} onRefreshDirectory={refreshDirectory} /></Suspense>}
+    <div className="agent-app" inert={sidebar.narrow && sidebar.open}>{catalog.error && !catalog.data ? <AgentPageState onBack={showDirectory} title={title} error={catalog.error} retrying={catalog.isFetching} onRetry={() => void catalog.refetch()} />
+      : !catalog.data ? <AgentPageState onBack={showDirectory} title={title} loading />
+        : !agent ? <AgentPageState onBack={showDirectory} title={title} />
+          : binding.error && !binding.data ? <AgentPageState onBack={showDirectory} title={title} error={binding.error} onRetry={() => void binding.refetch()} />
+            : !bindingReady ? <AgentPageState onBack={showDirectory} title={title} loading />
+              : <Suspense fallback={<AgentPageState onBack={showDirectory} title={title} loading />}><AgentSession mobile={sidebar.narrow} onShowDirectory={showDirectory} onReturnToParent={returnToParent} key={session} session={session} existing={!!selectedSession} invocation={invocation} title={title} agent={agent} workspace={workspace} workspaces={workspaces.data?.items} workspacesLoading={workspaces.isLoading} workspaceError={workspaces.error} onRetryWorkspaces={() => void workspaces.refetch()} onWorkspaceChange={changeWorkspace} catalog={catalog.data} active={active} onAccepted={iid => { if (session === newSession) { const saved = client.getQueryData<SettingsRecord>(['agent-settings', session, workspace]); if (saved) client.setQueryData(['agent-binding', session], saved); setNewSession(newId()); } select(session, iid); }} onOpenSubagent={select} onRefreshDirectory={refreshDirectory} /></Suspense>}
     </div>
     {addingWorkspace ? <WorkspaceDialog onClose={() => setAddingWorkspace(false)} onCreated={item => { client.setQueryData(['agent-workspaces'], (current: { items: typeof item[] } | undefined) => ({ items: [...(current?.items ?? []).filter(value => value.id !== item.id), item] })); void workspaces.refetch(); setAddingWorkspace(false); newConversation(item.id); }} /> : null}
     {settingsSection ? <SettingsCenter initial={settingsSection} currentWorkspace={workspace ?? catalog.data?.project_workspace_id ?? null} workspaces={workspaces.data?.items ?? []} onClose={() => setSettingsSection(null)} /> : null}
-  </section>;
+  </section></AgentDiagramTheme.Provider>;
 }

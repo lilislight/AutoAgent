@@ -12,7 +12,8 @@ import unittest
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 
 import autoagent.agent as agent
-from autoagent import AutoAgentApp, Node, Operator, ValueContract, Workflow
+from autoagent import Node, Operator, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     AssetSource, AudioContent, DataSource, FileContent, ImageContent,
     LLMAudioOutput, LLMJsonFormat, LLMJsonSchemaFormat, LLMMessage,

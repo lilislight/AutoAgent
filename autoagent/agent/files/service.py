@@ -641,6 +641,11 @@ class LocalFileService:
                 if kind != "file" or not any(glob_match(relative, pattern) for pattern in args["include"]):
                     position = key
                     continue
+                # Directory authorization covers the search root. Each file
+                # must also allow content access before testing the query.
+                if not explicit_file and self.evaluate(self._target("read", item), context).action != "allow":
+                    position = key
+                    continue
                 if info.st_size > self.config.max_file_bytes or info.st_size > self.config.max_scan_bytes:
                     if len(skipped) < 10:
                         skipped.append(dict(path=relative, reason="file_too_large"))

@@ -34,20 +34,22 @@ export function ResourcePanel({ inventory, actions, onlyGroup }: { inventory: In
       const savePolicy = (policy: Policy) => saveControl('resource', resource.management_id, resource.name,
         { permissions: policy.rules.length || policy.default !== 'allow' ? policy : null });
       const pending = !!actions.pending;
+      const native = ['builtin/collaboration', 'builtin/interaction'].includes(resource.group_id);
       const status = resource.mcp_status === 'review' ? 'Schema review required'
-        : resource.mcp_status === 'offline' ? 'Offline' : resource.mcp_status === 'removed' ? 'Removed from server'
+        : resource.mcp_status === 'conflict' ? 'Tool name conflict'
+          : resource.mcp_status === 'offline' ? 'Offline' : resource.mcp_status === 'removed' ? 'Removed from server'
           : resource.mcp_status === 'connecting' ? 'Discovering' : 'Currently unavailable';
       return <div className="settings-resource-row" key={resource.management_id}>
-        <span className="settings-resource-symbol"><AgentIcon name={['builtin/collaboration', 'builtin/interaction'].includes(resource.group_id) ? 'agent' : 'wrench'} /></span>
+        <span className="settings-resource-symbol"><AgentIcon name={native ? 'agent' : 'wrench'} /></span>
         <div className="settings-row-copy"><strong>{resource.name}</strong>
           {resource.description && <p>{resource.description}</p>}
           {!resource.available && <small className={resource.mcp_status === 'review' ? 'settings-review' : undefined}>{status}</small>}
         </div>
         <div className="settings-row-actions">
-          <Tooltip content={resource.mcp_status === 'review' ? 'Review the tool schema' : 'View permission rules'}>
+          {!native && <Tooltip content={resource.mcp_status === 'review' ? 'Review the tool schema' : 'View permission rules'}>
             <button type="button" className="settings-icon" aria-label={`Rules for ${resource.name}`}
               disabled={pending} onClick={() => actions.editPolicy(resource, savePolicy)}><AgentIcon name="settings" /></button>
-          </Tooltip>
+          </Tooltip>}
           <Toggle label={`Enable ${resource.name}`} checked={resource.enabled} disabled={pending || !group.enabled || !resource.available}
             busy={actions.pending === resource.management_id} onChange={enabled => actions.run(resource.management_id, () => toggle(resource, enabled))} />
         </div>

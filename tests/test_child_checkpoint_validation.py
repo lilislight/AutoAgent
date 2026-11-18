@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from autoagent import Spawn
-from autoagent import RuntimeGraphCheckpoint
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 from tests.graph_fixtures import (
     join_observed,
@@ -18,14 +18,10 @@ from dataclasses import replace
 
 from typing_extensions import TypedDict
 
-from autoagent import (
-    AppCheckpoint,
-    AutoAgentApp,
-    Node,
-    RuntimeTransitionError,
-    SessionCheckpoint,
-    Workflow,
-)
+from autoagent import Node, Workflow
+from autoagent.core.app import AppCheckpoint, AutoAgentApp
+from autoagent.core.errors import RuntimeTransitionError
+from autoagent.core.runtime import SessionCheckpoint
 
 
 class Value(TypedDict):

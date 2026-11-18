@@ -1,0 +1,10 @@
+schema_version = 1
+
+[project]
+name = "expense-approval"
+
+[[workflows]]
+entrypoint = "workflows:expense_approval"
+
+[[evaluations]]
+entrypoint = "evaluations:expense_cases"

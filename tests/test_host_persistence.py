@@ -25,7 +25,6 @@ except ModuleNotFoundError as exc:
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp,
     Await,
     ConditionContext,
     Edge,
@@ -35,6 +34,7 @@ from autoagent import (
     Wait,
     Workflow,
 )
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import RuntimeEvent, SessionOpened
 from autoagent.core.runtime.user_events import UserEvent
 from autoagent.host.persistence import (
@@ -160,7 +160,8 @@ class PersistenceContracts:
 
     async def test_terminal_buffered_batch_cannot_leave_stale_ordinal_on_recovery(self):
         """Rebuild ordinals after a buffered failure without Writer projection state."""
-        from autoagent import Recovery, RecoverySource
+        from autoagent import Recovery
+        from autoagent.core.runtime import RecoverySource
         calls = 0
 
         def flaky(value: Value) -> Value:

@@ -3,6 +3,8 @@ import { useExecutionNavigation } from './ExecutionNavigation';
 import { InspectorResizeHandle } from './InspectorResizeHandle';
 import type { InspectorTab } from '../types';
 import { Tooltip, ValueTip } from './Tooltip';
+import { copyText } from '../clipboard';
+import { ManualCopyText } from './ManualCopyText';
 export type { InspectorTab } from '../types';
 const rememberedTabs = new Map<string, InspectorTab>();
 export function InspectorPresence({ open, hidden = false, children }: { open: boolean; hidden?: boolean; children: ReactNode }) {
@@ -12,7 +14,7 @@ export function CopyId({ value, displayValue, label = 'Identifier' }: { value: s
   const [copied, setCopied] = useState<'idle' | 'copied' | 'failed'>('idle');
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <Tooltip content={<><ValueTip label={label} value={value ?? 'Not recorded'} /><span>{copied==='failed'?'Could not copy. Select the value and copy it.':'Click to copy the full value.'}</span></>}><button type="button" className="copy-id" aria-label={value ? `Copy ${label}: ${value}` : label} disabled={!value} onClick={async () => { try { await navigator.clipboard.writeText(value!); setCopied('copied'); } catch { setCopied('failed'); } clearTimeout(timer.current); timer.current = setTimeout(() => setCopied('idle'), 1400); }}><code>{copied==='copied' ? 'Copied' : copied==='failed' ? 'Copy failed' : displayValue ?? value ?? '—'}</code></button></Tooltip>;
+  return <Tooltip content={<><ValueTip label={label} value={value ?? 'Not recorded'} /><span>{copied==='failed'?'Could not copy. Select the value and copy it.':'Click to copy the full value.'}</span></>}><button type="button" className="copy-id" aria-label={value ? `Copy ${label}: ${value}` : label} disabled={!value} onClick={async event => { if (!value) return; setCopied(await copyText(value, event.currentTarget) ? 'copied' : 'failed'); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied('idle'), 1400); }}><code>{copied==='copied' ? 'Copied' : copied==='failed' ? 'Copy failed' : displayValue ?? value ?? '—'}</code></button></Tooltip>;
 }
 export function InspectorFrame({ kind, title, context, tabs: requestedTabs, initial, onClose, onBack, backLabel = 'Node occurrence', footer, children }: { kind: string; title: string; context: ReactNode; tabs: InspectorTab[]; initial?: InspectorTab; onClose: () => void; onBack?: () => void; backLabel?: string; footer?: ReactNode; children: (tab: InspectorTab, selectTab: (tab: InspectorTab) => void) => ReactNode }) {
   const navigation = useExecutionNavigation();
@@ -40,9 +42,19 @@ export function InspectorFrame({ kind, title, context, tabs: requestedTabs, init
 function InspectorLinks({ tab }: { tab: InspectorTab }) {
   const navigation = useExecutionNavigation();
   const [copied, setCopied] = useState(false);
+  const [manualLink, setManualLink] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timer.current), []);
-  return <div className="inspector-view-links"><button onClick={navigation.showGraph}>Show in Graph</button><button disabled={!navigation.showTimeline} onClick={navigation.showTimeline}>Show in Timeline</button><button onClick={async () => {
-    try { const url = new URL(window.location.href); url.searchParams.set('section', tab); await navigator.clipboard.writeText(url.href); setCopied(true); clearTimeout(timer.current); timer.current = setTimeout(() => setCopied(false), 1400); } catch { setCopied(false); }
-  }}>{copied ? 'Copied' : 'Copy link'}</button></div>;
+  const copyLink = async (trigger: HTMLButtonElement) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set('section', tab);
+    const success = await copyText(url.href, trigger);
+    clearTimeout(timer.current);
+    setCopied(success);
+    setManualLink(success ? null : url.href);
+    if (success) timer.current = setTimeout(() => setCopied(false), 1400);
+  };
+  return <div className="inspector-view-links"><button onClick={navigation.showGraph}>Show in Graph</button><button disabled={!navigation.showTimeline} onClick={navigation.showTimeline}>Show in Timeline</button><button onClick={event => void copyLink(event.currentTarget)}>{copied ? 'Copied' : 'Copy link'}</button>
+    {manualLink && <ManualCopyText label="Inspector link to copy" text={manualLink} onDismiss={() => setManualLink(null)} />}
+  </div>;
 }

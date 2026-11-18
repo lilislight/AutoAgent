@@ -12,12 +12,17 @@ from uuid import uuid4
 from pydantic import TypeAdapter
 
 from autoagent.agent.context import plain
+from autoagent.agent.workflow.builtins import tool_kind
+from autoagent.agent.workflow.subagents import BUILTIN_NAMES
+from autoagent.agent.workspace import WorkspaceError
 from .resource_config import AgentResourceConfig
 from .mcp_catalog import observed_catalog, schema_version
+from .tool_defaults import BUILTIN_READ_FILE, shared_file_reads
 from autoagent.agent.resources import AgentResourceRegistry
 
 
 CONFIG = TypeAdapter(AgentResourceConfig)
+NATIVE_CONTROLS = frozenset(f"builtin/tool/{name}" for name in BUILTIN_NAMES | {"ask_user"})
 logger = logging.getLogger(__name__)
 
 
@@ -33,6 +38,7 @@ class _Source:
     state: str = "connecting"
     error: str | None = None
     catalog_revision: int = -1
+    conflicting_tools: set[str] = field(default_factory=set)
 
     def __post_init__(self):
         self.drained.set()
@@ -52,6 +58,7 @@ class ManagedAgentResources:
         self.monitor = None
         self.enabled = False
         self._known_resources = {}
+        self._file_read_rules = (None, None)
 
     def skill_roots(self):
         roots = [workspace.root for workspace in self.service.workspaces.entries() if hasattr(workspace, "root")]
@@ -289,13 +296,14 @@ class ManagedAgentResources:
                             and other.group_id == config.group_id for key, (_, other) in self.records.items()):
                         raise ValueError("A group already has a configuration; update that entry.")
                     target_id = config.resource_id if config.kind == "resource" else config.group_id if config.kind == "group" else ""
-                    locked = (target_id.startswith("builtin/") and config.kind == "group"
+                    native = target_id in NATIVE_CONTROLS
+                    locked = (native or target_id.startswith("builtin/") and config.kind == "group"
                         or target_id.startswith(("builtin/", "project/"))
                         and not self.service.host.applications["agent"].edit_code_permissions)
                     if locked:
                         if config.permissions is not None and (previous is None or config.permissions != previous[1].permissions):
                             raise ValueError("Permission editing for this resource is disabled.")
-                        config = config.model_copy(update={"permissions": previous[1].permissions if previous else None})
+                        config = config.model_copy(update={"permissions": previous[1].permissions if previous and not native else None})
                     elif config.kind == "resource" and config.permissions is not None:
                         policy = config.permissions
                         policy = policy.model_copy(update={"rules": tuple(rule if rule.id else
@@ -332,10 +340,17 @@ class ManagedAgentResources:
             credentials = [name + "." + key for name in ("environment", "headers") for key in data.get(name, {})]
         source = self.sources.get(resource_id)
         source_error = source.error if source is not None else None
+        source_state = "ready" if source is None else source.state
+        if source_error:
+            source_state = "error"
+        elif self._source_ready(source) and source.conflicting_tools:
+            source_state = "conflict"
+            source_error = "Tool names conflict. Set a unique tool prefix."
         if source is not None and source.source is not None and source.source.last_error is not None:
             source_error = "Resource synchronization failed; check its configuration and retry."
+            source_state = "error"
         return dict(id=resource_id, version=row["version"], configuration=data, credential_fields=credentials,
-            state="unavailable" if not self.enabled else "disabled" if not config.enabled else "error" if source_error else source.state if source else "ready",
+            state="unavailable" if not self.enabled else "disabled" if not config.enabled else source_state,
             error=source_error)
 
     async def describe(self, workspace_id=None, *, tool_id=None, scope=None):
@@ -353,20 +368,32 @@ class ManagedAgentResources:
             registries.extend(source.registry for key, source in self.sources.items()
                 if scope is None or (self.records[key][1].kind == "mcp") == (scope == "mcp"))
             builtins = []
-            if revision is not None and scope != "mcp":
+            diagnostics = []
+            if revision is not None:
                 snapshot = SimpleNamespace(bindings={"workflow_revision": revision}, settings=self.service.defaults.model_copy(
                     update={"workspace": WorkspaceBinding(workspace_id=workspace_id or self.service.project_workspace_id)}))
-                await self.service.prepare_workspace(snapshot)
-                workspace = self.service._workspaces._catalogs.get(self.service._workspaces.key(snapshot))
-                if workspace is not None:
-                    registries.append(workspace)
-                catalog, _ = self.service.catalog(snapshot)
-                builtins.extend(catalog.values())
-                options = self.service.workflow_options(snapshot)
-                if options.include_ask_user:
-                    builtins.append(ASK_USER_RESOURCE)
-                if options.subagents.enabled:
-                    builtins.extend(_resources(options.subagents.model_dump_json()).values())
+                try:
+                    discovery = await self.service._workspaces.prepare(snapshot, refresh=scope != "mcp")
+                except WorkspaceError:
+                    if scope != "mcp":
+                        raise
+                    # Connections remain editable when a Workspace is unavailable.
+                    tools, skills = self.service.resources.catalog()
+                    self.service.resources.managed_catalog(self.service.workflow_options(snapshot), tools, skills)
+                else:
+                    catalog, _ = self.service.catalog(snapshot)
+                if scope != "mcp":
+                    workspace = self.service._workspaces._catalogs.get(self.service._workspaces.key(snapshot))
+                    if workspace is not None:
+                        registries.append(workspace)
+                    builtins.extend(catalog.values())
+                    options = self.service.workflow_options(snapshot)
+                    if options.include_ask_user:
+                        builtins.append(ASK_USER_RESOURCE)
+                    if options.subagents.enabled:
+                        builtins.extend(_resources(options.subagents.model_dump_json()).values())
+                    if discovery is not None and scope is None:
+                        diagnostics = [item.model_dump(mode="json") for item in discovery.skill_diagnostics]
             inventory = []
             seen = set()
             for registry in registries:
@@ -421,7 +448,8 @@ class ManagedAgentResources:
                     permissions_editable=editable)
             return dict(items=[self._describe(key) for key in sorted(self.records)
                     if scope != "tools" or self.records[key][1].kind != "mcp"],
-                resources=inventory, groups=list(groups.values()), workspace_id=workspace_id or self.service.project_workspace_id,
+                resources=inventory, groups=list(groups.values()), skill_diagnostics=diagnostics,
+                workspace_id=workspace_id or self.service.project_workspace_id,
                 revision=self.revision)
         return await self.service.host._perform(lambda: self.service.approvals._run(read))
 
@@ -437,6 +465,8 @@ class ManagedAgentResources:
             remote = identity["remote_name"]
             source_enabled = (config.include is None or remote in config.include) and remote not in config.exclude
             status = self._mcp_tool_state(entry, identity)
+            if status == "ready" and entry.name in self.sources[identity["source_id"]].conflicting_tools:
+                status = "conflict"
             available = available and status == "ready"
             cached = self.mcp_catalogs.get(identity["source_id"], {}).get(remote)
             mcp = dict(mcp_status=status, schema_version=schema_version(entry.value.definition.parameters),
@@ -488,30 +518,43 @@ class ManagedAgentResources:
             raise HostNotFoundError("Skill is unavailable in the Agent application.")
         return await self.service.approvals._run(read)
 
-    def catalog(self, reserved=((), ())):
+    def catalog(self, reserved=((), ()), *, tool_names=()):
+        from autoagent.agent import SkillSet
         from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID
-        result = [[], []]
-        names = [set(entry.name for entry in entries) for entries in reserved]
+        tools, skills, mcp = [], [], []
+        tool_names = {entry.name for entry in reserved[0]} | set(tool_names)
+        skill_names = {entry.name for entry in reserved[1]}
         for resource_id, source in tuple(self.sources.items()):
             if not self._source_ready(source):
                 continue
-            published = source.registry.catalog(BUILTIN_AGENT_WORKFLOW_ID)
             config = self.records[resource_id][1]
             if config.kind == "mcp":
-                def selected(entry):
-                    identity = self.resource_identity(entry)
-                    name = identity["remote_name"]
-                    return ((config.include is None or name in config.include) and name not in config.exclude
-                        and self._mcp_tool_state(entry, identity) == "ready")
-                published = (tuple(entry for entry in published[0] if selected(entry)), published[1])
-            if any(names[index].intersection(entry.name for entry in entries) for index, entries in enumerate(published)):
-                source.error = "Resource names conflict with another source; configure a Tool prefix or distinct Skill names."
+                mcp.append((source, config))
+                continue
+            published = source.registry.catalog(BUILTIN_AGENT_WORKFLOW_ID)[1]
+            if skill_names.intersection(entry.name for entry in published):
+                source.error = "Skill names conflict with another source; use distinct Skill names."
                 continue
             source.error = None
-            for index, entries in enumerate(published):
-                result[index].extend(entries)
-                names[index].update(entry.name for entry in entries)
-        return tuple(tuple(items) for items in result)
+            skills.extend(published)
+            skill_names.update(entry.name for entry in published)
+        if mcp:
+            skillset = SkillSet(entry.value for entry in self.filter((*reserved[1], *skills)))
+            tool_names.update(tool.definition.name for tool in skillset.as_tools())
+        for source, config in mcp:
+            source.conflicting_tools.clear()
+            for entry in source.registry.catalog(BUILTIN_AGENT_WORKFLOW_ID)[0]:
+                identity = self.resource_identity(entry)
+                name = identity["remote_name"]
+                if (config.include is not None and name not in config.include or name in config.exclude
+                        or self._mcp_tool_state(entry, identity) != "ready"):
+                    continue
+                if entry.name in tool_names:
+                    source.conflicting_tools.add(entry.name)
+                    continue
+                tools.append(entry)
+                tool_names.add(entry.name)
+        return tuple(tools), tuple(skills)
 
     def filter(self, entries):
         controls = {config.resource_id: (row, config) for row, config in tuple(self.records.values()) if config.kind == "resource"}
@@ -601,14 +644,22 @@ class ManagedAgentResources:
 
     def configured_policies(self, identity, resource_id):
         """Return persisted policies without replacing the Tool's registration."""
-        if not self._permissions_editable(identity["origin"]):
+        if identity["management_id"] in NATIVE_CONTROLS or not self._permissions_editable(identity["origin"]):
             return ()
         configured = []
-        for _, config in self.records.values():
+        for _, config in tuple(self.records.values()):
             if config.permissions is None:
                 continue
             if config.kind == "resource" and config.resource_id in {identity["management_id"], resource_id}:
                 configured.append(("tool", config.permissions))
+            if (config.kind == "resource" and config.resource_id == BUILTIN_READ_FILE
+                    and identity["group_id"] == "builtin/files" and identity["management_id"] != BUILTIN_READ_FILE):
+                saved, rules = self._file_read_rules
+                if saved is not config:
+                    rules = shared_file_reads(config.permissions)
+                    self._file_read_rules = (config, rules)
+                if rules.rules:
+                    configured.append(("file_read", rules))
             if config.kind == "group" and identity["origin"] != "builtin" and config.group_id == identity["group_id"]:
                 configured.append(("group", config.permissions))
         source = self.records.get(identity.get("source_id"))
@@ -621,6 +672,8 @@ class ManagedAgentResources:
         from autoagent.agent.tools import ToolPolicy
         from autoagent.agent.tools.operations import ToolOperationPolicy
 
+        if tool_kind(entry) != "tool":
+            return (), False
         layers = []
         callbacks = False
         access = self.service.defaults.access
@@ -660,7 +713,7 @@ class ManagedAgentResources:
         return dict(custom_policy=custom.to_dict() if custom is not None else None,
             registered_policies=[{"source": source, "policy": policy.to_dict()} for source, policy in readonly],
             policy_in_code=callback,
-            permissions_editable=self._permissions_editable(identity["origin"]))
+            permissions_editable=identity["management_id"] not in NATIVE_CONTROLS and self._permissions_editable(identity["origin"]))
 
     @asynccontextmanager
     async def borrow(self, resource_id):

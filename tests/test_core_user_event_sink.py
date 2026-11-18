@@ -4,7 +4,8 @@ from collections.abc import Iterator
 import unittest
 import warnings
 from typing_extensions import TypedDict
-from autoagent import AutoAgentApp, Node, Stream, StreamContext, UserEventContext, UserEventSpec, Workflow
+from autoagent import Node, Stream, StreamContext, UserEventContext, UserEventSpec, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.runtime import UserEvent
 
 

@@ -18,7 +18,8 @@ except ImportError:
     httpx = None
     AsyncOpenAI = None
 
-from autoagent import AutoAgentApp, Node, Stream, ValueContract, Workflow
+from autoagent import Node, Stream, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     AssetSource, AudioContent, ChatCompletionsAdapter, DataSource, FileContent,
     ImageContent, LLMAudioOutput, LLMJsonSchemaFormat, LLMMessage, LLMModelProfile,

@@ -7,7 +7,8 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from autoagent import AutoAgentApp, InputMappingContext, Node, Workflow
+from autoagent import InputMappingContext, Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     LLM_CALL, LLMCallRecord, LLMCallContext, LLMRequest, LLMResponse, LLMSelection,
     OpenAIResponsesProvider, llm_call_operator, llm_recording_context, runtime_llm_recorder,

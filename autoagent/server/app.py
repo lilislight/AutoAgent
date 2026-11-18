@@ -15,7 +15,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Query
 from fastapi.responses import StreamingResponse, PlainTextResponse
 from pydantic import Field, ValidationError
 
-from autoagent import RuntimeTransitionError
+from autoagent.core.errors import RuntimeTransitionError
 from autoagent.host import AutoAgentHost, HostCapacityError, HostError, HostNotFoundError, HostRunConflict
 from autoagent.host.persistence.models import CapacityError
 from autoagent.host.persistence.trace_cursor import TraceResetRequired

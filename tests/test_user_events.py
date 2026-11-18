@@ -12,10 +12,12 @@ from pydantic import ValidationError
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp, ContextOperation, ContextPatch, InputMappingContext, Map, Node, OutputBindingContext,
+    ContextOperation, ContextPatch, InputMappingContext, Map, Node, OutputBindingContext,
     Stream, StreamContext, UserEventContext, UserEventSpec, ValueContract,
-    Workflow, WorkflowCompiler,
+    Workflow,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler
 
 
 class Input(TypedDict):
@@ -285,7 +287,7 @@ class UserEventContractTests(unittest.TestCase):
         plain = WorkflowCompiler().compile_or_raise(Workflow("snapshot", nodes=[Node("n", ordinary)]))
         mapped = WorkflowCompiler().compile_or_raise(Workflow("snapshot", nodes=[Node("n", ordinary, user_events=events)]))
         self.assertNotEqual(plain.workflow_revision_id, mapped.workflow_revision_id)
-        from autoagent import WorkflowDefinitionSnapshot
+        from autoagent.core.compiler import WorkflowDefinitionSnapshot
 
         snapshot = WorkflowDefinitionSnapshot.from_workflow_ir(mapped)
         record = snapshot.to_record()

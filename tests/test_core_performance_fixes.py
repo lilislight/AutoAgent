@@ -89,7 +89,8 @@ class ContainerTests(unittest.TestCase):
 
     def test_large_map_replay_and_checkpoint_preserve_canonical_state(self):
         """Live block maps and replayed/restored State encode the same records."""
-        from autoagent import AutoAgentApp, Map, Node, Workflow
+        from autoagent import Map, Node, Workflow
+        from autoagent.core.app import AutoAgentApp
         from autoagent.core.runtime import StateReducer, RuntimeState
         from tests.benchmarks.benchmark_core_audit import identity, items
         class Sink:
@@ -107,7 +108,8 @@ class ContainerTests(unittest.TestCase):
 
     def test_large_child_plan_finishes_and_roundtrips(self):
         """Child execution across unit blocks retains stage and checkpoint semantics."""
-        from autoagent import AutoAgentApp, Map, Node, Workflow
+        from autoagent import Map, Node, Workflow
+        from autoagent.core.app import AutoAgentApp
         from autoagent.core.runtime import RuntimeState
         from tests.benchmarks.benchmark_core_audit import identity, items
         child=Workflow('block-child',nodes=[Node('a',identity)])
@@ -188,7 +190,7 @@ class DispatchTests(unittest.IsolatedAsyncioTestCase):
 
     def test_runtime_loop_releases_pinned_notifier(self):
         """Loop-owned notification resources disappear when the App closes."""
-        from autoagent import AutoAgentApp
+        from autoagent.core.app import AutoAgentApp
         from tests.benchmarks.benchmark_core_audit import Value, identity
         from autoagent import Node, Workflow
         before=set(_notifiers)

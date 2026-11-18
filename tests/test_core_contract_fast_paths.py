@@ -129,7 +129,8 @@ class ContractFastPathTests(unittest.TestCase):
 
     def test_live_operator_mutation_preserves_input_state_and_event_replay(self):
         """A real fast-path Operator gets detached data and produces replayable Events."""
-        from autoagent import AutoAgentApp, Node, Workflow
+        from autoagent import Node, Workflow
+        from autoagent.core.app import AutoAgentApp
         from autoagent.core.runtime import StateReducer
         class Sink:
             def __init__(self):

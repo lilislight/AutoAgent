@@ -13,8 +13,8 @@ from autoagent import (
     Stream,
     StreamContext,
     Workflow,
-    WorkflowCompiler,
 )
+from autoagent.core.compiler import WorkflowCompiler
 from autoagent.core import (
     NodeExecutor,
     OperatorCallCompleted,

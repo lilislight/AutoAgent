@@ -4,7 +4,7 @@ import json
 import unittest
 
 from autoagent.agent import (
-    AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentNodePolicy,
+    AgentAccess, AgentApprovalRequest, AgentApprovalResponse, AgentNodePolicy, SubagentsConfig,
     AgentWorkflowOptions, AgentWorkflowPolicies, AskUserArguments, AskUserRequest,
     AskUserResponse, LLMResponse, LLMToolCall, LLMToolResult, Tool, ToolPolicy, agent_workflow,
 )
@@ -40,20 +40,22 @@ def reply(identifier="goal", *, text="Build an agent", selected=(), skipped=Fals
 
 
 class AskUserModelTests(unittest.TestCase):
-    def test_optional_graph_and_revision_identity(self):
-        """Only enabled builds contain the direct question Wait branch and distinct identity."""
-        disabled = WorkflowCompiler().compile_or_raise(agent_workflow())
-        enabled = WorkflowCompiler().compile_or_raise(agent_workflow(include_ask_user=True))
-        configured = WorkflowCompiler().compile_or_raise(agent_workflow(options=AgentWorkflowOptions(include_ask_user=True)))
-        self.assertNotIn("ask_user", {node.id for node in disabled.nodes})
-        self.assertNotIn("ask_user_approved", {node.id for node in disabled.nodes})
-        self.assertIsNotNone(enabled.node("ask_user_approved").map.aggregate)
-        self.assertNotEqual(disabled.workflow_revision_id, enabled.workflow_revision_id)
-        self.assertEqual(enabled.workflow_revision_id, configured.workflow_revision_id)
-        self.assertEqual([edge for loop in enabled.loop_regions for edge in loop.back_edge_ids], ["round_back"])
-        self.assertIsNotNone(enabled.node("ask_user").map.aggregate)
-        with self.assertRaises(ValueError):
-            agent_workflow(policies=AgentWorkflowPolicies(nodes={"ask_user": AgentNodePolicy()}))
+    def test_native_switches_preserve_graph_and_revision_identity(self):
+        """Question and collaboration switches share one original graph and Revision."""
+        def compile_workflow(ask_user, subagents):
+            return WorkflowCompiler().compile_or_raise(agent_workflow(options=AgentWorkflowOptions(
+                include_ask_user=ask_user, subagents=SubagentsConfig(enabled=subagents))))
+        reference = compile_workflow(True, True)
+        self.assertEqual((len(reference.nodes), len(reference.edges)), (15, 22))
+        for ask_user, subagents in ((False, False), (True, False), (False, True)):
+            compiled = compile_workflow(ask_user, subagents)
+            self.assertEqual(compiled.workflow_revision_id, reference.workflow_revision_id)
+            self.assertEqual([node.id for node in compiled.nodes], [node.id for node in reference.nodes])
+            self.assertEqual([(edge.id, edge.source, edge.target) for edge in compiled.edges],
+                [(edge.id, edge.source, edge.target) for edge in reference.edges])
+        self.assertEqual([edge for loop in reference.loop_regions for edge in loop.back_edge_ids], ["round_back"])
+        self.assertIsNotNone(reference.node("ask_user").map.aggregate)
+        agent_workflow(policies=AgentWorkflowPolicies(nodes={"ask_user": AgentNodePolicy()}))
         with self.assertRaises(ValueError):
             agent_workflow(include_ask_user="true")
 
@@ -104,6 +106,27 @@ class AskUserContracts:
             self.assertNotIn("ask_user", [tool.name for tool in provider.requests[0].tools])
             observed = next(item for item in provider.requests[-1].input if isinstance(item, LLMToolResult))
             self.assertEqual(observed.structured_content["error"]["kind"], "tool_not_advertised")
+
+    async def test_reopen_with_both_native_switches_off_uses_same_revision(self):
+        """New turns use the current build switches after reopening the same database."""
+        url = await self.database_url()
+        get_agents = LLMToolCall(name="get_agents", call_id="inspect", arguments="{}")
+        first = ScriptedProvider(tool_response(ask_call(), get_agents), answer())
+        async with self.host(first, url=url, include_ask_user=True,
+                subagents=SubagentsConfig(enabled=True)) as host:
+            waiting = await self.run_agent(host, session_id="chat")
+            self.assertEqual([wait.request["kind"] for wait in waiting.waits], ["agent.ask_user"])
+            await host.respond(waiting.invocation_id, waiting.waits[0].id, reply())
+            self.assertEqual((await host.join(waiting.invocation_id)).status, "completed")
+            revision = host._runtime.workflow_ids["agent"]
+        second = ScriptedProvider(tool_response(ask_call(), get_agents), answer())
+        async with self.host(second, url=url) as host:
+            self.assertEqual(host._runtime.workflow_ids["agent"], revision)
+            result = await self.run_agent(host, session_id="chat")
+            self.assertEqual(result.status, "completed", result.error)
+            self.assertFalse(second.requests[0].tools)
+            self.assertEqual([item.structured_content["error"]["kind"]
+                for item in second.requests[-1].input[-2:]], ["tool_not_advertised"] * 2)
 
     async def test_multiple_calls_wait_independently_and_join_in_call_order(self):
         """Map=1 exposes every question while ordinary Tools finish and replies may arrive out of order."""
@@ -195,16 +218,17 @@ class AskUserContracts:
             await host.respond(waiting.invocation_id, waiting.waits[0].id, reply())
             self.assertEqual((await host.join(waiting.invocation_id)).status, "completed")
 
-    async def test_enabled_question_still_obeys_tool_deny(self):
-        """An explicit Tool Deny prevents the native question Wait."""
+    async def test_enabled_question_is_independent_of_tool_permissions(self):
+        """A native question enters its own Wait despite deny rules and Always Ask."""
         provider = ScriptedProvider(tool_response(ask_call()), answer())
         async with self.host(provider, include_ask_user=True,
-            defaults=settings(mode="always_ask", access=AgentAccess(rules={"ask_user": "deny"}))) as host:
-            result = await self.run_agent(host)
-            self.assertEqual(result.status, "completed", result.error)
-            self.assertNotIn("ask_user", [tool.name for tool in provider.requests[0].tools])
-            observed = next(item for item in provider.requests[-1].input if isinstance(item, LLMToolResult))
-            self.assertEqual(observed.structured_content["error"]["kind"], "tool_not_advertised")
+            defaults=settings(mode="always_ask", access=AgentAccess(rules={"ask_user": "deny"}, allowed_tools=()))) as host:
+            waiting = await self.run_agent(host)
+            self.assertEqual(waiting.status, "waiting", waiting.error)
+            self.assertIn("ask_user", [tool.name for tool in provider.requests[0].tools])
+            self.assertEqual([wait.request["kind"] for wait in waiting.waits], ["agent.ask_user"])
+            await host.respond(waiting.invocation_id, waiting.waits[0].id, reply())
+            self.assertEqual((await host.join(waiting.invocation_id)).status, "completed")
 
     async def test_question_and_unrelated_approval_wait_are_visible_together(self):
         """Direct human input is not blocked behind an unrelated Tool's approval branch."""
@@ -226,8 +250,8 @@ class AskUserContracts:
             result = await host.join(waiting.invocation_id)
             self.assertEqual(result.status, "completed", result.error)
 
-    async def test_approved_question_and_tool_join_without_partial_conversation_commit(self):
-        """Mixed approved batches execute ordinary Tools but await question results before the next LLM call."""
+    async def test_question_ignores_policy_ask_but_other_tool_still_needs_approval(self):
+        """A policy Ask applies only to the ordinary Tool in a mixed batch."""
         effects = []
         def write(text: str) -> str:
             effects.append(text)
@@ -243,7 +267,8 @@ class AskUserContracts:
             waiting = await self.run_agent(host)
             approval = next(wait for wait in waiting.waits if wait.request["kind"] == "agent.tool_approval")
             batch = restore(AgentApprovalRequest, approval.request)
-            self.assertEqual([request.call.name for request in batch.requests], ["ask_user", "write"])
+            self.assertEqual([request.call.name for request in batch.requests], ["write"])
+            self.assertEqual({wait.request["kind"] for wait in waiting.waits}, {"agent.ask_user", "agent.tool_approval"})
             self.assertTrue(all(not request.operations for request in batch.requests))
             await host.respond(waiting.invocation_id, approval.id,
                 AgentApprovalResponse(decisions=tuple(item.respond(approved=True) for item in batch.requests)).model_dump(mode="json"))
@@ -297,18 +322,19 @@ class AskUserContracts:
             self.assertEqual([item.call_id for item in results], ["a", "b"])
             self.assertEqual(results[1].structured_content["answers"][0]["text"], "already answered")
 
-    async def test_resume_bypass_does_not_automatically_consume_user_question(self):
-        """Automatic approval reevaluation on explicit resume still requires a real question answer."""
+    async def test_approval_mode_change_does_not_consume_native_question(self):
+        """Resuming after an approval-mode change keeps the original question pending."""
         provider = ScriptedProvider(tool_response(ask_call()), answer())
         async with self.host(provider, include_ask_user=True,
             defaults=settings(access=AgentAccess(rules={"ask_user": "ask"}))) as host:
             waiting = await self.run_agent(host)
-            self.assertEqual(waiting.waits[0].request["kind"], "agent.tool_approval")
+            self.assertEqual(waiting.waits[0].request["kind"], "agent.ask_user")
             await host.pause(waiting.invocation_id)
             await host.extensions["agent"].context.configure(waiting.session_id, settings(mode="bypass").session_defaults())
             result = await host.recover(waiting.invocation_id)
             self.assertEqual(result.status, "waiting", result.error)
             self.assertEqual(result.waits[0].request["kind"], "agent.ask_user")
+            self.assertEqual(result.waits[0].id, waiting.waits[0].id)
             self.assertEqual(len(provider.requests), 1)
             await host.respond(waiting.invocation_id, result.waits[0].id, reply())
             self.assertEqual((await host.join(waiting.invocation_id)).status, "completed")

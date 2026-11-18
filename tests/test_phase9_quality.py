@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from autoagent import Spawn, Await
-from autoagent import RuntimeGraphCheckpoint
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 from tests.graph_fixtures import (
     child_refs,
@@ -23,8 +23,6 @@ from typing_extensions import TypedDict
 
 from autoagent import (
     ResourcePolicy,
-    AppCheckpoint,
-    AutoAgentApp,
     Capability,
     ConditionContext,
     ContextOperation,
@@ -35,16 +33,16 @@ from autoagent import (
     Node,
     Operator,
     OutputBindingContext,
-    SessionCheckpoint,
-    RuntimeTransitionError,
     Stream,
     StreamContext,
-    UserEvent,
     UserEventContext,
     UserEventSpec,
     Workflow,
-    WorkflowCompiler,
 )
+from autoagent.core.app import AppCheckpoint, AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler
+from autoagent.core.errors import RuntimeTransitionError
+from autoagent.core.runtime import SessionCheckpoint, UserEvent
 from autoagent.core import (
     RuntimeRepository,
     InMemoryUserEventJournal,

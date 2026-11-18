@@ -93,7 +93,7 @@ class SessionControlContracts:
         provider = ScriptedProvider(first, answer('Steered answer'), answer('B answer'), answer('C answer'))
         async with self.product(provider) as (host, client):
             async def submit(message, model=None, **extra):
-                value = {'session_id':'chat','message':message,'request_id':uuid4().hex,**extra}
+                value = {'session_id':'chat','message':message,'item_id':uuid4().hex,**extra}
                 if model:
                     value['model']={'provider':'offline','model':model}
                 result = await client.post('/api/v2/agent/queue', json=value)
@@ -104,12 +104,12 @@ class SessionControlContracts:
             b, c = await submit('Second question', 'B'), await submit('Third question', 'C')
             await host.applications["agent"].context.configure('chat', AgentSessionSettings(model={'provider':'offline','model':'D'}))
             retried = await client.post('/api/v2/agent/queue', json={
-                'session_id':'chat','message':b['message'],'request_id':b['id'],
+                'session_id':'chat','message':b['message'],'item_id':b['id'],
                 'initial_settings':{'model':{'provider':'offline','model':'A'},'approval_mode':'policy'}})
             self.assertEqual(retried.status_code,202,retried.text)
             self.assertEqual(retried.json()['model']['model'],'B')
             conflicting = await client.post('/api/v2/agent/queue', json={
-                'session_id':'chat','message':b['message'],'request_id':b['id'],
+                'session_id':'chat','message':b['message'],'item_id':b['id'],
                 'model':{'provider':'offline','model':'different'}})
             self.assertEqual(conflicting.status_code,409)
             message = await submit('Steering message', send_to=first_item['invocation_id'])

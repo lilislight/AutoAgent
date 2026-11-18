@@ -9,9 +9,11 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from autoagent import (
-    AutoAgentApp, ConditionContext, Edge, InputMappingContext, Map, Node, ResourcePolicy, RetryPolicy, UsagePolicy,
-    Workflow, WorkflowCompiler, WorkflowResourcePolicy,
+    ConditionContext, Edge, InputMappingContext, Map, Node, ResourcePolicy, RetryPolicy, UsagePolicy,
+    Workflow, WorkflowResourcePolicy,
 )
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.compiler import WorkflowCompiler
 from autoagent.agent import (
     LLMRequest, LLMResponse, LocalTokenPricing, TokenPrice, OpenAIProviderConfig, OpenAIResponsesProvider,
     OpenAIChatCompletionsProvider, ProjectUsagePolicy, UsageWindow, WindowUsagePolicy,

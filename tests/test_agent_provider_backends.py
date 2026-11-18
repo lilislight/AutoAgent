@@ -16,16 +16,17 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from autoagent import AutoAgentApp, Node, Stream, ValueContract, Workflow
+from autoagent import Node, Stream, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
-    AudioContent, DeepSeekChatCompletionsAdapter,
+    AudioContent, DataSource, DeepSeekChatCompletionsAdapter,
     DeepSeekProvider, DeepSeekResponsesAdapter,
     EmbeddingProviderOptions, EmbeddingRequest, FileContent, ImageContent,
     LiteLLMChatCompletionsAdapter, LiteLLMEmbeddingProvider, LiteLLMProvider,
     LiteLLMProviderConfig, LLMJsonFormat, LLMJsonSchemaFormat, LLMMessage,
     LLMNativeData, LLMOutputOptions, LLMProviderError, LLMProviderOptions,
     LLMReasoning, LLMRequest, LLMResponse, LLMStreamReducer,
-    LLMToolDefinition, LLMToolResult, LLMUnsupportedRequest, ProviderSource,
+    LLMToolCall, LLMToolDefinition, LLMToolResult, LLMUnsupportedRequest, ProviderSource,
     TextContent, URLSource, VideoContent,
 )
 from tests.test_agent_providers import TrackingStream, chat_body, chat_chunk, request, response_body, sse
@@ -472,6 +473,32 @@ class LiteLLMSDKTests(unittest.IsolatedAsyncioTestCase):
             env=environment, capture_output=True, text=True, timeout=45)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         return True
+
+    async def test_deepseek_tool_images_reach_the_wire_after_parallel_results(self):
+        """The installed LiteLLM sends image bytes and preserves contiguous tool results."""
+        if self.isolated():
+            return
+        import httpx
+        bodies = []
+
+        async def send(client, http_request, **kwargs):
+            bodies.append(json.loads(http_request.content))
+            return httpx.Response(200, request=http_request, json=chat_body({"role": "assistant", "content": "Seen"}))
+
+        image = ImageContent(source=DataSource(data="YQ==", mime_type="image/png"))
+        calls = tuple(LLMToolCall(name="lookup", call_id=key, arguments="{}") for key in ("image", "other"))
+        tool_results = (LLMToolResult(call_id="image", content=(image,), structured_content={"path": "test.png"}),
+            LLMToolResult(call_id="other", content=(TextContent(text="Second result"),)))
+        with patch.object(httpx.AsyncClient, "send", send):
+            async with LiteLLMProvider(LiteLLMProviderConfig(api_key="offline")) as provider:
+                await provider.ainvoke(LLMRequest(model="deepseek/deepseek-flash", tools=(tool_definition(),), input=(
+                    LLMMessage(role="user", content=(TextContent(text="Read the image"),)), *calls, *tool_results)))
+        messages = bodies[-1]["messages"]
+        self.assertEqual([message["role"] for message in messages[-4:]], ["assistant", "tool", "tool", "user"])
+        self.assertIn("test.png", messages[-3]["content"])
+        self.assertIn("Image pixels attached after this tool batch with call ID image.", messages[-3]["content"])
+        self.assertIn("Visual output of tool call image", messages[-1]["content"][0]["text"])
+        self.assertEqual(messages[-1]["content"][-1]["image_url"]["url"], "data:image/png;base64,YQ==")
 
     async def test_actual_sdk_chat_reasoning_and_native_responses_share_models(self):
         """The real SDK reaches both APIs without leaking its response classes."""

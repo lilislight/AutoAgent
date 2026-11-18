@@ -4,6 +4,7 @@ from autoagent.agent.workflow.builder import agent_workflow
 from autoagent.agent.workflow.policy import ContextPolicy
 from autoagent.agent.workflow.subagents import SubagentsConfig, SubagentTarget
 from autoagent.agent.execution import ExecutionToolsConfig
+from .prompts import DEFAULT_AGENT_APP_INSTRUCTIONS
 from .tool_defaults import execution_policy
 
 BUILTIN_AGENT_WORKFLOW_ID = "autoagent.agent"
@@ -13,6 +14,7 @@ def builtin_agent_workflow(*, resources=None, execution=True, command_policy=Non
     """Construct the product Agent; project resources require explicit grants."""
     workflow = agent_workflow(
         workflow_id=BUILTIN_AGENT_WORKFLOW_ID,
+        instructions=DEFAULT_AGENT_APP_INSTRUCTIONS,
         resources=resources,
         max_rounds=None,
         context_policy=ContextPolicy(context_window=200_000),

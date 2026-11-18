@@ -9,7 +9,8 @@ import unittest
 from types import MappingProxyType
 from unittest.mock import patch
 
-from autoagent import AutoAgentApp, ContextOperation, Node, Workflow
+from autoagent import ContextOperation, Node, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.core.errors import RuntimeInfrastructureError, RuntimeTransitionError
 from autoagent.core.runtime import RuntimeRepository
 from autoagent.core.runtime._context_index import (

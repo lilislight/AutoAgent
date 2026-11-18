@@ -7,16 +7,16 @@ from pydantic import Field, JsonValue, model_validator
 from ..models._base import Model, NonEmpty
 from ..models import LLMToolResult
 from autoagent.core.commands import SelectRequest
+from .message import AgentUserMessage
 
 
-class AgentSignalMessage(Model):
+class AgentSignalMessage(AgentUserMessage):
     """The same payload contract is used by user and collaboration Endpoints.
 
     Runtime message identity and sender identity come from Signal delivery,
     never from an untrusted payload.
     """
 
-    message: NonEmpty
     reply_requested: bool = False
     reply_to: NonEmpty | None = None
     wait_timeout_seconds: float | None = Field(default=None, gt=0)

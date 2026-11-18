@@ -5,7 +5,8 @@ import sys
 import unittest
 from unittest.mock import patch
 
-from autoagent import AutoAgentApp, Node, ValueContract, Workflow
+from autoagent import Node, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     MCPGetPromptRequest, MCPOperations, MCPReadResourceRequest, MCPResourceResponse,
     MemorySkillSource, Skill, SkillSet, SkillOperations, SkillLoadRequest, SkillDocument,

@@ -26,7 +26,7 @@
 `paired/` 是最终比较原始结果；`before_*.json` / `after_*.json` 是早期单轮记录。复现：
 
 ```bash
-.venv/bin/python artifacts/core_execution_refactor/run_benchmarks.py /tmp/autoagent-execution-before
+.venv/bin/python docs/benchmarks/archive/core_execution_refactor/run_benchmarks.py /tmp/autoagent-execution-before
 ```
 
 ## 执行耗时

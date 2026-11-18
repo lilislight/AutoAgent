@@ -18,23 +18,22 @@ from typing import cast
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp,
     ConditionContext,
     ContextOperation,
     ContextPatch,
     Edge,
     InputMappingContext,
-    InvocationResult,
     Node,
     OutputBindingContext,
     Recovery,
-    RuntimeGraphCheckpoint,
     SubWorkflow,
     UserEventContext,
     UserEventSpec,
     Wait,
     Workflow,
 )
+from autoagent.core.app import AutoAgentApp, InvocationResult
+from autoagent.core.runtime import RuntimeGraphCheckpoint
 
 
 PARENT_CHECKPOINT_PATH = Path("core_workflow_checkpoint.json")

@@ -584,7 +584,8 @@ class SkillRunnerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_runner_tool_integrates_with_core_and_portable_output(self):
         """Core can await a configured runner without changing the Tool Operator contract."""
-        from autoagent import AutoAgentApp, Node, Workflow
+        from autoagent import Node, Workflow
+        from autoagent.core.app import AutoAgentApp
         from autoagent.agent import LLMToolResult
         skill, runner = self.fixture("print('core script')")
         tools = ToolSet(SkillSet((skill,)).as_tools(runner=runner))

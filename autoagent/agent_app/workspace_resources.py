@@ -66,7 +66,7 @@ class AgentWorkspaces:
             workspace = await self.registry.aresolve(binding.workspace_id)
             await workspace.avalidate(binding.working_directory)
 
-    async def prepare(self, snapshot):
+    async def prepare(self, snapshot, *, refresh=True):
         key = self.key(snapshot)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
@@ -81,8 +81,18 @@ class AgentWorkspaces:
             try:
                 bound = key[0] != "@unbound"
                 workspace = await self.registry.aresolve(key[0] if bound else self.project_id)
+                previous = self._discoveries.get(key)
+                if not refresh and previous is not None and previous[0] is workspace:
+                    if bound:
+                        await workspace.avalidate(key[1])
+                    return previous[1] if bound else None
                 from autoagent.agent.workspace import WorkspaceDiscovery
-                discovery = await workspace.adiscover(key[1]) if bound else WorkspaceDiscovery(workspace.info, key[1])
+                if not bound:
+                    discovery = WorkspaceDiscovery(workspace.info, key[1])
+                elif type(workspace) is LocalWorkspace:
+                    discovery = await workspace.adiscover(key[1], skill_errors="skip")
+                else:
+                    discovery = await workspace.adiscover(key[1])
                 if bound and (discovery.workspace.id != key[0] or discovery.working_directory != key[1]):
                     raise WorkspaceError("Workspace discovery does not match its binding.")
                 registry.replace_source("skills", {("skill", skill.metadata.name): (skill.snapshot_revision, skill)
@@ -131,7 +141,7 @@ class AgentWorkspaces:
                 else:
                     registry.replace_source("execution", {})
                     self._execution_sources.pop(key, None)
-                self._discoveries[key] = discovery
+                self._discoveries[key] = (workspace, discovery)
                 return discovery if bound else None
             except BaseException:
                 registry.remove_source("skills")

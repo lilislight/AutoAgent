@@ -1,7 +1,9 @@
 """Builtin commands share call identity and observe durable Child boundaries."""
 import unittest
 from pydantic import BaseModel, ConfigDict
-from autoagent import AutoAgentApp, Workflow, Node, Edge, Spawn, Await, Wait, RuntimeHandle, RuntimeObservation, SystemCommand
+from autoagent import Workflow, Node, Edge, Spawn, Await, Wait, RuntimeHandle, RuntimeObservation
+from autoagent.core.app import AutoAgentApp
+from autoagent.core.commands import SystemCommand
 from autoagent.core import RuntimeGraphCheckpoint
 
 
@@ -127,7 +129,8 @@ class SystemCommandTests(unittest.TestCase):
 
     def test_relationship_validation(self):
         """Possessing a Handle never authorizes self, owner, sibling or forged Await."""
-        from autoagent import Map, InputMappingContext, RuntimeTransitionError
+        from autoagent import Map, InputMappingContext
+        from autoagent.core.errors import RuntimeTransitionError
         def batch(context: InputMappingContext) -> list[Value]:
             return [Value(value=1), Value(value=2)]
         app = AutoAgentApp()
@@ -221,7 +224,7 @@ class SystemCommandTests(unittest.TestCase):
 
     def test_compiler_rejects_unregistered_commands_and_invalid_entries(self):
         """Only builtin Commands execute and entry identity affects the Workflow revision."""
-        from autoagent import WorkflowCompileError
+        from autoagent.core.errors import WorkflowCompileError
         class UserCommand(SystemCommand):
             id = 'system_command:custom'
         app = AutoAgentApp()
@@ -325,7 +328,7 @@ class SystemCommandTests(unittest.TestCase):
 
     def test_removed_workflow_executable_is_rejected(self):
         """Bare Workflow executables and the removed execution_mode argument cannot compile."""
-        from autoagent import WorkflowCompileError
+        from autoagent.core.errors import WorkflowCompileError
         import autoagent
         from autoagent.core.workflow import NodeIR
         from dataclasses import fields

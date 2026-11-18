@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 from sqlalchemy import event as sql_event, inspect, select
 
-from autoagent import AutoAgentApp, Edge, Node, Operator, Wait, Workflow
+from autoagent import Edge, Node, Operator, Wait, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.host.persistence import DatabaseSink, PersistenceConfig
 from autoagent.host.persistence.schema import DETAIL_TABLES, meta
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase

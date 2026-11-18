@@ -10,12 +10,13 @@ import warnings
 from typing_extensions import TypedDict
 
 from autoagent import (
-    AutoAgentApp, Await, AwaitAny, AwaitAnyRequest, AwaitSignal, BackoffPolicy,
-    Edge, InputMappingContext, InvocationRef, Map, RuntimeHandle, Select, SelectRequest,
+    Await, AwaitAny, AwaitAnyRequest, AwaitSignal, BackoffPolicy,
+    Edge, InputMappingContext, Map, RuntimeHandle, Select, SelectRequest,
     SignalEndpoint, SignalRequestCase, Spawn, TimerRequestCase,
     Node, RetryPolicy, Stream, StreamContext, TimeoutPolicy, Timer, TimerRequest,
     UserEventContext, UserEventSpec, Wait, Workflow,
 )
+from autoagent.core.app import AutoAgentApp, InvocationRef
 from autoagent.core.runtime import UserEvent
 
 

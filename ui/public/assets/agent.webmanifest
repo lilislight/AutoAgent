@@ -1,0 +1,12 @@
+{
+  "name": "AutoAgent",
+  "short_name": "AutoAgent",
+  "start_url": "../agent",
+  "scope": "../",
+  "display": "standalone",
+  "background_color": "#1d1d1d",
+  "icons": [
+    { "src": "agent-icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "agent-icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

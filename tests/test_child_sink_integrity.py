@@ -12,8 +12,9 @@ from tests.graph_fixtures import (
 import asyncio
 import unittest
 from typing_extensions import TypedDict
-from autoagent import (AppCheckpoint, AutoAgentApp, InputMappingContext, Map, Node,
-                       Recovery, RuntimeInfrastructureError, Workflow)
+from autoagent import InputMappingContext, Map, Node, Recovery, Workflow
+from autoagent.core.app import AppCheckpoint, AutoAgentApp
+from autoagent.core.errors import RuntimeInfrastructureError
 from autoagent.core.runtime import RuntimeEvent, RuntimeRepository, SessionCheckpoint, SessionOpened, StateReducer
 
 

@@ -5,7 +5,8 @@ import statistics
 import time
 import tracemalloc
 from typing_extensions import TypedDict
-from autoagent import AutoAgentApp, ConditionContext, Edge, Node, Workflow
+from autoagent import ConditionContext, Edge, Node, Workflow
+from autoagent.core.app import AutoAgentApp
 
 class Document(TypedDict):
     rows: list[int]

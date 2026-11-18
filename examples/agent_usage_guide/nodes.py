@@ -9,7 +9,8 @@ from contextlib import asynccontextmanager
 import json
 import threading
 
-from autoagent import AutoAgentApp, Node, Stream, TimeoutPolicy, ValueContract, Workflow
+from autoagent import Node, Stream, TimeoutPolicy, ValueContract, Workflow
+from autoagent.core.app import AutoAgentApp
 from autoagent.agent import (
     EMBEDDING, LLM_CALL, embedding_operator, llm_call_operator,
     EmbeddingRequest, EmbeddingResponse, LLMRequest, LLMResponse,

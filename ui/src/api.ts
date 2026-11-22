@@ -1,6 +1,7 @@
 import type { TimelineEventGroups, ExecutionFamily, TimelinePosition, ExecutionFilters, ExecutionTrace, RecordedValue, SessionPage, TimelineMarkerPage, TimelineOverview, TimelinePage, TracePage, TraceRow, WorkflowCatalogPage, WorkflowGraphData, WorkflowPage } from "./types";
 
-import { config, request } from './http';
+import { config } from './http';
+import { workflowRequest as request } from './workflowHttp';
 export function getForkPlan(iid:string,sequence:number,signal:AbortSignal) {
   return request<import('./types').ForkPlan>(`/execution-fork-plan?${new URLSearchParams({invocation_id:iid,sequence:String(sequence)})}`,signal);
 }

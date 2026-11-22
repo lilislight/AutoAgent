@@ -96,6 +96,16 @@ class StateInspection:
         self.queries, self.config = queries, config
 
     async def read(self, iid, *, sequence, scope=None, pointer=None, field=None):
+        return await self._read(iid, sequence=sequence, scope=scope, pointer=pointer,
+            field=field, budget=ReadBudget(self.config))
+
+    async def load_context(self, iid, *, sequence, scope, pointer=None):
+        """Materialize Context for execution without Inspect response/decode limits."""
+        if scope not in ("session", "invocation"):
+            raise ValueError("scope must be session or invocation.")
+        return await self._read(iid, sequence=sequence, scope=scope, pointer=pointer, budget=None)
+
+    async def _read(self, iid, *, sequence, budget, scope=None, pointer=None, field=None):
         if not isinstance(iid, str) or not iid.strip() or len(iid) > 4096:
             raise ValueError("Invocation ID must be nonempty and at most 4096 characters.")
         if type(sequence) is not int or not 1 <= sequence <= 9007199254740991:
@@ -107,7 +117,6 @@ class StateInspection:
         if pointer is not None and scope is None and field is None:
             raise ValueError("A Context scope is required with a JSON Pointer.")
         pointer_tokens(pointer)
-        budget = ReadBudget(self.config)
         q = self.queries
         events, invs, members = (meta.tables[n] for n in ("runtime_events", "invocations", "checkpoint_sessions"))
         async with q.view(invocation_id=iid) as (conn, _, _, frontier):
@@ -128,10 +137,10 @@ class StateInspection:
                 .order_by(members.c.sequence.desc(), members.c.checkpoint_id).limit(1))).first()
             paths = {"context": ("invocation", field)} if field else {"context": (scope, "context")} if scope else {
                 key: ("invocation", key) for key in _SUMMARY_FIELDS}
-            resolved, sources = await self._resolve(conn, inv.session_id, sequence, anchor, paths, budget, pointer)
+            resolved, sources, scanned = await self._resolve(conn, inv.session_id, sequence, anchor, paths, budget, pointer)
             result = dict(position=position, view="durable")
             # The source position is fixed even if this store frontier advances.
-            result["read"] = dict(frontier=frontier, scanned_events=budget.scanned)
+            result["read"] = dict(frontier=frontier, scanned_events=scanned)
             if scope or field:
                 value = resolved["context"]
                 result.update(scope=scope, pointer=pointer or "", available=value is not _MISSING,
@@ -140,7 +149,8 @@ class StateInspection:
                     result['field'] = field
                 if value is _MISSING:
                     result["reason"] = sources["context"].get("reason", "path_not_found")
-                budget.check_result(result["value"])
+                if budget is not None:
+                    budget.check_result(result["value"])
                 return result
             state = {k: v for k, v in resolved.items() if v is not _MISSING}
             if state.get("id") != iid:
@@ -154,26 +164,36 @@ class StateInspection:
                 compacted=compacted)
             result.update(state=state, contexts={"session": dict(available=True),
                 "invocation": dict(available=not compacted, **({"reason": "released"} if compacted else {}))})
-            budget.check_result(result)
+            if budget is not None:
+                budget.check_result(result)
             return result
+
+    async def _reader(self, conn, kind, identity, budget):
+        if budget is None:
+            return await SourceReader.open(self.queries.storage, conn, kind, identity)
+        return await BoundedReader.open(self.queries.storage, conn, kind, identity, budget)
 
     async def _resolve(self, conn, sid, sequence, anchor, paths, budget, pointer):
         events = meta.tables["runtime_events"]
         remaining, values, sources = dict(paths), {}, {}
         after = anchor.sequence if anchor else 0
         before, expected = sequence + 1, sequence
+        scanned = 0
         while remaining and before - 1 > after:
             rows = (await conn.execute(select(events.c.event_id, events.c.sequence)
                 .where(events.c.session_id == sid, events.c.sequence > after, events.c.sequence < before)
-                .order_by(events.c.sequence.desc()).limit(min(128, budget.scan_events - budget.scanned + 1)))).all()
+                .order_by(events.c.sequence.desc()).limit(
+                    min(128, budget.scan_events - budget.scanned + 1) if budget is not None else 128))).all()
             if not rows:
                 raise InspectionError("HISTORY_UNAVAILABLE", "Event history is incomplete and has no usable Checkpoint at this position.")
             for event in rows:
                 if event.sequence != expected:
                     raise InspectionError("HISTORY_UNAVAILABLE", "A gap in the Session Event history prevents historical inspection.")
                 expected -= 1
-                budget.scan()
-                reader = await BoundedReader.open(self.queries.storage, conn, "runtime_event", event.event_id, budget)
+                scanned += 1
+                if budget is not None:
+                    budget.scan()
+                reader = await self._reader(conn, "runtime_event", event.event_id, budget)
                 if await reader.read(("delta",), deep=False) is not None:
                     ops = await reader.read(("delta", "operations"), deep=False)
                     for index in range(len(ops) - 1, -1, -1):
@@ -198,10 +218,10 @@ class StateInspection:
                 # Readers and their decoded Artifact caches live for one Event only.
                 del reader
                 if not remaining:
-                    return values, sources
+                    return values, sources, scanned
             before = rows[-1].sequence
         if remaining and anchor:
-            reader = await BoundedReader.open(self.queries.storage, conn, "checkpoint", anchor.checkpoint_id, budget)
+            reader = await self._reader(conn, "checkpoint", anchor.checkpoint_id, budget)
             sessions = await reader.read(("sessions",), deep=False)
             member = None
             for index in range(len(sessions)):
@@ -217,7 +237,7 @@ class StateInspection:
                     kind = await _optional(reader, (*member, "invocation", "kind"))
                     if kind == "child_result":
                         sources[key]["reason"] = "released"
-            return values, sources
+            return values, sources, scanned
         if remaining:
             raise InspectionError("HISTORY_UNAVAILABLE", "No historical initialization or usable Checkpoint is available.")
-        return values, sources
+        return values, sources, scanned

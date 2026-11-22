@@ -259,6 +259,9 @@ class ApplicationContext(AgentRuntime):
             from autoagent.host.models import HostNotFoundError
             info = await self.host._persistence.session_information(session_id)
             if info is None:
+                fork = await self.host.applications["agent"].storage.forks("info", session_id)
+                if fork and fork["fork_source_session_id"]:
+                    return dict(session_id=session_id, invocation_count=0, runtime_started=False)
                 if allow_new:
                     return None
                 raise HostNotFoundError("Conversation is unavailable.")
@@ -293,9 +296,11 @@ class ApplicationContext(AgentRuntime):
         if remember_model:
             await self.remember_model(session_id, selected.model_dump(mode="json"))
         input_value = input_value.model_copy(update={"model": selected})
+        started = existing is not None and existing.get("runtime_started", True)
+        initial_context = None if started else await self.host.applications["agent"].forks.initial_context(session_id)
         return await self.host.execute_json(BUILTIN_AGENT_WORKFLOW_ID, input_value.model_dump(mode="json"),
             revision_id=catalog["agent"]["revision_id"], entry_node_id="start", session_id=session_id,
-            require_existing_session=existing is not None, require_new_session=existing is None, before_start=before_start)
+            session_context=initial_context, require_existing_session=started, require_new_session=not started, before_start=before_start)
 
     async def resolve_request_media(self, request):
         from autoagent.agent.models import AssetSource, ImageContent, LLMMessage
@@ -312,7 +317,7 @@ class ApplicationContext(AgentRuntime):
                 if isinstance(part, ImageContent) and isinstance(part.source, AssetSource) and part.source.uri.startswith(IMAGE_URI_PREFIX):
                     key = part.source.uri.removeprefix(IMAGE_URI_PREFIX)
                     if key not in resolved:
-                        asset = await self.storage("image", key, session_id=sid)
+                        asset = await self.host.applications["agent"].forks.image(sid, key)
                         if asset is None or asset.mime_type != part.source.mime_type:
                             raise ValueError("An attached image is no longer available.")
                         resolved[key] = asset.inline()

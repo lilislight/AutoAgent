@@ -35,10 +35,13 @@ class ServerSettings:
     user_event_buffer: int = 256
     user_event_heartbeat_seconds: float = 10
     access_log: bool = True
+    workflow_ui_show_agent_app: bool = False
 
     def __post_init__(self):
         if type(self.access_log) is not bool:
             raise ValueError("Server access_log must be bool.")
+        if type(self.workflow_ui_show_agent_app) is not bool:
+            raise ValueError("workflow_ui_show_agent_app must be bool.")
         if not isinstance(self.host, str) or not self.host.strip():
             raise ValueError("Server host cannot be empty.")
         if type(self.port) is not int or not 1 <= self.port <= 65535:
@@ -73,6 +76,9 @@ class ServerSettings:
         access = env.get("AUTOAGENT_SERVER_ACCESS_LOG", "true").strip().lower()
         if access not in {"true", "false", "1", "0"}:
             raise ValueError("Server access log environment value must be true, false, 1 or 0.")
+        show_agent = env.get("AUTOAGENT_SERVER_WORKFLOW_UI_SHOW_AGENT_APP", "false").strip().lower()
+        if show_agent not in {"true", "false", "1", "0"}:
+            raise ValueError("Invalid AUTOAGENT_SERVER_WORKFLOW_UI_SHOW_AGENT_APP; use true, false, 1 or 0.")
         directory = env.get("AUTOAGENT_SERVER_UI_DIRECTORY", "").strip()
         path = Path(directory).expanduser() if directory else None
         if path is not None and not path.is_absolute():
@@ -94,4 +100,5 @@ class ServerSettings:
             user_event_buffer=int(env.get('AUTOAGENT_SERVER_USER_EVENT_BUFFER', '256')),
             user_event_heartbeat_seconds=float(env.get('AUTOAGENT_SERVER_USER_EVENT_HEARTBEAT_SECONDS', '10')),
             access_log=access in {"true", "1"},
+            workflow_ui_show_agent_app=show_agent in {"true", "1"},
         )

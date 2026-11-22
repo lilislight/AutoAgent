@@ -32,20 +32,20 @@ function TurnPreview({ item, anchor, id }: { item: ConversationLandmark; anchor:
   </div>, document.body);
 }
 
-export function ConversationNavigator({ items, area, content, active, onJump }: {
+export function ConversationNavigator({ items, rendered = items, area, content, active, onJump }: {
   items: ConversationLandmark[]; area: RefObject<HTMLDivElement | null>; content: RefObject<HTMLDivElement | null>;
-  active: boolean; onJump: (item: ConversationLandmark) => void;
+  rendered?: ConversationLandmark[]; active: boolean; onJump: (item: ConversationLandmark) => void;
 }) {
   const nav = useRef<HTMLElement>(null), tooltip = useId();
   const [selected, setSelected] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ id: string; anchor: HTMLButtonElement } | null>(null);
   const stamp = items.map(item => item.id).join('\n');
+  const renderedStamp = rendered.map(item => item.id).join('\n');
+  const renderedIds = new Set(rendered.map(item => item.id));
   useEffect(() => {
     const root = area.current, body = content.current;
-    const ids = stamp.split('\n');
-    if (!root || !body || !active || ids.length < 2) return;
-    const nodes = new Map([...body.querySelectorAll<HTMLElement>('[data-conversation-message]')].map(node => [node.dataset.conversationMessage!, node]));
-    let frame = 0, positions: number[] = [];
+    if (!root || !body || !active || !renderedStamp) return;
+    let frame = 0, positions: number[] = [], ids: string[] = [];
     const update = () => {
       frame = 0;
       const index = root.scrollHeight - root.scrollTop - root.clientHeight <= 8 ? ids.length - 1
@@ -53,8 +53,10 @@ export function ConversationNavigator({ items, area, content, active, onJump }: 
       setSelected(ids[index] ?? null);
     };
     const measure = () => {
+      const nodes = [...body.querySelectorAll<HTMLElement>('[data-conversation-message]')];
       const top = root.getBoundingClientRect().top;
-      positions = ids.map(id => root.scrollTop + (nodes.get(id)?.getBoundingClientRect().top ?? top) - top);
+      ids = nodes.map(node => node.dataset.conversationMessage!);
+      positions = nodes.map(node => root.scrollTop + node.getBoundingClientRect().top - top);
       update();
     };
     const scroll = () => { if (!frame) frame = requestAnimationFrame(update); };
@@ -62,7 +64,7 @@ export function ConversationNavigator({ items, area, content, active, onJump }: 
     const observer = new ResizeObserver(measure); observer.observe(body); observer.observe(root);
     root.addEventListener('scroll', scroll, { passive: true });
     return () => { observer.disconnect(); root.removeEventListener('scroll', scroll); cancelAnimationFrame(frame); };
-  }, [stamp, area, content, active]);
+  }, [renderedStamp, area, content, active]);
   useEffect(() => {
     const list = nav.current?.querySelector<HTMLElement>('.agent-turn-marks');
     if (!list) return;
@@ -86,7 +88,7 @@ export function ConversationNavigator({ items, area, content, active, onJump }: 
     if (next !== null) { event.preventDefault(); focus(next); }
   }}>
     <div className="agent-turn-marks">{items.map((item, index) => <button key={item.id} type="button" className={`agent-turn-mark ${item.id === selected ? 'is-current' : ''}`} data-turn-index={index}
-      aria-label={`Go to question ${index + 1}: ${item.question}`} aria-current={item.id === selected ? 'location' : undefined} aria-controls={item.anchor} aria-describedby={preview?.id === item.id ? tooltip : undefined}
+      aria-label={`Go to question ${index + 1}: ${item.question}`} aria-current={item.id === selected ? 'location' : undefined} aria-controls={renderedIds.has(item.id) ? item.anchor : undefined} aria-describedby={preview?.id === item.id ? tooltip : undefined}
       onPointerEnter={event => { if (event.pointerType !== 'touch') setPreview({ id: item.id, anchor: event.currentTarget }); }}
       onFocus={event => setPreview({ id: item.id, anchor: event.currentTarget })} onBlur={() => setPreview(null)}
       onClick={() => { setPreview(null); setSelected(item.id); onJump(item); }}><span /></button>)}</div>

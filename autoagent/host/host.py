@@ -406,19 +406,21 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 tuple(WorkflowCompiler().compile(w) for w in workflows),
             )
 
-    async def list_workflows(self, *, workflow_id=None, include_history=False, limit=100, cursor=None):
+    async def list_workflows(self, *, workflow_id=None, include_history=False, limit=100, cursor=None, excluded_workflow_ids=()):
         async def query():
+            from .persistence.tracing import filter_identities
+            excluded = filter_identities(excluded_workflow_ids, 512)
             if type(limit) is not int or not 1 <= limit <= 1000:
                 raise ValueError("limit must be between 1 and 1000.")
             if include_history:
-                page = await self._persistence.list_workflows(workflow_id=workflow_id, limit=limit, cursor=cursor)
+                page = await self._persistence.list_workflows(workflow_id=workflow_id, limit=limit, cursor=cursor, excluded_workflow_ids=excluded)
                 rows = tuple(dict(row, runnable=self._runtime is not None and row["revision_id"] in self._runtime.revisions) for row in page.items)
                 return Page(rows, page.next_cursor, page.frontier)
             rows = sorted(({
                 "workflow_id": wid, "revision_id": revision,
                 "workflow_version": self._runtime.revisions[revision].workflow_version,
                 "runnable": True,
-            } for wid, revision in (self._runtime.workflow_ids.items() if self._runtime else ()) if workflow_id is None or wid == workflow_id), key=lambda row: (row["workflow_id"], row["revision_id"]))
+            } for wid, revision in (self._runtime.workflow_ids.items() if self._runtime else ()) if (workflow_id is None or wid == workflow_id) and wid not in excluded), key=lambda row: (row["workflow_id"], row["revision_id"]))
             if cursor is not None:
                 if not isinstance(cursor, (tuple, list)) or len(cursor) != 2:
                     raise ValueError("Invalid Workflow cursor.")
@@ -427,13 +429,13 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             return Page(tuple(chosen), (chosen[-1]["workflow_id"], chosen[-1]["revision_id"]) if len(rows) > limit else None)
         return await self._perform(query)
 
-    async def browse_workflows(self, *, search="", limit=100, cursor=None, registered_only=False):
+    async def browse_workflows(self, *, search="", limit=100, cursor=None, registered_only=False, excluded_workflow_ids=()):
         """Browse grouped saved Workflows with current registration metadata."""
         async def query():
             if not isinstance(search, str) or len(search) > 512:
                 raise ValueError("search must be a string of at most 512 characters.")
             current = self._runtime.workflow_ids if self._runtime else {}
-            page = await self._persistence.workflow_catalog(registered_ids=tuple(current), search=search.strip().lower(), limit=limit, cursor=cursor, registered_only=registered_only)
+            page = await self._persistence.workflow_catalog(registered_ids=tuple(current), search=search.strip().lower(), limit=limit, cursor=cursor, registered_only=registered_only, excluded_workflow_ids=excluded_workflow_ids)
             rows = []
             for row in page.items:
                 revision = current.get(row["workflow_id"])
@@ -482,7 +484,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
             return record
         return await self._perform(query)
 
-    async def list_executions(self, *, search="", status=None, workflow_ids=(), revision_ids=(), statuses=(), session_id=None,
+    async def list_executions(self, *, search="", status=None, workflow_ids=(), revision_ids=(), statuses=(), session_id=None, excluded_workflow_ids=(),
                               started_after_us=None, started_before_us=None, limit=50, cursor=None):
         """Browse recent persisted Root executions without activating Sessions."""
         if not isinstance(search, str) or len(search) > 512:
@@ -490,26 +492,26 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         if status not in (None, "created", "running", "waiting", "settling", "completed", "failed", "cancelled", "paused"):
             raise ValueError("Unknown execution status.")
         return await self._perform(lambda: self._persistence.trace_page("root", search=search.strip(),
-            workflow_ids=workflow_ids, revision_ids=revision_ids, statuses=tuple(statuses) + ((status,) if status else ()),
+            workflow_ids=workflow_ids, revision_ids=revision_ids, excluded_workflow_ids=excluded_workflow_ids, statuses=tuple(statuses) + ((status,) if status else ()),
             session_id=session_id, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor))
 
-    async def list_execution_sessions(self, *, search="", workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
+    async def list_execution_sessions(self, *, search="", workflow_ids=(), revision_ids=(), statuses=(), excluded_workflow_ids=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None):
         """Browse persisted Session history without loading Core State."""
         if not isinstance(search, str) or len(search) > 512:
             raise ValueError("search must have at most 512 characters.")
         return await self._perform(lambda: self._persistence.execution_sessions(
-            search=search.strip().lower(), workflow_ids=workflow_ids, revision_ids=revision_ids, statuses=statuses,
+            search=search.strip().lower(), workflow_ids=workflow_ids, revision_ids=revision_ids, excluded_workflow_ids=excluded_workflow_ids, statuses=statuses,
             session_id=session_id, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor,
         ))
 
-    async def list_session_invocations(self, session_id, *, search="", workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, limit=50, cursor=None):
+    async def list_session_invocations(self, session_id, *, search="", workflow_ids=(), revision_ids=(), statuses=(), excluded_workflow_ids=(), started_after_us=None, started_before_us=None, limit=50, cursor=None):
         """Read one Session's cross-Workflow history with optional identity matching."""
         if not isinstance(search, str) or len(search) > 512:
             raise ValueError("search must have at most 512 characters.")
         async def query():
             page = await self._persistence.trace_page(
                 "session", session_id=session_id, search=search.strip().lower(),
-                workflow_ids=workflow_ids, revision_ids=revision_ids, statuses=statuses, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor,
+                workflow_ids=workflow_ids, revision_ids=revision_ids, excluded_workflow_ids=excluded_workflow_ids, statuses=statuses, started_after_us=started_after_us, started_before_us=started_before_us, limit=limit, cursor=cursor,
             )
             if page is None:
                 raise HostNotFoundError("Unknown persisted Session.")
@@ -654,8 +656,9 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
     async def list_execution_waits(self, invocation_id, *, occurrence_id=None, status=None, limit=50, cursor=None):
         return await self._trace_page("wait", invocation_id, occurrence_id=occurrence_id, status=status, limit=limit, cursor=cursor)
 
-    async def list_child_executions(self, invocation_id, *, occurrence_id=None, call_id=None, order="desc", limit=50, cursor=None):
-        return await self._trace_page("child", invocation_id, occurrence_id=occurrence_id, call_id=call_id, order=order, limit=limit, cursor=cursor)
+    async def list_child_executions(self, invocation_id, *, occurrence_id=None, call_id=None, order="desc", limit=50, cursor=None, excluded_workflow_ids=()):
+        return await self._trace_page("child", invocation_id, occurrence_id=occurrence_id, call_id=call_id, order=order,
+            limit=limit, cursor=cursor, excluded_workflow_ids=excluded_workflow_ids)
 
     async def get_execution_family(self, invocation_id):
         async def query():

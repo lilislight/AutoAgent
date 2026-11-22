@@ -1,8 +1,9 @@
-import type { AgentEvent, AgentMessage, Compaction, Interaction, ResponseSnapshot, ToolSnapshot, Payloads } from './types.js';
+import type { AgentEvent, AgentMessage, AgentTurnPage, Compaction, Interaction, ResponseSnapshot, ToolSnapshot, Payloads } from './types.js';
+import type { ConversationTool } from './ConversationTools.js';
 
 export const entityKey = (iid: string, id: string) => JSON.stringify([iid, id]);
 interface RowBase { id: string; invocation: string; at: number }
-export type FeedRow = RowBase & ({ type: 'message'; message: AgentMessage } | { type: 'response'; responseId: string } | { type: 'compaction'; compactionId: string } | { type: 'error'; error: { type: string; message: string }; handled: boolean });
+export type FeedRow = RowBase & ({ type: 'message'; message: AgentMessage } | { type: 'response'; responseId: string } | { type: 'compaction'; compactionId: string } | { type: 'error'; error: { type: string; message: string }; handled: boolean } | { type: 'history' });
 export interface LiveResponse { streamId: string; parts: { key: string; kind: string; text: string }[] }
 export interface ConversationState {
   rows: Record<string, FeedRow>; responses: Record<string, ResponseSnapshot>; live: Record<string, LiveResponse>;
@@ -82,3 +83,33 @@ export function resetTransient(state: ConversationState): ConversationState {
 }
 
 export function sortedRows(state: ConversationState) { return Object.values(state.rows).sort((a, b) => a.at - b.at || a.id.localeCompare(b.id)); }
+
+export function conversationSummary(pages: AgentTurnPage[] | undefined) {
+  const state = applyEvents(emptyConversation(), pages?.flatMap(page => page.events) ?? []);
+  for (const page of pages ?? []) {
+    for (const { invocation_id: invocation, status } of page.items) {
+      const at = page.details[invocation];
+      if (at == null || !['completed', 'failed', 'cancelled'].includes(status)) continue;
+      const id = `history:${invocation}`;
+      state.rows[id] = { id, invocation, at, type: 'history' };
+    }
+  }
+  return state;
+}
+
+export function conversationTools(state: ConversationState) {
+  const interactions = new Map<string, Interaction>();
+  for (const [key, value] of Object.entries(state.interactions)) {
+    const [iid] = JSON.parse(key) as string[];
+    for (const id of value.tool_ids) interactions.set(entityKey(iid, id), value);
+  }
+  const tools = new Map<string, ConversationTool[]>();
+  for (const [key, tool] of Object.entries(state.tools)) {
+    const [iid] = JSON.parse(key) as string[];
+    const group = entityKey(iid, tool.response_id);
+    const item = { id: tool.tool_id, tool, interaction: interactions.get(key) };
+    const items = tools.get(group);
+    if (items) items.push(item); else tools.set(group, [item]);
+  }
+  return { interactions, tools };
+}

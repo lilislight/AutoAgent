@@ -22,31 +22,32 @@ class Exploration:
             return result
         return await self._perform(query)
 
-    async def get_session_information(self, session_id):
+    async def get_session_information(self, session_id, *, excluded_workflow_ids=()):
         async def query():
-            result = await self._persistence.session_information(session_id)
+            result = await self._persistence.session_information(session_id, excluded_workflow_ids=excluded_workflow_ids)
             if result is None:
                 raise HostNotFoundError('Session is unavailable.')
             return result
         return await self._perform(query)
 
     async def list_session_history(self, session_id, *, limit=50, cursor=None,
-        search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None):
+        search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, excluded_workflow_ids=()):
         """Read causal Invocation order; filtering retains the original Session ordinal."""
         if not isinstance(search, str) or len(search) > 512:
             raise ValueError('search must have at most 512 characters.')
         async def query():
             result = await self._persistence.session_history(session_id, limit=limit, cursor=cursor,
                 search=search.strip().lower(), workflow_ids=workflow_ids, revision_ids=revision_ids,
-                statuses=statuses, started_after_us=started_after_us, started_before_us=started_before_us)
+                statuses=statuses, started_after_us=started_after_us, started_before_us=started_before_us,
+                excluded_workflow_ids=excluded_workflow_ids)
             if result is None:
                 raise HostNotFoundError('Session is unavailable.')
             return result
         return await self._perform(query)
 
-    async def list_session_workflows(self, session_id, *, limit=50, cursor=None):
+    async def list_session_workflows(self, session_id, *, limit=50, cursor=None, excluded_workflow_ids=()):
         async def query():
-            page = await self._persistence.session_workflows(session_id, limit=limit, cursor=cursor)
+            page = await self._persistence.session_workflows(session_id, limit=limit, cursor=cursor, excluded_workflow_ids=excluded_workflow_ids)
             if page is None:
                 raise HostNotFoundError('Session is unavailable.')
             return Page(tuple(dict(row, runnable=self._runtime is not None and row['workflow_revision_id'] in self._runtime.revisions) for row in page.items),

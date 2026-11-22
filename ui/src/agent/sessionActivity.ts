@@ -18,7 +18,7 @@ export function sessionRunning(value: Pick<AgentSession, 'status' | 'control_sta
 export function observeSessions(previous: SessionActivities, rows: AgentSession[], viewed: string | null): SessionActivities {
   let result = previous;
   for (const row of rows) {
-    if (!row.status) continue;
+    if (!row.status || !row.invocation_id) continue;
     const old = Object.hasOwn(result, row.session_id) ? result[row.session_id] : undefined, sequence = row.last_sequence ?? 0;
     if (old && (old.sequence > sequence || old.invocation === row.invocation_id && terminal.has(old.status) && !terminal.has(row.status))) continue;
     const finished = terminal.has(row.status);

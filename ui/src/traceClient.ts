@@ -1,4 +1,5 @@
-import { ApiError, config, request } from './http';
+import { ApiError, config } from './http';
+import { workflowRequest as request } from './workflowHttp';
 import type { ExecutionTrace, TraceDataset, TraceDatasetManifest, TraceDatasetPage, TimelineRow, TimelineMarker, ReplayEvent, LocalReplayResult, TraceEdgeUpdate, FamilyLink } from './types';
 import { readTraceCache, writeTraceCache } from './traceStorage';
 import { setTraceProgress } from './traceProgress';

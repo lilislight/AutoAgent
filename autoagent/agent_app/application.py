@@ -23,6 +23,8 @@ class AgentApplication:
         self._edit_code_permissions = True
         from .context import ApplicationContext
         self.context = ApplicationContext(host)
+        from .forks import ConversationForks
+        self.forks = ConversationForks(self)
         self._workflow = None
         self._entered = False
         self._runtime_active = False
@@ -264,6 +266,10 @@ class AgentApplication:
         self.require_enabled()
         return await self.context.rename_conversation(*args, **kwargs)
 
+    async def fork_conversation(self, session_id, new_session_id, invocation_id):
+        self.require_enabled()
+        return await self.forks.create(session_id, new_session_id, invocation_id)
+
     async def workspace_session(self, *args, **kwargs):
         self.require_enabled()
         return await self.context.workspace_session(*args, **kwargs)
@@ -271,6 +277,14 @@ class AgentApplication:
     async def workspace_invocation(self, *args, **kwargs):
         self.require_enabled()
         return await self.context.workspace_invocation(*args, **kwargs)
+
+    async def conversation_page(self, session_id, **options):
+        await self.workspace_session(session_id)
+        return await self.host._perform(lambda: self.storage.conversation("page", session_id, **options))
+
+    async def conversation_index(self, session_id):
+        await self.workspace_session(session_id)
+        return await self.host._perform(lambda: self.storage.conversation("index", session_id))
 
     async def workspace_resources(self, *args, **kwargs):
         self.require_enabled()
@@ -334,7 +348,7 @@ class AgentApplication:
         if invocation_id is not None:
             family = await self.workspace_invocation(invocation_id)
             if family['current']['session_id'] != session_id:
-                raise ValueError('Execution belongs to another conversation.')
+                await self.forks.target(session_id, invocation_id)
         session = await self.host.token_usage(session_id=session_id, include_descendants=True)
         invocation = await self.host.token_usage(invocation_id=invocation_id, include_descendants=True) if invocation_id else None
         return dict(session=session, invocation=invocation)

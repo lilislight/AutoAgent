@@ -20,7 +20,7 @@ export function conversationEntries(state: ConversationState, invocations: Agent
     }
   }
   for (const item of invocations) {
-    if (turns.has(item.invocation_id) || !item.status || (!messages.has(item.invocation_id) && !['running', 'waiting'].includes(item.status))) continue;
+    if (turns.has(item.invocation_id) || !item.status || (!messages.has(item.invocation_id) && !['running', 'waiting', 'failed', 'cancelled'].includes(item.status))) continue;
     entries.push({ type: 'turn', id: `turn:${item.invocation_id}`, invocation: item.invocation_id,
       at: messages.has(item.invocation_id) ? messages.get(item.invocation_id)! + 1 : item.started_at_us ?? 0, rows: [] });
   }
@@ -39,6 +39,7 @@ export function finalResponse(state: ConversationState, invocation: string, stat
 }
 
 export function hasLogContent(row: FeedRow, state: ConversationState, finalId?: string): boolean {
+  if (row.type === 'history') return true;
   if (row.type !== 'response') return row.type !== 'message' || row.message.source === 'agent';
   const key = entityKey(row.invocation, row.responseId), response = state.responses[key];
   if (!response) return !!state.live[key]?.parts.some(part => part.text.trim());

@@ -1,6 +1,6 @@
-import { newId } from '../ids';
-import { config, request } from '../http';
-import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution, AgentInvocation, AgentResources, AgentSession, AgentWorkspaceInfo, Controls, Operation, Page, SessionSettings, SessionSubagent, SettingsRecord, Usage } from './types';
+import { newId } from '../ids.js';
+import { config, request } from '../http.js';
+import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution, AgentResources, AgentSession, AgentTurnIndexItem, AgentTurnPage, AgentWorkspaceInfo, Controls, MessageQueue, Operation, Page, QueuedMessage, SessionSettings, SessionSubagent, SettingsRecord, Usage } from './types.js';
 
 function imageUpload(file: File): Promise<{ mime_type: string; data: string }> {
   return new Promise((resolve, reject) => {
@@ -16,23 +16,25 @@ function imageUpload(file: File): Promise<{ mime_type: string; data: string }> {
 
 // All commands use Host operations. This module has no Graph/Trace dependencies.
 export const agentClient = {
-  queue: (sid: string, signal: AbortSignal) => request<import('./types').MessageQueue>(`/agent/queue?${new URLSearchParams({ session_id: sid })}`, signal),
+  queue: (sid: string, signal: AbortSignal) => request<MessageQueue>(`/agent/queue?${new URLSearchParams({ session_id: sid })}`, signal),
   enqueue: async (sid: string, message: string, itemId: string, workspace: string | null, signal: AbortSignal, sendTo?: string, initialSettings?: SessionSettings, files: File[] = []) => {
     const images = files.length ? await Promise.all(files.map(imageUpload)) : undefined;
     signal.throwIfAborted();
-    return request<import('./types').QueuedMessage>('/agent/queue', signal, {
+    return request<QueuedMessage>('/agent/queue', signal, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ session_id: sid, message, item_id: itemId, workspace_id: workspace, images, send_to: sendTo, initial_settings: initialSettings }),
     });
   },
-  queueAction: (sid: string, itemId: string, action: 'cancel' | 'send_now' | 'continue', signal: AbortSignal, invocationId?: string) => request<import('./types').QueuedMessage>('/agent/queue/actions', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, item_id: itemId, action, ...(invocationId ? { invocation_id: invocationId } : {}) }) }),
+  queueAction: (sid: string, itemId: string, action: 'cancel' | 'send_now' | 'continue', signal: AbortSignal, invocationId?: string) => request<QueuedMessage>('/agent/queue/actions', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, item_id: itemId, action, ...(invocationId ? { invocation_id: invocationId } : {}) }) }),
   catalog: (signal: AbortSignal) => request<AgentCatalog>('/agent/catalog', signal),
   workspaces: (signal: AbortSignal) => request<{ items: AgentWorkspaceInfo[] }>('/agent/workspaces', signal),
   createWorkspace: (value: { name: string; path: string }, signal: AbortSignal) => request<AgentWorkspaceInfo>('/agent/workspaces', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(value) }),
   sessions: (workspace: string | null, cursor: string | null, signal: AbortSignal) => request<Page<AgentSession>>(`/agent/sessions?${new URLSearchParams({ ...(workspace ? { workspace_id: workspace } : {}), ...(cursor ? { cursor } : {}) })}`, signal),
-  invocations: (session: string, cursor: string | null, signal: AbortSignal) => request<Page<AgentInvocation>>(`/agent/invocations?${new URLSearchParams({ session_id: session, ...(cursor ? { cursor } : {}) })}`, signal),
+  invocations: (session: string, cursor: string | null, signal: AbortSignal, anchor?: string | null) => request<AgentTurnPage>(`/agent/invocations?${new URLSearchParams({ session_id: session, ...(cursor ? { cursor } : {}), ...(anchor ? { anchor } : {}) })}`, signal),
+  turnIndex: (session: string, signal: AbortSignal) => request<{ items: AgentTurnIndexItem[] }>(`/agent/turn-index?${new URLSearchParams({ session_id: session })}`, signal),
   subagents: (session: string, cursor: string | null, signal: AbortSignal) => request<Page<SessionSubagent>>(`/agent/subagents?${new URLSearchParams({ session_id: session, ...(cursor ? { cursor } : {}) })}`, signal),
   rename: (session: string, title: string, version: number, signal: AbortSignal) => request<SettingsRecord>(`/agent/sessions/${encodeURIComponent(session)}/title`, signal, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, expected_version: version }) }),
+  fork: (session: string, invocation: string, destination: string, signal: AbortSignal) => request<SettingsRecord>(`/agent/sessions/${encodeURIComponent(session)}/fork`, signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_session_id: destination, source_invocation_id: invocation }) }),
   controls: (iid: string, cursor: string | null, signal: AbortSignal) => request<Controls>(`/execution-controls?${new URLSearchParams({ invocation_id: iid, ...(cursor ? { cursor } : {}) })}`, signal),
   execution: (iid: string, signal: AbortSignal) => request<AgentExecution>(`/agent/execution?${new URLSearchParams({ invocation_id: iid })}`, signal),
   settings: (sid: string, signal: AbortSignal, workspace?: string | null) => request<SettingsRecord>(`/agent/settings?${new URLSearchParams({ session_id: sid, ...(workspace ? { workspace_id: workspace } : workspace === null ? { unbound: 'true' } : {}) })}`, signal),
@@ -43,13 +45,15 @@ export const agentClient = {
     const items: AgentEvent[] = [];
     let after = 0;
     while (true) {
-      const page = await request<{ items: AgentEvent[]; next_after: number | null }>(`/agent/history?${new URLSearchParams({ invocation_id: iid, after: String(after), limit: '200' })}`, signal);
+      const page = await agentClient.historyPage(iid, after, signal);
       items.push(...page.items);
       if (page.next_after === null) return items;
       if (page.next_after <= after) throw new Error('User Event history cursor did not advance.');
       after = page.next_after;
     }
   },
+  historyPage: (iid: string, after: number, signal: AbortSignal) => request<{ items: AgentEvent[]; next_after: number | null }>(
+    `/agent/history?${new URLSearchParams({ invocation_id: iid, after: String(after), limit: '200' })}`, signal),
   watch(sid: string) { return new EventSource(`${config.apiPrefix}/agent/events/watch?${new URLSearchParams({ session_id: sid })}`); },
   run: (sid: string, message: string, signal: AbortSignal, workspace: string | null) => request<{ invocation_id: string; session_id: string }>('/agent/messages', signal, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, message, workspace_id: workspace }) }),
   spec: (iid: string, action: string, options: Record<string, string>, signal: AbortSignal) => request<ActionSpec>(`/execution-action-spec?${new URLSearchParams({ invocation_id: iid, action, ...options })}`, signal),

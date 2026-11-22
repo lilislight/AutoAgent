@@ -3,7 +3,7 @@ import { createElement, createRef } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import test from 'node:test';
 import { ConversationNavigator } from '../src/agent/ConversationNavigator.js';
-import { conversationLandmarks, landmarkAt, messageAnchor } from '../src/agent/conversationLandmarks.js';
+import { conversationLandmarks, landmarkAt, mergeLandmarks, messageAnchor } from '../src/agent/conversationLandmarks.js';
 import { applyEvents, emptyConversation, entityKey } from '../src/agent/conversationState.js';
 import type { AgentEvent } from '../src/agent/types.js';
 
@@ -35,9 +35,19 @@ test('selection remains on the preceding question through a long answer and hand
   assert.equal(landmarkAt([100, 500, 3000], 9000), 2);
 });
 
+test('turn index retains unloaded questions alongside fresh live previews', () => {
+  const id = entityKey('new', 'recent');
+  const items = mergeLandmarks([
+    { invocation_id: 'new', message_id: 'recent', at: 2, question: 'Recent', answer: 'Working…' },
+    { invocation_id: 'old', message_id: 'archived', at: 1, question: 'Old', answer: 'Saved answer' },
+  ], [{ id, anchor: messageAnchor(id), invocation: 'new', at: 2, question: 'Recent', answer: 'New answer' }]);
+  assert.deepEqual(items.map(item => [item.invocation, item.answer]), [['old', 'Saved answer'], ['new', 'New answer']]);
+  assert.equal(items[0].anchor, messageAnchor(entityKey('old', 'archived')));
+});
+
 test('turn navigation exposes accessible anchors and stays hidden for a single question', () => {
   const props = { area: createRef<HTMLDivElement>(), content: createRef<HTMLDivElement>(), active: true, onJump() {} };
-  const item = { id: 'one', anchor: messageAnchor('one'), question: 'First question', answer: 'First answer' };
+  const item = { id: 'one', anchor: messageAnchor('one'), invocation: 'run', at: 1, question: 'First question', answer: 'First answer' };
   assert.equal(renderToStaticMarkup(createElement(ConversationNavigator, { ...props, items: [item] })), '');
   const html = renderToStaticMarkup(createElement(ConversationNavigator, { ...props, items: [item, { ...item, id: 'two', anchor: messageAnchor('two'), question: 'Second question' }] }));
   assert.match(html, /Conversation turns/);

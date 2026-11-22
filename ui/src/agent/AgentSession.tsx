@@ -6,13 +6,14 @@ import { maxImages, validateImages } from './ComposerImages';
 import { isHeifPhoto, prepareMobilePhoto } from './mobilePhoto';
 import { readDraft, saveDraft } from './drafts';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query';
 import { agentClient } from './client';
 import { Conversation } from './Conversation';
 import { ConversationHeader } from './ConversationHeader';
 import { Interactions } from './Interactions';
 import { MessageQueue } from './MessageQueue';
 import { useConversation } from './useConversation';
+import { conversationSummary } from './conversationState';
 import { effectiveSettings } from './settingsState';
 import { executionStatus } from './executionState';
 import { composerAction } from './composerActions';
@@ -32,15 +33,36 @@ interface Props {
   onAccepted: (iid: string | null) => void;
   onOpenSubagent: (sid: string, iid: string) => void;
   onRefreshDirectory: () => void;
+  onForked: (record: SettingsRecord) => void;
 }
 
-export default function AgentSession({ session, existing, title, catalog, agent, workspace, workspaces, workspacesLoading, workspaceError, onWorkspaceChange, onRetryWorkspaces, active, mobile, onShowDirectory, onReturnToParent, invocation, onAccepted, onOpenSubagent, onRefreshDirectory }: Props) {
+export default function AgentSession({ session, existing, title, catalog, agent, workspace, workspaces, workspacesLoading, workspaceError, onWorkspaceChange, onRetryWorkspaces, active, mobile, onShowDirectory, onReturnToParent, invocation, onAccepted, onOpenSubagent, onRefreshDirectory, onForked }: Props) {
   const client = useQueryClient();
-  const turns = useInfiniteQuery({ queryKey: ['agent-invocations', session], queryFn: ({ pageParam, signal }) => agentClient.invocations(session, pageParam, signal), initialPageParam: null as string | null, getNextPageParam: page => page.next_cursor, enabled: active && existing, retry: retryAgentRead, retryDelay: agentReadRetryDelay, refetchInterval: active && existing ? 4000 : false });
+  const [historyAnchor, setHistoryAnchor] = useState<string | null>(null);
+  const turns = useInfiniteQuery({
+    queryKey: ['agent-invocations', session], queryFn: ({ pageParam, signal }) => agentClient.invocations(session, pageParam, signal),
+    initialPageParam: null as string | null, getNextPageParam: page => page.next_cursor,
+    enabled: active && existing, staleTime: Infinity, refetchOnWindowFocus: false,
+    retry: retryAgentRead, retryDelay: agentReadRetryDelay,
+    refetchInterval: query => active && existing && query.state.data?.pages[0]?.items.some(item => !terminal.has(item.status)) ? 4000 : false,
+  });
+  const archived = useInfiniteQuery({
+    queryKey: ['agent-invocation-window', session, historyAnchor],
+    queryFn: ({ pageParam, signal }) => agentClient.invocations(session, pageParam, signal, historyAnchor),
+    initialPageParam: null as string | null, getNextPageParam: page => page.next_cursor,
+    enabled: active && existing && !!historyAnchor, placeholderData: keepPreviousData,
+    staleTime: Infinity, retry: retryAgentRead, retryDelay: agentReadRetryDelay,
+  });
+  const turnIndex = useQuery({
+    queryKey: ['agent-turn-index', session], queryFn: ({ signal }) => agentClient.turnIndex(session, signal),
+    enabled: active && existing, staleTime: Infinity, refetchOnWindowFocus: false,
+    retry: retryAgentRead, retryDelay: agentReadRetryDelay,
+  });
   const invocations = useMemo(() => turns.data?.pages.flatMap(page => page.items) ?? [], [turns.data?.pages]);
-  const iid = invocation ?? invocations[0]?.invocation_id;
-  const latestId = invocations[0]?.invocation_id;
-  const requestedKnown = invocations.some(item => item.invocation_id === invocation);
+  const owned = invocations.filter(item => !item.inherited);
+  const iid = invocation ?? owned[0]?.invocation_id;
+  const latestId = owned[0]?.invocation_id;
+  const requestedKnown = owned.some(item => item.invocation_id === invocation);
   useEffect(() => { if (active && invocation && requestedKnown && latestId && latestId !== invocation) onAccepted(latestId); }, [active, invocation, requestedKnown, latestId, onAccepted]);
   const execution = useQuery({ queryKey: ['agent-execution', iid], queryFn: ({ signal }) => agentClient.execution(iid!, signal), enabled: active && !!iid, refetchInterval: query => active && iid && (!query.state.data || !terminal.has(query.state.data.current.status)) ? 2000 : false, retry: retryAgentRead, retryDelay: agentReadRetryDelay });
   const settings = useQuery({ queryKey: ['agent-settings', session, workspace], queryFn: ({ signal }) => agentClient.settings(session, signal, workspace), enabled: active, staleTime: existing ? 0 : Infinity });
@@ -48,11 +70,22 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   // This catalog describes live capabilities; execution keeps its historical Revision.
   const revision = agent.revision_id;
   const resources = useQuery({ queryKey: ['agent-resources', revision, session, workspace], queryFn: ({ signal }) => agentClient.resources(revision!, session, signal, workspace), enabled: active && !!revision, refetchInterval: active ? 15000 : false, retry: false });
-  const historyInvocations = useMemo(() => iid && !invocations.some(item => item.invocation_id === iid) ? [...invocations, { invocation_id: iid } as AgentInvocation] : invocations, [iid, invocations]);
-  const conversation = useConversation(session, historyInvocations, active);
-  const [historyPresented, setHistoryPresented] = useState(() => !existing);
-  const loadingHistory = !historyPresented && (turns.isLoading || conversation.loading);
-  useEffect(() => { if (active && !loadingHistory) setHistoryPresented(true); }, [active, loadingHistory]);
+  const selectedExecution = execution.data?.current ?? invocations.find(item => item.invocation_id === iid);
+  const liveHistory = useMemo(() => iid && (!existing || selectedExecution && !terminal.has(selectedExecution.status))
+    ? [selectedExecution ?? { invocation_id: iid } as AgentInvocation] : [], [existing, iid, selectedExecution]);
+  const conversation = useConversation(session, liveHistory, active);
+  const showingArchive = !!historyAnchor && !!archived.data;
+  const visible = showingArchive ? archived : turns;
+  const visibleInvocations = useMemo(() => visible.data?.pages.flatMap(page => page.items) ?? [], [visible.data?.pages]);
+  const savedTurns = useMemo(() => conversationSummary(visible.data?.pages), [visible.data?.pages]);
+  const summary = useMemo(() => {
+    if (showingArchive) return savedTurns;
+    const live = conversation.state;
+    return { ...live, rows: { ...savedTurns.rows, ...live.rows }, responses: { ...savedTurns.responses, ...live.responses },
+      completed: { ...savedTurns.completed, ...live.completed } };
+  }, [savedTurns, showingArchive, conversation.state]);
+  const switchingWindow = !!historyAnchor && archived.isFetching && (archived.isPending || archived.isPlaceholderData);
+  const loadingHistory = turns.isLoading;
   const observedInvocation = Object.values(conversation.state.rows).at(-1)?.invocation;
   useEffect(() => { if (active && !iid && observedInvocation) onAccepted(observedInvocation); }, [active, iid, observedInvocation, onAccepted]);
   const draftKey = existing ? 'session:' + session : 'new:' + (workspace ?? 'unbound');
@@ -82,6 +115,14 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   };
   useEffect(() => saveDraft(config.apiPrefix, draftKey, draft), [draftKey, draft]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { if (settings.data?.fork_source_session_id && !iid) inputRef.current?.focus({ preventScroll: true }); }, [settings.data?.fork_source_session_id, iid]);
+  const fork = useCallback(async (invocation: string, destination: string, signal: AbortSignal) => {
+    const record = await agentClient.fork(session, invocation, destination, signal);
+    client.setQueryData(['agent-binding', record.session_id], record);
+    client.setQueryData(['agent-settings', record.session_id, record.workspace?.workspace_id ?? null], record);
+    onRefreshDirectory();
+    onForked(record);
+  }, [client, session, onForked, onRefreshDirectory]);
   const loadUsage = useCallback((invocation: string, signal: AbortSignal) => agentClient.usage(session, invocation, signal), [session]);
   const queue = useQuery({ queryKey: ['agent-queue', session], queryFn: ({ signal }) => agentClient.queue(session, signal), enabled: active, refetchInterval: active && existing ? 1500 : false, retry: retryAgentRead, retryDelay: agentReadRetryDelay });
   const [queuePending, setQueuePending] = useState<string | null>(null);
@@ -118,7 +159,7 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const saved = effectiveSettings(settings.data, snapshot, child);
   const selectedModel = catalog.provider_options?.find(item => item.id === saved?.settings.model.provider)
     ?.model_details?.find(item => item.id === saved?.settings.model.model);
-  const context = contextUsage(conversation.state, agent.context_policy.context_window, selectedModel?.model_info.max_input_tokens);
+  const context = contextUsage(showingArchive ? conversationSummary(turns.data?.pages) : summary, agent.context_policy.context_window, selectedModel?.model_info.max_input_tokens);
   if (conversation.error && context.source === 'empty') { context.usedTokens = null; context.source = 'unavailable'; }
   const changeSettings = async (next: SessionSettings) => {
     if (!saved) return;
@@ -210,14 +251,22 @@ export default function AgentSession({ session, existing, title, catalog, agent,
   const primary = composerAction({ draft, hasImages: images.length > 0, canSend, running, lifecycle: status, canPause: !!controls?.actions.pause.available, canResume: paused && !!controls?.actions.recover.available, sending: busy || !!iid && !current && execution.isFetching, pending });
   const caption = pending === 'pause' ? 'Pausing…' : pending === 'recover' ? 'Resuming…' : pending === 'cancel' ? 'Cancelling…' : paused ? 'Paused' : status === 'waiting' ? 'Waiting' : '';
   return <div className="agent-session-workspace"><main className="agent-chat" aria-label="Agent conversation">
-    <Conversation mobile={mobile} session={session} loadUsage={loadUsage} invocations={historyInvocations} execution={execution.data} active={active} state={conversation.state} loading={loadingHistory} error={conversation.error} onRetry={conversation.refresh} running={status === 'running' || status === 'pausing'}
+    <Conversation onFork={fork} mobile={mobile} session={session} loadUsage={loadUsage} invocations={visibleInvocations} execution={execution.data} active={active} state={summary} loading={loadingHistory}
+      error={turns.error ?? conversation.error} onRetry={conversation.refresh} running={status === 'running' || status === 'pausing'}
+      turnIndex={turnIndex.data?.items} archived={showingArchive} onLoadTurn={setHistoryAnchor} onLatest={() => setHistoryAnchor(null)}
+      onLoadOlder={visible.hasNextPage ? () => void visible.fetchNextPage() : undefined} loadingOlder={visible.isFetchingNextPage}
+      switchingWindow={switchingWindow} onCancelJump={() => {
+        if (switchingWindow) setHistoryAnchor(archived.data?.pages[0]?.items[0]?.invocation_id ?? null);
+      }}
       header={(landmarks, jumpTo) => <ConversationHeader session={session} title={heading} existing={existing} active={active} running={running}
         hasWorkspace={!!workspace} onRename={settings.data ? rename : undefined} onOpenSubagent={onOpenSubagent}
         mobile={mobile} context={context} contextLoading={loadingHistory} landmarks={landmarks} onJump={jumpTo}
         onBack={parent ? () => onReturnToParent(parent.session_id, parent.invocation_id) : onShowDirectory} hasParent={!!parent} />} before={<>
       {changed ? <div className="agent-setting-notice">Model changed for the next task.</div> : null}
-      {turns.hasNextPage ? <button className="agent-load-older" disabled={turns.isFetchingNextPage} onClick={() => void turns.fetchNextPage()}><BusyLabel busy={turns.isFetchingNextPage} label="Loading older turns">Load older turns</BusyLabel></button> : null}
-      {execution.error || turns.error ? <div className="agent-inline-error" role="alert">{execution.error?.message ?? turns.error?.message}<button onClick={refresh}>Refresh</button></div> : null}
+      {switchingWindow ? <div className="agent-load-older" role="status"><BusyLabel busy label="Loading turn">Loading turn</BusyLabel></div> : null}
+      {historyAnchor && archived.error ? <div className="agent-inline-error" role="alert">Could not load this part of the conversation.<button onClick={() => void archived.refetch()}>Retry</button></div> : null}
+      {turnIndex.error ? <div className="agent-inline-error" role="alert">Could not load all turns.<button onClick={() => void turnIndex.refetch()}>Retry</button></div> : null}
+      {execution.error ? <div className="agent-inline-error" role="alert">{execution.error.message}<button onClick={refresh}>Refresh</button></div> : null}
     </>} after={<>
       {controls ? <Interactions rootId={controls.root_invocation_id} waits={waiting} active={active} onResolved={refresh} /> : null}
       {controls?.next_cursor && (!allPending || moreRequests.hasNextPage || moreRequests.isPending) ? <button className="agent-load-older" disabled={allPending && moreRequests.isFetching} onClick={() => { if (!allPending) setAllPending(true); else void moreRequests.fetchNextPage(); }}><BusyLabel busy={allPending && moreRequests.isFetching} label="Loading requests">Load more pending requests</BusyLabel></button> : null}

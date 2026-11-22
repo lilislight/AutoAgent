@@ -92,6 +92,7 @@
   .agent-workspace.is-mobile .agent-composer-toolbar .agent-approval-picker>span { display:none; }
 }
 .agent-workspace.is-mobile .agent-jump { --agent-jump-size:44px; }
+.agent-workspace.is-mobile .agent-diagram-control { width:44px; height:44px; }
 .agent-workspace.is-mobile :is(.agent-queue-row button,.agent-answer-copy,.agent-workspace-picker) { min-height:44px; }
 .agent-workspace.is-mobile :is(.agent-answer-copy,.agent-queue-row .agent-icon-button) { min-width:44px; }
 .agent-workspace.is-mobile .agent-code-copy { min-width:44px; min-height:44px; }

@@ -49,10 +49,22 @@ class HistoryQueries:
             raise ValueError("scope must be session or invocation.")
         return await self._inspect_state(invocation_id, sequence=sequence, scope=scope, pointer=pointer)
 
-    async def _inspect_state(self, invocation_id, **options):
+    async def load_execution_context(self, invocation_id, *, sequence, scope, pointer=None):
+        """Load an exact Context subtree for execution, outside Inspect display budgets.
+
+        This materializes the complete selected value, including media. Historical
+        position validation and Artifact integrity checks still apply. Inspector
+        and CLI reads continue to use read_execution_context with bounded output.
+        """
+        if scope not in ("session", "invocation"):
+            raise ValueError("scope must be session or invocation.")
+        return await self._inspect_state(invocation_id, sequence=sequence, scope=scope,
+            pointer=pointer, storage_method="load_execution_context")
+
+    async def _inspect_state(self, invocation_id, *, storage_method="inspect_execution_state", **options):
         async def query():
             try:
-                result = await self._persistence.inspect_execution_state(invocation_id, **options)
+                result = await getattr(self._persistence, storage_method)(invocation_id, **options)
             except InspectionError as error:
                 raise HostRunConflict(error.code, str(error)) from error
             if result is None:

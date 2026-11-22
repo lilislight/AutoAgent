@@ -48,11 +48,13 @@ class WorkflowUI(StaticFiles):
                 parent_root = mounted_root[:-len(ui_path)]
             host = getattr(getattr(scope.get("app"), "state", None), "autoagent_host", None)
             standalone = (await host.applications["agent"].catalog())["standalone"] if host is not None and "agent" in host.applications else False
+            from .workflow_visibility import hidden_workflows
             config = json.dumps({
                 "apiPrefix": parent_root + self.settings.api_prefix,
                 "uiBase": mounted_root + "/",
                 "pageSize": self.settings.page_size,
                 "defaultView": "agents" if standalone else "workflows",
+                "workflowUiHiddenWorkflows": hidden_workflows(self.settings),
             }).replace("<", "\\u003c")
             injection = (
                 f'<base href="{escape(mounted_root, quote=True)}/">'

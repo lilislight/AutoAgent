@@ -74,8 +74,13 @@
 .agent-markdown .agent-code-block pre { margin:0; padding:2px 12px 12px; border:0; background:none; }
 .agent-markdown .agent-code-block>.manual-copy-text { margin:4px 12px 10px; }
 .agent-markdown .agent-diagram-error { margin:0 12px 6px; color:var(--muted); font-size:.8125rem; }
-.agent-mermaid-scroll { max-height:min(65svh,640px); overflow:auto; padding:2px 12px 12px; overscroll-behavior-inline:contain; }
-.agent-mermaid-scroll img { display:block; height:auto; margin-inline:auto; }
+.agent-diagram-zoom { display:flex; align-items:center; gap:2px; margin-right:auto; }
+.agent-app .agent-diagram-control { width:30px; height:30px; padding:6px; border:0; }
+.agent-diagram-scale { min-width:46px; text-align:center; color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+.agent-mermaid-scroll { box-sizing:border-box; max-height:min(65svh,640px); overflow:auto; padding:2px 12px 12px; overscroll-behavior-inline:contain; cursor:grab; }
+.agent-mermaid-scroll.is-panning { cursor:grabbing; user-select:none; }
+.agent-mermaid-canvas { display:grid; place-items:center; min-width:100%; min-height:100%; }
+.agent-mermaid-scroll img { display:block; height:auto; max-width:none; margin:0; }
 .agent-mermaid-scroll:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
 .agent-mermaid-staging { position:fixed; left:-10000px; top:0; width:800px; visibility:hidden; pointer-events:none; }
 .agent-markdown blockquote { border-left:1px solid var(--line-strong); padding-left:15px; margin-left:0; color:var(--muted); }
@@ -143,7 +148,7 @@
 .agent-final-response>.agent-markdown { margin:0 0 9px; line-height:1.65; }
 .agent-final-response>.agent-markdown:last-of-type { margin-bottom:0; }
 .agent-answer-actions { display:flex; align-items:center; gap:12px; margin-top:10px; }
-.agent-app .agent-answer-copy { display:inline-flex; border:0; padding:3px; color:var(--muted); border-radius:4px; }
+.agent-app .agent-answer-copy { display:inline-flex; align-items:center; justify-content:center; min-width:24px; min-height:24px; border:0; padding:3px; color:var(--muted); border-radius:4px; }
 .agent-answer-copy svg { width:15px; height:15px; }
 .agent-copy-error { font-size:11px; color:var(--edge-fail); }
 .agent-copy-buffer { position:fixed; top:0; left:-10000px; width:1px; height:1px; }
@@ -170,6 +175,7 @@
 .agent-composer-area { padding:8px max(24px, calc((100% - var(--agent-content-width)) / 2)) 15px; flex-shrink:0; }
 .agent-composer { border:1px solid var(--line); border-radius:15px; background:var(--node-surface); padding:12px; box-shadow:0 2px 8px var(--soft-shadow); }
 .agent-composer:focus-within { border-color:var(--selected-line); }
+.agent-composer.is-image-drop-target { outline:2px solid var(--accent); outline-offset:1px; }
 .agent-composer textarea { display:block; width:100%; resize:none; height:calc(3.4em + 6px); min-height:calc(3.4em + 6px); overflow-y:hidden; border:0; outline:none!important; background:transparent; padding:3px 2px; font-size:var(--agent-message-size); font-weight:var(--agent-message-weight); line-height:1.7; }
 .agent-composer-toolbar { display:flex; align-items:center; flex-wrap:wrap; gap:3px; margin-top:9px; }
 .agent-composer-toolbar button { display:inline-flex; align-items:center; justify-content:center; gap:6px; min-height:32px; border:0; font-size:10px; padding:5px 8px; }

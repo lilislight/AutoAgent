@@ -2033,8 +2033,14 @@ class ServerSettingsTests(unittest.TestCase):
         self.assertTrue(ServerSettings().access_log)
         self.assertTrue(settings.access_log)
         self.assertFalse(ServerSettings.from_environment({"AUTOAGENT_SERVER_ACCESS_LOG": " false "}).access_log)
+        self.assertFalse(settings.workflow_ui_show_agent_app)
+        self.assertTrue(ServerSettings.from_environment({"AUTOAGENT_SERVER_WORKFLOW_UI_SHOW_AGENT_APP": " true "}).workflow_ui_show_agent_app)
+        for invalid in ("yes", "", "sometimes"):
+            with self.assertRaisesRegex(ValueError, "AUTOAGENT_SERVER_WORKFLOW_UI_SHOW_AGENT_APP"):
+                ServerSettings.from_environment({"AUTOAGENT_SERVER_WORKFLOW_UI_SHOW_AGENT_APP": invalid})
         for changes in ({"port": 0}, {"ui_path": "/api/v2/ui"}, {"api_prefix": "/api/../v2"}, {"page_size": 201}, {"query_timeout_seconds": 0},
-                        {"shutdown_timeout_seconds": 0}, {"shutdown_timeout_seconds": float('inf')}, {"shutdown_timeout_seconds": True}):
+                        {"shutdown_timeout_seconds": 0}, {"shutdown_timeout_seconds": float('inf')}, {"shutdown_timeout_seconds": True},
+                        {"workflow_ui_show_agent_app": 1}):
             with self.assertRaises(ValueError):
                 replace(settings, **changes)
 

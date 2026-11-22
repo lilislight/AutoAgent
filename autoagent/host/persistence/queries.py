@@ -179,7 +179,7 @@ class Queries:
         async with self.view() as (conn, _, _, _):
             return await self.storage.source(conn, kind, identity)
 
-    async def definitions(self, kind, identity_filter, limit, cursor):
+    async def definitions(self, kind, identity_filter, limit, cursor, excluded_workflow_ids=()):
         limit_value(limit)
         name, _, _ = SOURCES[kind]
         filters = (
@@ -204,6 +204,9 @@ class Queries:
                 if c.name not in ("snapshot_text", "definition_text")
             ]
             where = [table.c[k] == v for k, v in filters.items()]
+            if kind == "workflow_revision" and excluded_workflow_ids:
+                from .tracing import filter_identities
+                where.append(table.c.workflow_id.not_in(filter_identities(excluded_workflow_ids, 512)))
             if cursor is not None:
                 if len(cursor) != len(order):
                     raise ValueError("Invalid cursor.")
@@ -225,7 +228,7 @@ class Queries:
                 frontier,
             )
 
-    async def workflow_catalog(self, registered_ids, search, limit, cursor, registered_only=False):
+    async def workflow_catalog(self, registered_ids, search, limit, cursor, registered_only=False, excluded_workflow_ids=()):
         """Group metadata before paging, with ID fuzzy matching or hash prefixes."""
         limit_value(limit)
         revisions = meta.tables["workflow_revisions"]
@@ -257,6 +260,9 @@ class Queries:
         ).where(matches.c.position == 1)
         if registered_only:
             statement = statement.where(matches.c.workflow_id.in_(registered_ids))
+        if excluded_workflow_ids:
+            from .tracing import filter_identities
+            statement = statement.where(matches.c.workflow_id.not_in(filter_identities(excluded_workflow_ids, 512)))
         if cursor is not None:
             if not isinstance(cursor, (tuple, list)) or len(cursor) != 3 or type(cursor[0]) is not int or cursor[0] not in (0, 1) or type(cursor[1]) is not int or not isinstance(cursor[2], str):
                 raise ValueError("Invalid Workflow catalog cursor.")

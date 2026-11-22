@@ -320,8 +320,8 @@ class DatabaseSink:
     async def revision_comparison_object(self, base, target, kind, identity):
         return await self._writer.run(RevisionComparison(self._queries).object, base, target, kind, identity)
 
-    async def session_information(self, session_id):
-        return await self._writer.run(SessionInformation(self._queries).info, session_id)
+    async def session_information(self, session_id, **options):
+        return await self._writer.run(SessionInformation(self._queries).info, session_id, **options)
 
     async def session_history(self, session_id, **options):
         return await self._writer.run(SessionInformation(self._queries).history, session_id, **options)
@@ -450,6 +450,11 @@ class DatabaseSink:
         return await self._writer.run(StateInspection(self._queries, self.config).read,
             invocation_id, sequence=sequence, scope=scope, pointer=pointer, field=field)
 
+    async def load_execution_context(self, invocation_id, *, sequence, scope, pointer=None):
+        from .inspection import StateInspection
+        return await self._writer.run(StateInspection(self._queries, self.config).load_context,
+            invocation_id, sequence=sequence, scope=scope, pointer=pointer)
+
     async def execution_events(self, invocation_id, **options):
         from .history import History
         return await self._writer.run(History(self._queries).events, invocation_id, **options)
@@ -489,13 +494,13 @@ class DatabaseSink:
         )
         return UserEvent.from_record(record) if record else None
 
-    async def list_workflows(self, *, workflow_id=None, limit=100, cursor=None):
+    async def list_workflows(self, *, workflow_id=None, limit=100, cursor=None, excluded_workflow_ids=()):
         return await self._writer.run(
-            self._queries.definitions, "workflow_revision", workflow_id, limit, cursor
+            self._queries.definitions, "workflow_revision", workflow_id, limit, cursor, excluded_workflow_ids
         )
 
-    async def workflow_catalog(self, *, registered_ids=(), search="", limit=100, cursor=None, registered_only=False):
-        return await self._writer.run(self._queries.workflow_catalog, registered_ids, search, limit, cursor, registered_only)
+    async def workflow_catalog(self, *, registered_ids=(), search="", limit=100, cursor=None, registered_only=False, excluded_workflow_ids=()):
+        return await self._writer.run(self._queries.workflow_catalog, registered_ids, search, limit, cursor, registered_only, excluded_workflow_ids)
 
     async def workflow_revisions(self, workflow_id, *, prefix=None, limit=100, cursor=None):
         return await self._writer.run(self._queries.workflow_revisions, workflow_id, prefix, limit, cursor)

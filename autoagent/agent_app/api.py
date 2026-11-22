@@ -64,6 +64,11 @@ class RenameConversation(BaseModel):
     title: str = Field(min_length=1, max_length=120)
     expected_version: int = Field(ge=0)
 
+class ForkConversation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    new_session_id: str = Field(min_length=1, max_length=512)
+    source_invocation_id: str = Field(min_length=1, max_length=4096)
+
 
 class ConfigureResource(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -245,14 +250,16 @@ def agent_router(application, settings, query, *, user_events):
 
     @router.get('/agent/invocations')
     async def invocations(session_id: str = Query(min_length=1, max_length=512),
-                          cursor: str | None = Query(None, max_length=4096)):
-        from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID
-        await query(application.workspace_session(session_id), settings)
-        scope = ["agent.invocations", session_id]
+                          cursor: str | None = Query(None, max_length=8192),
+                          anchor: str | None = Query(None, min_length=1, max_length=4096)):
+        scope = ["agent.invocations", session_id, anchor]
         position = _browse_cursor(cursor, scope)
-        page = await query(host.list_session_invocations(session_id, workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,), limit=20, cursor=position), settings)
-        next_cursor = _browse_encode(page.next_cursor, scope)
-        return dict(items=page.items, next_cursor=next_cursor)
+        page = await agent_query(application.conversation_page(session_id, limit=20, cursor=position, anchor=anchor))
+        return {**page, "next_cursor": _browse_encode(page["next_cursor"], scope)}
+
+    @router.get('/agent/turn-index')
+    async def turn_index(session_id: str = Query(min_length=1, max_length=512)):
+        return dict(items=await agent_query(application.conversation_index(session_id)))
 
     @router.get('/agent/settings')
     async def get_settings(session_id: str = Query(min_length=1, max_length=512),
@@ -266,6 +273,10 @@ def agent_router(application, settings, query, *, user_events):
                 expected_version=body.expected_version), settings)
         except ConflictError as error:
             raise HTTPException(409, detail=str(error)) from error
+
+    @router.post('/agent/sessions/{session_id}/fork', status_code=201)
+    async def fork_conversation(session_id: str, body: ForkConversation):
+        return await agent_query(application.fork_conversation(session_id, body.new_session_id, body.source_invocation_id))
 
     @router.get('/agent/resources')
     async def resources(revision_id: str = Query(min_length=1, max_length=4096),

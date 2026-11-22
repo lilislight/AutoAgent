@@ -1,8 +1,9 @@
 import type { ReactNode } from 'react';
 
-export type AgentIconName = 'folder-add' | 'new' | 'task' | 'tools' | 'skills' | 'settings' | 'send' | 'shield' | 'access' | 'sparkles' | 'folder' | 'chevron' | 'file' | 'search' | 'terminal' | 'edit' | 'agent' | 'message' | 'wrench' | 'stop' | 'alert' | 'usage' | 'pause' | 'play' | 'check' | 'down' | 'close' | 'activity' | 'link' | 'back' | 'more' | 'plus';
+export type AgentIconName = 'folder-add' | 'new' | 'task' | 'tools' | 'skills' | 'settings' | 'send' | 'shield' | 'access' | 'sparkles' | 'folder' | 'chevron' | 'file' | 'search' | 'terminal' | 'edit' | 'agent' | 'message' | 'wrench' | 'stop' | 'alert' | 'usage' | 'pause' | 'play' | 'check' | 'down' | 'close' | 'activity' | 'link' | 'back' | 'more' | 'plus' | 'fork';
 const paths: Record<AgentIconName, ReactNode> = {
   'folder-add': <><path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" /><path d="M8 14h8M12 10v8" /></>,
+  fork: <><circle cx="7" cy="5" r="2" /><circle cx="17" cy="5" r="2" /><circle cx="7" cy="19" r="2" /><path d="M7 7v10M17 7v2a5 5 0 0 1-5 5H7" /></>,
   back: <path d="m15 5-7 7 7 7" />,
   more: <><circle cx="5" cy="12" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="19" cy="12" r="1" /></>,
   down: <path d="M12 5v14m-6-6 6 6 6-6" />,

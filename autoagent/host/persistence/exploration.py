@@ -7,7 +7,7 @@ from .models import Page
 from .queries import limit_value
 from .reading import SourceReader
 from .schema import meta
-from .tracing import trace_cursor, invocation_match
+from .tracing import filter_identities, trace_cursor, invocation_match
 import hashlib
 
 
@@ -130,7 +130,7 @@ class SessionInformation:
     def __init__(self, queries):
         self.queries = queries
 
-    def _history(self, sid):
+    def _history(self, sid, excluded_workflow_ids=()):
         inv, defs, events = (meta.tables[n] for n in ('invocations', 'workflow_revisions', 'runtime_events'))
         source = inv.join(defs, inv.c.workflow_revision_id == defs.c.revision_id).outerjoin(events,
             and_(inv.c.input_ref['kind'].as_string() == 'runtime_event', events.c.event_id == inv.c.input_ref['id'].as_string()))
@@ -140,9 +140,10 @@ class SessionInformation:
         return select(*(inv.c[k] for k in fields), defs.c.workflow_id, defs.c.workflow_version,
             events.c.sequence.label('opening_sequence'), opening.label('_order'),
             func.row_number().over(order_by=(opening, inv.c.invocation_id)).label('ordinal')
-        ).select_from(source).where(inv.c.session_id == sid, inv.c.status.is_not(None)).subquery()
+        ).select_from(source).where(inv.c.session_id == sid, inv.c.status.is_not(None),
+            defs.c.workflow_id.not_in(filter_identities(excluded_workflow_ids, 512))).subquery()
 
-    async def info(self, sid):
+    async def info(self, sid, *, excluded_workflow_ids=()):
         sessions, inv, defs, events = (meta.tables[n] for n in ('sessions', 'invocations', 'workflow_revisions', 'runtime_events'))
         async with self.queries.view() as (conn, _, _, frontier):
             session = (await conn.execute(select(sessions).where(sessions.c.session_id == sid))).mappings().first()
@@ -153,23 +154,31 @@ class SessionInformation:
                 func.count(func.distinct(inv.c.workflow_revision_id)).label('revision_count'),
                 func.max(func.coalesce(inv.c.completed_at_us, inv.c.started_at_us)).label('fallback_activity')
             ).select_from(inv.join(defs, inv.c.workflow_revision_id == defs.c.revision_id))
-                .where(inv.c.session_id == sid, inv.c.status.is_not(None)))).mappings().one()
+                .where(inv.c.session_id == sid, inv.c.status.is_not(None),
+                    defs.c.workflow_id.not_in(filter_identities(excluded_workflow_ids, 512))))).mappings().one()
             latest = await conn.scalar(select(events.c.occurred_at_us).where(events.c.session_id == sid, events.c.sequence == session['durable_sequence']))
-            history = self._history(sid)
+            history = self._history(sid, excluded_workflow_ids)
             first = (await conn.execute(select(history.c.parent_invocation_id).order_by(history.c.ordinal).limit(1))).first()
+            latest_invocation_id = session['latest_invocation_id']
+            if excluded_workflow_ids:
+                newest = (await conn.execute(select(history.c.invocation_id, history.c.last_sequence)
+                    .order_by(history.c.ordinal.desc()).limit(1))).first()
+                latest_invocation_id = newest.invocation_id if newest else None
+                session = dict(session, durable_sequence=newest.last_sequence if newest else 0)
+                latest = counts['fallback_activity']
             return dict(session_id=sid, created_at_us=session['created_at_us'], updated_at_us=latest or counts['fallback_activity'],
-                latest_invocation_id=session['latest_invocation_id'], parent_invocation_id=first[0] if first else None,
+                latest_invocation_id=latest_invocation_id, parent_invocation_id=first[0] if first else None,
                 invocation_count=counts['invocation_count'], workflow_count=counts['workflow_count'], revision_count=counts['revision_count'],
                 durable_sequence=session['durable_sequence'], frontier=frontier)
 
     async def history(self, sid, *, limit=50, cursor=None,
-        search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None):
+        search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, excluded_workflow_ids=()):
         limit_value(limit)
         trace_cursor(cursor)
         async with self.queries.view() as (conn, _, _, frontier):
             if await conn.scalar(select(meta.tables['sessions'].c.session_id).where(meta.tables['sessions'].c.session_id == sid)) is None:
                 return None
-            history = self._history(sid)
+            history = self._history(sid, excluded_workflow_ids)
             where = []
             definitions = meta.tables['workflow_revisions']
             source = history.join(definitions, history.c.workflow_revision_id == definitions.c.revision_id)
@@ -187,13 +196,13 @@ class SessionInformation:
                 row['values'] = []
             return Page(tuple(chosen), next_cursor, frontier, total)
 
-    async def workflows(self, sid, *, limit=50, cursor=None):
+    async def workflows(self, sid, *, limit=50, cursor=None, excluded_workflow_ids=()):
         limit_value(limit)
         trace_cursor(cursor)
         async with self.queries.view() as (conn, _, _, frontier):
             if await conn.scalar(select(meta.tables['sessions'].c.session_id).where(meta.tables['sessions'].c.session_id == sid)) is None:
                 return None
-            history = self._history(sid)
+            history = self._history(sid, excluded_workflow_ids)
             first = func.min(history.c._order)
             statement = select(history.c.workflow_id, history.c.workflow_version, history.c.workflow_revision_id,
                 func.count().label('invocation_count'), first.label('first_sequence'),

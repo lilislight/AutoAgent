@@ -136,11 +136,12 @@ def filter_identities(values, max_length):
     return tuple(sorted(set(values)))
 
 
-def invocation_match(invocations, definitions, search, workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None, statuses=()):
+def invocation_match(invocations, definitions, search, workflow_ids=(), revision_ids=(), started_after_us=None, started_before_us=None, statuses=(), excluded_workflow_ids=()):
     """Match identities without reading definitions or business values."""
     predicates = []
     workflow_ids = filter_identities(workflow_ids, 512)
     revision_ids = filter_identities(revision_ids, 4096)
+    excluded_workflow_ids = filter_identities(excluded_workflow_ids, 512)
     statuses = filter_identities(statuses, 16)
     if any(status not in ('created', 'running', 'waiting', 'paused', 'settling', 'completed', 'failed', 'cancelled') for status in statuses):
         raise ValueError('Unknown Invocation status filter.')
@@ -161,6 +162,8 @@ def invocation_match(invocations, definitions, search, workflow_ids=(), revision
         predicates.append(invocations.c.started_at_us <= started_before_us)
     if workflow_ids:
         predicates.append(definitions.c.workflow_id.in_(workflow_ids))
+    if excluded_workflow_ids:
+        predicates.append(definitions.c.workflow_id.not_in(excluded_workflow_ids))
     if revision_ids:
         predicates.append(definitions.c.revision_id.in_(revision_ids))
     if search:
@@ -356,12 +359,13 @@ class TraceQueries:
             except (KeyError, IndexError, TypeError):
                 return {'available': False, 'value': None}
 
-    async def sessions(self, *, search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None, session_scope=None):
+    async def sessions(self, *, search='', workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, session_id=None, limit=50, cursor=None, session_scope=None, excluded_workflow_ids=()):
         """Page Sessions containing matching Invocations, retaining whole-Session counts."""
         limit_value(limit)
         trace_cursor(cursor)
         inv, defs, events = (meta.tables[n] for n in ('invocations', 'workflow_revisions', 'runtime_events'))
-        match = invocation_match(inv, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us, statuses)
+        excluded_workflow_ids = filter_identities(excluded_workflow_ids, 512)
+        match = invocation_match(inv, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us, statuses, excluded_workflow_ids)
         source = inv.join(defs, inv.c.workflow_revision_id == defs.c.revision_id).outerjoin(
             events, and_(events.c.session_id == inv.c.session_id, events.c.sequence == inv.c.last_sequence)
         )
@@ -373,6 +377,8 @@ class TraceQueries:
             func.sum(case((match, 1), else_=0)).label('matching_count'),
             activity.label('updated_at_us'),
         ).select_from(source).where(inv.c.status.is_not(None)).group_by(inv.c.session_id)
+        if excluded_workflow_ids:
+            statement = statement.where(defs.c.workflow_id.not_in(excluded_workflow_ids))
         if session_scope is not None:
             statement = statement.where(inv.c.session_id.in_(session_scope))
         if session_id is not None:
@@ -385,6 +391,8 @@ class TraceQueries:
         async with self.queries.view() as (conn, _, _, frontier):
             rows = (await conn.execute(statement.order_by(activity.desc(), inv.c.session_id.desc()).limit(limit + 1))).mappings().all()
             count = select(func.count(func.distinct(inv.c.session_id))).select_from(inv.join(defs, inv.c.workflow_revision_id == defs.c.revision_id)).where(inv.c.status.is_not(None))
+            if excluded_workflow_ids:
+                count = count.where(defs.c.workflow_id.not_in(excluded_workflow_ids))
             count = count.where(inv.c.session_id == session_id) if session_id is not None else count.where(match)
             if session_scope is not None:
                 count = count.where(inv.c.session_id.in_(session_scope))
@@ -421,7 +429,7 @@ class TraceQueries:
                 if inherited:item['inherited_from']=inherited
         return Page(items,next_cursor,frontier)
 
-    async def page(self, kind, iid=None, *, node_id=None, occurrence_id=None, call_id=None, edge_id=None, session_id=None, workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, search='', status=None, order='desc', limit=50, cursor=None):
+    async def page(self, kind, iid=None, *, node_id=None, occurrence_id=None, call_id=None, edge_id=None, session_id=None, workflow_ids=(), revision_ids=(), statuses=(), started_after_us=None, started_before_us=None, search='', status=None, order='desc', limit=50, cursor=None, excluded_workflow_ids=()):
         limit_value(limit)
         if order not in ('asc', 'desc'):
             raise ValueError('Expected ascending or descending execution order.')
@@ -447,6 +455,8 @@ class TraceQueries:
                 defs = meta.tables['workflow_revisions']
                 source = table.join(defs, table.c.workflow_revision_id == defs.c.revision_id)
                 columns = [*table.c, defs.c.workflow_id, defs.c.workflow_version]
+                if excluded_workflow_ids:
+                    where.append(defs.c.workflow_id.not_in(filter_identities(excluded_workflow_ids, 512)))
                 if kind == 'session':
                     where.extend((table.c.session_id == session_id, table.c.status.is_not(None), invocation_match(table, defs, search, workflow_ids, revision_ids, started_after_us, started_before_us, statuses)))
                 else:

@@ -10,10 +10,11 @@ from uuid import uuid4
 import httpx
 
 from autoagent.agent_app import AgentApplication, BUILTIN_AGENT_WORKFLOW_ID, builtin_agent_workflow
-from autoagent.agent import AgentInput, ExecutionToolsConfig, ToolPolicy
+from autoagent.agent import AgentInput, ExecutionToolsConfig, LLMReasoning, LLMResponse, LLMToolCall, ToolPolicy
 from autoagent.host import AutoAgentHost, HostSettings, ProjectError
 from autoagent.host.project import Project
 from autoagent.server import create_app
+from autoagent.server.settings import ServerSettings
 from tests.postgres import POSTGRES_TEST_URL, PostgreSQLDatabase
 from tests.test_agent_workflow import ScriptedProvider, answer, settings
 
@@ -64,7 +65,7 @@ class BuiltinApplicationContracts:
         return 'sqlite+aiosqlite:///' + str(root / 'runtime.db')
 
     @asynccontextmanager
-    async def project(self, *, disabled=False, custom=False):
+    async def project(self, *, disabled=False, custom=False, provider=None):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             if custom:
@@ -75,7 +76,7 @@ class BuiltinApplicationContracts:
             else:
                 manifest = 'schema_version=1\nworkflows=[]\n'
             (root / 'auto-agent.toml').write_text(manifest)
-            provider = ScriptedProvider(*(answer(f'Answer {i}') for i in range(8)))
+            provider = provider or ScriptedProvider(*(answer(f'Answer {i}') for i in range(8)))
             @asynccontextmanager
             async def lifespan(setup):
                 setup.providers.register('offline', provider)
@@ -118,6 +119,44 @@ class BuiltinApplicationContracts:
             self.assertNotIn('workflow_id', rows[0])
             self.assertEqual(rows[0]['status'], 'completed')
 
+    async def test_conversation_history_projects_final_answers_and_jumps_by_invocation(self):
+        """Summary and index omit execution payloads while an anchored page and raw history remain accessible."""
+        intermediate = LLMResponse(model="offline", finish_reason="tool_calls", output=(
+            LLMReasoning(text="Hidden reasoning"),
+            LLMToolCall(name="get_agents", call_id="list-agents", arguments="{}"),
+        ))
+        final = answer("First final answer")
+        final = final.model_copy(update={"output": (LLMReasoning(text="Final hidden reasoning"), *final.output)})
+        async with self.project(provider=ScriptedProvider(intermediate, final, answer("Second final answer"))) as (host, client):
+            sid = "history-session"
+            ids = []
+            for text in ("First question", "Second question"):
+                response = await client.post("/api/v2/agent/messages", json=dict(session_id=sid, message=text))
+                self.assertEqual(response.status_code, 202, response.text)
+                ids.append(response.json()["invocation_id"])
+                outcome = await host.join(ids[-1])
+                self.assertEqual(outcome.status, "completed", outcome.error)
+            application = host.applications["agent"]
+            first_page = await application.conversation_page(sid, limit=1)
+            self.assertEqual([row["invocation_id"] for row in first_page["items"]], [ids[1]])
+            previous = await application.conversation_page(sid, limit=1, cursor=first_page["next_cursor"])
+            response = await client.get("/api/v2/agent/invocations", params={"session_id": sid, "anchor": ids[0]})
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json(), previous)
+            self.assertIn(ids[0], previous["details"])
+            self.assertEqual([event["kind"] for event in previous["events"]], [
+                "agent.messages", "agent.completed", "agent.response"])
+            answer_blocks = previous["events"][-1]["payload"]["blocks"]
+            self.assertEqual([(block["type"], block["text"]) for block in answer_blocks], [("text", "First final answer")])
+            index = (await client.get("/api/v2/agent/turn-index", params={"session_id": sid})).json()["items"]
+            self.assertEqual([(row["invocation_id"], row["question"], row["answer"]) for row in index], [
+                (ids[0], "First question", "First final answer"), (ids[1], "Second question", "Second final answer")])
+            details = (await client.get("/api/v2/agent/history", params={"invocation_id": ids[0]})).json()["items"]
+            self.assertTrue(any(event["kind"] == "agent.tools" for event in details))
+            self.assertIn("Final hidden reasoning", json.dumps(details))
+            self.assertEqual((await client.get("/api/v2/agent/invocations",
+                params={"session_id": sid, "anchor": "missing"})).status_code, 404)
+
     async def test_disabled_agent_allows_empty_host_and_returns_clear_chat_state(self):
         """Disabling the Agent application still permits startup with zero Workflows."""
         async with self.project(disabled=True) as (host, client):
@@ -126,6 +165,73 @@ class BuiltinApplicationContracts:
             self.assertEqual((await client.get('/api/v2/agent/sessions')).json()['items'], [])
             denied = await client.post('/api/v2/agent/messages', json={'session_id': 'new', 'message': 'Hi'})
             self.assertEqual(denied.status_code, 404)
+
+    async def test_workflow_ui_can_hide_product_history_without_filtering_sdk_or_chat(self):
+        """Workflow visibility filters before paging and aggregation while generic APIs and Agent chat retain access."""
+        header = {"X-AutoAgent-UI": "workflow"}
+        async with self.project(custom=True) as (host, client):
+            app = host.applications["agent"]
+            hidden = await app.start_conversation("product-only", "Hidden task")
+            await host.join(hidden)
+            mixed = await app.start_conversation("mixed-history", "First product task")
+            await host.join(mixed)
+            custom = await host.execute("custom", AgentInput(message="Custom task"), session_id="mixed-history")
+            await host.join(custom)
+            last = await host.execute(BUILTIN_AGENT_WORKFLOW_ID, AgentInput(message="Last product task"), session_id="mixed-history")
+            await host.join(last)
+            other = await host.execute("custom", AgentInput(message="Other custom task"), session_id="custom-only")
+            await host.join(other)
+            revision = hidden.workflow_revision_id
+            for route, params, field in (
+                ("workflow-catalog", {"limit": 1}, "workflow_id"),
+                ("workflows", {"limit": 1, "include_history": "true"}, "workflow_id"),
+                ("executions", {"limit": 1}, "workflow_id"),
+                ("session-invocations", {"session_id": "mixed-history", "limit": 1}, "workflow_id"),
+                ("session-history", {"session_id": "mixed-history", "limit": 1}, "workflow_id"),
+                ("session-workflows", {"session_id": "mixed-history", "limit": 1}, "workflow_id"),
+            ):
+                cursor, found = None, []
+                while True:
+                    result = await client.get("/api/v2/" + route, params={**params, **({"cursor": cursor} if cursor else {})}, headers=header)
+                    self.assertEqual(result.status_code, 200, result.text)
+                    page = result.json()
+                    found.extend(page["items"])
+                    if page["next_cursor"] is None:
+                        break
+                    self.assertTrue(page["items"], route)
+                    cursor = page["next_cursor"]
+                self.assertTrue(found, route)
+                self.assertEqual({row[field] for row in found}, {"custom"}, route)
+            listed = (await client.get("/api/v2/execution-sessions", headers=header)).json()
+            self.assertEqual(listed["total_count"], 2)
+            rows = {row["session_id"]: row for row in listed["items"]}
+            self.assertEqual(set(rows), {"mixed-history", "custom-only"})
+            self.assertEqual(rows["mixed-history"]["invocation_count"], 1)
+            self.assertEqual(rows["mixed-history"]["workflow_count"], 1)
+            info = (await client.get("/api/v2/session-information", params={"session_id": "mixed-history"}, headers=header)).json()
+            self.assertEqual(info["latest_invocation_id"], custom.invocation_id)
+            self.assertEqual(info["invocation_count"], 1)
+            for route, params in (
+                ("workflow-graph", {"revision_id": revision}),
+                ("workflow-revisions", {"workflow_id": BUILTIN_AGENT_WORKFLOW_ID}),
+                ("execution-trace", {"invocation_id": hidden.invocation_id}),
+                ("trace-dataset", {"invocation_id": hidden.invocation_id}),
+                ("session-information", {"session_id": "product-only"}),
+            ):
+                result = await client.get("/api/v2/" + route, params=params, headers=header)
+                self.assertEqual(result.status_code, 404, (route, result.text))
+                self.assertEqual(result.json()["detail"]["code"], "agent_app_hidden")
+            generic = (await client.get("/api/v2/workflow-catalog")).json()
+            self.assertEqual({row["workflow_id"] for row in generic["items"]}, {"custom", BUILTIN_AGENT_WORKFLOW_ID})
+            self.assertEqual((await client.get("/api/v2/agent/history",
+                params={"invocation_id": hidden.invocation_id})).status_code, 200)
+            self.assertEqual((await host.get_execution_trace(hidden.invocation_id))["invocation"]["status"], "completed")
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(
+                    app=create_app(host, settings=ServerSettings(workflow_ui_show_agent_app=True))),
+                    base_url="http://test", headers=header) as visible:
+                self.assertEqual((await visible.get("/api/v2/workflow-graph", params={"revision_id": revision})).status_code, 200)
+                shown = (await visible.get("/api/v2/execution-sessions")).json()["items"]
+                self.assertEqual({row["session_id"] for row in shown}, {"product-only", "mixed-history", "custom-only"})
 
     async def test_custom_agent_builds_and_mixed_sessions_cannot_enter_chat(self):
         """Chat rejects custom execution/history/settings without restricting generic Host execution."""
@@ -139,6 +245,7 @@ class BuiltinApplicationContracts:
                 ('history', {'invocation_id': custom.invocation_id}),
                 ('resources', {'revision_id': host._runtime.workflow_ids['custom']}),
                 ('invocations', {'session_id': custom.session_id}),
+                ('turn-index', {'session_id': custom.session_id}),
                 ('settings', {'session_id': custom.session_id}),
                 ('usage', {'session_id': custom.session_id}),
                 ('events/watch', {'session_id': custom.session_id}),

@@ -1,4 +1,4 @@
-interface Config { apiPrefix: string; uiBase: string; pageSize: number; defaultView?: 'agents' | 'workflows' }
+interface Config { apiPrefix: string; uiBase: string; pageSize: number; defaultView?: 'agents' | 'workflows'; workflowUiHiddenWorkflows?: string[] }
 const element = typeof document === 'undefined' ? null : document.getElementById("autoagent-config");
 export const config: Config = element?.textContent
   ? JSON.parse(element.textContent) as Config

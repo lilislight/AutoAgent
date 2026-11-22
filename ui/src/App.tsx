@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, config, getExecutionTrace, getWorkflowGraph } from "./api";
+import { isHiddenWorkflowError } from './workflowHttp';
 import { readPageLocation, writePageLocation } from "./navigation";
 import { FlowLoadingBoundary, FlowLoadingSurface } from "./components/FlowLoadingBoundary";
 import { Inspector } from "./components/Inspector";
@@ -92,18 +93,19 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
   const inspectorOpen = Boolean(location.selection);
   const executionMode = location.view === "executions";
   const [directoryLoading, setDirectoryLoading] = useState(true);
+  const [hiddenNotice, setHiddenNotice] = useState(false);
   const isAccepted = accepted?.invocation_id===location.execution;
   const [workflowFocus, setWorkflowFocus] = useState(0);
   const trace = useQuery({
     queryKey: ["execution-trace", location.execution],
     queryFn: ({ signal }) => getExecutionTrace(location.execution!, signal),
     enabled: executionMode && Boolean(location.execution) && (!isAccepted || active),
-    refetchInterval: query=>isAccepted && !query.state.data && (!query.state.error || query.state.error instanceof ApiError && query.state.error.status===404)?Math.min(3000,500+query.state.errorUpdateCount*250):false,
+    refetchInterval: query=>isAccepted && !query.state.data && !isHiddenWorkflowError(query.state.error) && (!query.state.error || query.state.error instanceof ApiError && query.state.error.status===404)?Math.min(3000,500+query.state.errorUpdateCount*250):false,
     staleTime: 0, retry: false, gcTime: 60_000, refetchOnWindowFocus: false,
   });
   const activeTrace = executionMode && location.execution === trace.data?.invocation.invocation_id ? trace.data : undefined;
   useEffect(()=>{if(isAccepted && activeTrace)onTraceSaved(activeTrace.invocation.invocation_id);},[isAccepted,activeTrace,onTraceSaved]);
-  const waitingForTrace=isAccepted && !activeTrace && (!trace.error || trace.error instanceof ApiError && trace.error.status===404);
+  const waitingForTrace=isAccepted && !activeTrace && !isHiddenWorkflowError(trace.error) && (!trace.error || trace.error instanceof ApiError && trace.error.status===404);
   const revision = executionMode ? activeTrace?.invocation.workflow_revision_id : normalLocation.revision;
   const workflowId = executionMode ? activeTrace?.invocation.workflow_id : normalLocation.workflow;
   const detail = useQuery({
@@ -114,6 +116,15 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
     staleTime: 60_000,
     gcTime: 60_000,
   });
+  const hiddenSelection = isHiddenWorkflowError(trace.error) || isHiddenWorkflowError(detail.error)
+    || !!location.workflow && !!config.workflowUiHiddenWorkflows?.includes(location.workflow);
+  useEffect(() => {
+    if (!hiddenSelection) return;
+    setHiddenNotice(true);
+    navigate({ ...location, workflow: null, revision: null, execution: null, session: null, selection: null, compareBase: undefined }, true);
+  }, [hiddenSelection, location, navigate]);
+  useEffect(() => { if ((location.execution || location.workflow) && !hiddenSelection) setHiddenNotice(false); },
+    [location.execution, location.workflow, hiddenSelection]);
   const select = useCallback((row: { workflow_id: string; revision_id: string }, replace = false) => {
     navigate({ view: "workflows", execution: null, workflow: row.workflow_id, revision: row.revision_id, session: null, selection: null }, replace);
   }, [navigate]);
@@ -124,10 +135,10 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
   }, [traceSession, location, navigate]);
   const workflow = detail.data?.workflow_id === workflowId && detail.data?.workflow_revision_id === revision ? detail.data : undefined;
   const flowKey = executionMode ? location.execution ? `execution:${location.execution}` : null : revision ? `workflow:${revision}` : null;
-  const flowFailed = Boolean(detail.error && !detail.data && !detail.isFetching || executionMode && !waitingForTrace && trace.error && !trace.data && !trace.isFetching);
+  const flowFailed = hiddenSelection || Boolean(detail.error && !detail.data && !detail.isFetching || executionMode && !waitingForTrace && trace.error && !trace.data && !trace.isFetching);
   const flowPending = waitingForTrace || detail.isFetching || executionMode && trace.isFetching;
-  const candidate = useMemo<FlowSnapshot | null>(() => flowKey && workflow && (!executionMode || activeTrace)
-    ? { key: flowKey, workflow, trace: executionMode ? activeTrace! : null } : null, [flowKey, workflow, executionMode, activeTrace]);
+  const candidate = useMemo<FlowSnapshot | null>(() => !hiddenSelection && flowKey && workflow && (!executionMode || activeTrace)
+    ? { key: flowKey, workflow, trace: executionMode ? activeTrace! : null } : null, [hiddenSelection, flowKey, workflow, executionMode, activeTrace]);
   const [presented, setPresented] = useState<FlowSnapshot | null>(null);
   const presentedWorkflowId = presented?.workflow.workflow_id;
   const onPresented = useCallback((value: FlowSnapshot | null) => setPresented(value), []);
@@ -160,7 +171,8 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
           onInvocation={(execution, session) => navigate({ ...location, execution, session, selection: null })} />
         : <WorkflowDirectory workflowId={location.workflow} revisionId={location.revision} onSelect={select} onLoadingChange={setDirectoryLoading} />}</Sidebar>
       <main className="main-workspace" aria-label={presentedWorkflowId ? `Workflow graph: ${presentedWorkflowId}` : "Workflow graphs"}>
-        {executionMode && location.session && !location.execution ? <SessionInformation key={location.session} session={location.session} onInvocation={openFamilyMember} onDefinition={onOpenWorkflow} /> : null}
+        {executionMode && location.session && !location.execution ? <SessionInformation key={location.session} session={location.session} onInvocation={openFamilyMember} onDefinition={onOpenWorkflow}
+          onHidden={() => { setHiddenNotice(true); navigate({ ...location, workflow: null, revision: null, execution: null, session: null, selection: null }, true); }} /> : null}
         <div className={`workspace-flow-container ${executionMode && location.session && !location.execution ? 'is-inactive' : ''}`}>
         <FlowLoadingBoundary flowKey={flowKey} candidate={candidate} pending={flowPending} failed={flowFailed} onPresented={onPresented}
           retainLimit={executionMode ? 4 : 1} retainGroup={executionMode ? familyGroup : undefined} pinnedKey={activeTrace ? `execution:${activeTrace.invocation.root_invocation_id}` : undefined}
@@ -173,7 +185,7 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
                 <InspectorPresence open={Boolean(selection)}>{selection ? <Inspector workflow={snapshot.workflow} selection={selection} onClose={closeInspector} onRunAccepted={onRunAccepted} onEntry={id => { chooseObject({ kind: "node", id }); setWorkflowFocus(value => value + 1); }} /> : null}</InspectorPresence></FlowLoadingSurface>
             </>;
           }}
-          fallback={<FlowLoadingSurface pending={!flowKey && directoryLoading} loadingLabel={waitingForTrace?'Run accepted · Waiting for saved trace':undefined}><div className="empty-state"><div className="empty-glyph"><WorkflowIcon /></div><h2>{waitingForTrace?'Waiting for saved trace':executionMode ? trace.isFetching || detail.isFetching ? "Loading execution" : trace.error || detail.error ? "Could not load execution" : "Explore workflow executions" : detail.isFetching ? "Loading workflow definition" : detail.error ? "Could not load definition" : "Explore workflow definitions"}</h2><p>{waitingForTrace?'The Run was accepted. Its trace will appear after persistence commits.':(executionMode ? trace.error?.message : null) ?? detail.error?.message ?? (executionMode ? location.session ? "Select an invocation from this session to inspect its execution." : "Select a session, then an invocation to inspect its execution." : "Select a workflow to explore its nodes, edges, and execution rules.")}</p>{!waitingForTrace && (trace.error || detail.error) ? <button className="refresh-button" onClick={() => { if (trace.error) void trace.refetch(); else void detail.refetch(); }}>Retry</button> : null}</div></FlowLoadingSurface>}
+          fallback={hiddenNotice || hiddenSelection ? <FlowLoadingSurface><div className="empty-state" role="status"><h2>Agent App is hidden in this view.</h2></div></FlowLoadingSurface> : <FlowLoadingSurface pending={!flowKey && directoryLoading} loadingLabel={waitingForTrace?'Run accepted · Waiting for saved trace':undefined}><div className="empty-state"><div className="empty-glyph"><WorkflowIcon /></div><h2>{waitingForTrace?'Waiting for saved trace':executionMode ? trace.isFetching || detail.isFetching ? "Loading execution" : trace.error || detail.error ? "Could not load execution" : "Explore workflow executions" : detail.isFetching ? "Loading workflow definition" : detail.error ? "Could not load definition" : "Explore workflow definitions"}</h2><p>{waitingForTrace?'The Run was accepted. Its trace will appear after persistence commits.':(executionMode ? trace.error?.message : null) ?? detail.error?.message ?? (executionMode ? location.session ? "Select an invocation from this session to inspect its execution." : "Select a session, then an invocation to inspect its execution." : "Select a workflow to explore its nodes, edges, and execution rules.")}</p>{!waitingForTrace && (trace.error || detail.error) ? <button className="refresh-button" onClick={() => { if (trace.error) void trace.refetch(); else void detail.refetch(); }}>Retry</button> : null}</div></FlowLoadingSurface>}
         />
         </div>
       </main>

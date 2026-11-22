@@ -3,7 +3,7 @@
 import time
 from uuid import uuid4
 
-from sqlalchemy import CheckConstraint, Index, LargeBinary, MetaData, Table, delete, insert, select, update
+from sqlalchemy import CheckConstraint, Index, LargeBinary, MetaData, Table, delete, insert, select, text, update
 from sqlalchemy import case, func, tuple_
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -19,7 +19,9 @@ context_meta = MetaData()
 sessions = Table("agent_app_sessions", context_meta,
     c("session_id", nullable=False, pk=True), c("version", B, False), c("settings", J, False),
     c("workspace", J), c("title"), c("metadata_version", B, False), c("updated_at_us", B, False),
+    c("fork_source_session_id"), c("fork_source_invocation_id"), c("fork_source_sequence", B),
     CheckConstraint("version >= 1"), CheckConstraint("metadata_version >= 0"))
+fork_index = Index("agent_app_sessions_fork_source", sessions.c.fork_source_session_id)
 invocation_bindings = Table("agent_app_invocation_bindings", context_meta,
     c("binding_id", nullable=False, pk=True), c("session_id", nullable=False),
     c("invocation_id", nullable=False, unique=True), c("model", J, False), c("workspace", J),
@@ -49,6 +51,13 @@ class ApplicationContextStorage:
             for table in context_meta.tables.values():
                 columns = await conn.run_sync(lambda sync, name=table.name:
                     {item["name"] for item in inspect(sync).get_columns(name)})
+                if table is sessions:
+                    for name in ("fork_source_session_id", "fork_source_invocation_id", "fork_source_sequence"):
+                        if name not in columns:
+                            sql_type = sessions.c[name].type.compile(dialect=conn.dialect)
+                            await conn.execute(text(f"ALTER TABLE agent_app_sessions ADD COLUMN {name} {sql_type}"))
+                            columns.add(name)
+                    await conn.run_sync(lambda sync: fork_index.create(sync, checkfirst=True))
                 if columns != set(table.columns.keys()):
                     raise FormatError("Agent storage does not match the current schema.")
 
@@ -56,6 +65,13 @@ class ApplicationContextStorage:
     async def purge_history(self, conn, invocation_ids, session_ids):
         """Participate in Host history deletion using the same SQL transaction."""
         from .queue import messages
+        if await self._exists(conn, sessions):
+            dependent = await conn.scalar(select(sessions.c.session_id).where(
+                sessions.c.session_id.not_in(session_ids),
+                (sessions.c.fork_source_session_id.in_(session_ids)
+                    | sessions.c.fork_source_invocation_id.in_(invocation_ids))).limit(1))
+            if dependent:
+                raise ConflictError("Conversation history is referenced by a Fork; delete dependent Forks first.")
         for table, field, values in ((invocation_bindings, "invocation_id", invocation_ids),
                 (sessions, "session_id", session_ids), (messages, "session_id", session_ids),
                 (images, "session_id", session_ids)):
@@ -241,7 +257,8 @@ class ApplicationContextStorage:
                 return ApplicationSettingsRecord(session_id=sid, version=row["version"],
                     settings=restore(ApplicationSessionSettings, row["settings"]),
                     workspace=restore(WorkspaceBinding, row["workspace"]) if row["workspace"] else None,
-                    title=row["title"], metadata_version=row["metadata_version"])
+                    title=row["title"], metadata_version=row["metadata_version"],
+                    **{key: row[key] for key in ("fork_source_session_id", "fork_source_invocation_id", "fork_source_sequence")})
 
     @staticmethod
     async def _remember_model(conn, sid, model):
@@ -262,7 +279,8 @@ class ApplicationContextStorage:
                 workspace=(restore(WorkspaceBinding, row["workspace"]) if row["workspace"] is not None else None)
                     if row else workspace if fixed else defaults.workspace,
                 title=row["title"] if row and row["title"] else await self._first_title(conn, sid),
-                metadata_version=row["metadata_version"] if row else 0)
+                metadata_version=row["metadata_version"] if row else 0,
+                **({key: row[key] for key in ("fork_source_session_id", "fork_source_invocation_id", "fork_source_sequence")} if row else {}))
 
     async def configure(self, sid, settings, expected_version, workspace):
         self.writer.check_open()
@@ -344,7 +362,12 @@ class ApplicationContextStorage:
 
     async def conversation_sessions(self, workspace_id, *, all_workspaces=False, limit=20, cursor=None):
         from autoagent.agent_app import BUILTIN_AGENT_WORKFLOW_ID
-        from autoagent.host.persistence.tracing import TraceQueries
+        from autoagent.host.persistence.models import Page
+        from autoagent.host.persistence.queries import limit_value
+        from autoagent.host.persistence.tracing import trace_cursor
+
+        limit_value(limit)
+        trace_cursor(cursor)
 
         inv, revisions, events = (meta.tables[name] for name in
             ("invocations", "workflow_revisions", "runtime_events"))
@@ -364,8 +387,27 @@ class ApplicationContextStorage:
                     accepted_workspace.is_not(None) if workspace_id is None else accepted_workspace == workspace_id)
             bound = configured.union(accepted)
             scope = scope.where(inv.c.session_id.not_in(bound) if workspace_id is None else inv.c.session_id.in_(bound))
-        return await TraceQueries(self.queries).sessions(workflow_ids=(BUILTIN_AGENT_WORKFLOW_ID,),
-            session_scope=scope, limit=limit, cursor=cursor)
+        activity = func.max(func.coalesce(events.c.occurred_at_us, inv.c.completed_at_us, inv.c.started_at_us, 0))
+        physical = select(inv.c.session_id, func.count().label("invocation_count"),
+            activity.label("updated_at_us")).select_from(inv.outerjoin(events,
+                (events.c.session_id == inv.c.session_id) & (events.c.sequence == inv.c.last_sequence))).where(
+                    inv.c.session_id.in_(scope), inv.c.status.is_not(None)).group_by(inv.c.session_id)
+        drafts = select(sessions.c.session_id, func.cast(0, B).label("invocation_count"), sessions.c.updated_at_us).where(
+            sessions.c.fork_source_session_id.is_not(None),
+            sessions.c.session_id.not_in(select(inv.c.session_id).where(inv.c.status.is_not(None))))
+        if not all_workspaces:
+            drafts = drafts.where(configured_workspace.is_(None) if workspace_id is None else configured_workspace == workspace_id)
+        combined = physical.union_all(drafts).subquery()
+        statement = select(combined)
+        if cursor is not None:
+            statement = statement.where(tuple_(combined.c.updated_at_us, combined.c.session_id) < cursor)
+        async with self.queries.view() as (conn, _, _, frontier):
+            rows = (await conn.execute(statement.order_by(combined.c.updated_at_us.desc(),
+                combined.c.session_id.desc()).limit(limit + 1))).mappings().all()
+            total = await conn.scalar(select(func.count()).select_from(combined))
+        page = rows[:limit]
+        position = (page[-1]["updated_at_us"], page[-1]["session_id"]) if len(rows) > limit else None
+        return Page(tuple(dict(row) for row in page), position, frontier, total)
 
     async def conversation_summaries(self, workspace_id, *, all_workspaces=False, limit=20, cursor=None):
         from dataclasses import replace
@@ -403,6 +445,14 @@ class ApplicationContextStorage:
                         item["title"] = self.title(value.get("message", ""))
                 item["title"] = item["title"] or "Chat"
                 details[item["session_id"]] = item
+            missing = set(ids) - details.keys()
+            if missing:
+                for row in (await conn.execute(select(sessions).where(sessions.c.session_id.in_(missing)))).mappings():
+                    workspace = row["workspace"]
+                    details[row["session_id"]] = dict(session_id=row["session_id"], title=row["title"] or "Conversation",
+                        invocation_id=None, status="ready", control_state=None, last_sequence=0,
+                        metadata_version=row["metadata_version"],
+                        workspace_id=workspace["workspace_id"] if workspace else None)
         return replace(page, items=tuple({
             **details[row["session_id"]], "updated_at_us": row["updated_at_us"],
             "invocation_count": row["invocation_count"],

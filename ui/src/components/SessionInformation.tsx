@@ -1,5 +1,5 @@
 import { BusyLabel, FactsSkeleton, RecordsSkeleton, SessionHistorySkeleton, SkeletonText } from './LoadingState';
-import { useId, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { useInfiniteQuery, useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query';
 import { getSessionHistory, getSessionInformation, getSessionWorkflows } from '../api';
 import type { SessionWorkflow, TraceRow } from '../types';
@@ -9,11 +9,12 @@ import { SessionCheckpoints } from './SessionCheckpoints';
 import { WorkflowVersion } from './WorkflowIdentity';
 import { ToolButton, DefinitionIcon, RefreshIcon } from './ToolButton';
 import { Tooltip, ValueTip } from './Tooltip';
+import { isHiddenWorkflowError } from '../workflowHttp';
 
 const tabs = ['Invocations', 'Workflows', 'Checkpoints'] as const;
 
-export function SessionInformation({ session, onInvocation, onDefinition }: {
-  session: string; onInvocation: (row: TraceRow) => void; onDefinition: (workflow: string, revision: string) => void;
+export function SessionInformation({ session, onInvocation, onDefinition, onHidden }: {
+  session: string; onInvocation: (row: TraceRow) => void; onDefinition: (workflow: string, revision: string) => void; onHidden?: () => void;
 }) {
   const [tab, setTab] = useState<typeof tabs[number]>('Invocations');
   const [inspectorHost, setInspectorHost] = useState<HTMLElement | null>(null);
@@ -22,6 +23,7 @@ export function SessionInformation({ session, onInvocation, onDefinition }: {
   const id = useId();
   const [revision, setRevision] = useState<string | null>(null);
   const info = useQuery({ queryKey:['session-information',session], queryFn:({signal})=>getSessionInformation(session,signal), staleTime:0, refetchOnWindowFocus:false });
+  useEffect(() => { if (isHiddenWorkflowError(info.error)) onHidden?.(); }, [info.error, onHidden]);
   const history = useInfiniteQuery({ queryKey:['session-history',session,revision], queryFn:({pageParam,signal})=>getSessionHistory(session,pageParam,revision,signal), initialPageParam:null as string|null, getNextPageParam:page=>page.next_cursor, enabled:tab==='Invocations', staleTime:0, refetchOnWindowFocus:false });
   const workflows = useInfiniteQuery({ queryKey:['session-workflows',session], queryFn:({pageParam,signal})=>getSessionWorkflows(session,pageParam,signal), initialPageParam:null as string|null, getNextPageParam:page=>page.next_cursor, enabled:tab==='Workflows', staleTime:0, refetchOnWindowFocus:false });
   const rows = history.data?.pages.flatMap(page=>page.items) ?? [];

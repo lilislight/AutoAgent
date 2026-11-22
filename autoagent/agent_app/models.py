@@ -19,3 +19,6 @@ class ApplicationSettingsRecord(AgentSettingsRecord):
     settings: ApplicationSessionSettings
     title: str | None = None
     metadata_version: int = Field(default=0, ge=0)
+    fork_source_session_id: str | None = None
+    fork_source_invocation_id: str | None = None
+    fork_source_sequence: int | None = None

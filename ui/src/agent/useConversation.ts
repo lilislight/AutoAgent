@@ -51,6 +51,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       const reads = eventRefresh(events);
       if (reads.execution) void client.invalidateQueries({ queryKey: ['agent-execution'] }, { cancelRefetch: false });
       if (reads.invocations) void client.invalidateQueries({ queryKey: ['agent-invocations', session] }, { cancelRefetch: false });
+      if (reads.directory) void client.invalidateQueries({ queryKey: ['agent-turn-index', session] }, { cancelRefetch: false });
       if (reads.directory) void client.invalidateQueries({ queryKey: ['agent-sessions'] }, { cancelRefetch: false });
     };
     const ready = () => {
@@ -60,6 +61,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       // events crossing the live/history boundary without replaying deltas.
       void client.invalidateQueries({ queryKey: ['agent-history', session] });
       void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
+      void client.invalidateQueries({ queryKey: ['agent-turn-index', session] });
       void client.invalidateQueries({ queryKey: ['agent-queue', session] });
     };
     const receive = (message: MessageEvent<string>) => {
@@ -88,6 +90,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
         dispatch({ type: 'reset' });
         void client.invalidateQueries({ queryKey: ['agent-history', session] });
         void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
+        void client.invalidateQueries({ queryKey: ['agent-turn-index', session] });
         void client.invalidateQueries({ queryKey: ['agent-execution'] });
         void client.invalidateQueries({ queryKey: ['agent-queue', session] });
       }
@@ -104,7 +107,11 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       window.removeEventListener('online', online);
     };
   }, [session, active, client, epoch]);
-  const refresh = useCallback(() => { if (connection !== 'live') setEpoch(value => value + 1); void client.invalidateQueries({ queryKey: ['agent-history', session] }); }, [client, session, connection]);
-  const loading = queries.some((item, index) => item.isLoading || item.data !== undefined && loaded.current.get(invocations[index].invocation_id) !== item.dataUpdatedAt);
-  return { state, refresh, loading, error: queries.find(item => item.error)?.error };
+  const refresh = useCallback(() => {
+    if (connection !== 'live') setEpoch(value => value + 1);
+    void client.invalidateQueries({ queryKey: ['agent-history', session] });
+    void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
+    void client.invalidateQueries({ queryKey: ['agent-turn-index', session] });
+  }, [client, session, connection]);
+  return { state, refresh, error: queries.find(item => item.error)?.error };
 }

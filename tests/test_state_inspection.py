@@ -171,6 +171,27 @@ class StateInspectionTests(unittest.IsolatedAsyncioTestCase):
             after = await writer.list_checkpoints(ref.session_id)
             self.assertEqual(before, after)
 
+    async def test_execution_context_loading_is_independent_of_inspection_budgets(self):
+        """Execution can load full historical Context while Inspect keeps all its limits."""
+        config = replace(self.settings, persistence=PersistenceConfig(inspection_scan_events=1,
+            inspection_read_bytes=1, inspection_result_bytes=1))
+        large = 'snapshot:' + 'x' * (2 * 1024 * 1024)
+        async with self.host([self.workflow()], settings=config) as host:
+            ref = await self.start(host, context={'payload': large})
+            sequence = (await self.events(host, ref))[-1]['sequence']
+            with self.assertRaises(HostRunConflict) as error:
+                await host.read_execution_context(ref.invocation_id, sequence=sequence, scope='session', pointer='/payload')
+            self.assertEqual(error.exception.code, 'INSPECTION_LIMIT')
+            loaded = await host.load_execution_context(ref.invocation_id, sequence=sequence, scope='session', pointer='/payload')
+            self.assertEqual(loaded['value'], large)
+            checkpoint = await host.create_checkpoint(ref.session_id)
+            anchored = await host.load_execution_context(ref.invocation_id, sequence=sequence, scope='session', pointer='/payload')
+            self.assertEqual(anchored['value'], large)
+            self.assertEqual(anchored['source']['id'], checkpoint['checkpoint_id'])
+            self.assertEqual(anchored['read']['scanned_events'], 0)
+            with self.assertRaises(ValueError):
+                await host.load_execution_context(ref.invocation_id, sequence=sequence + 10000, scope='session')
+
     async def test_checkpoint_base_reads_only_selected_member_and_preserves_results(self):
         """A same-position Checkpoint supplies selected fields without replaying Events or loading Context siblings."""
         async with self.host([self.workflow()]) as host:

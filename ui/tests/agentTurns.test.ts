@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import test from 'node:test';
 import { Conversation } from '../src/agent/Conversation.js';
 import { applyEvents, emptyConversation, entityKey, resetTransient } from '../src/agent/conversationState.js';
@@ -27,7 +28,18 @@ function fixture() {
     { type: 'reasoning', text: 'Final reasoning stays in the log.', summary: [] }, { type: 'text', text: 'The report is ready.' },
   ])]);
 }
-const render = (state: ReturnType<typeof fixture>, status = 'completed') => renderToStaticMarkup(createElement(Conversation, { state, invocations: [invocation(status)], active: false, loading: false, onRetry() {} }));
+const render = (state: ReturnType<typeof fixture>, status = 'completed') => renderToStaticMarkup(createElement(QueryClientProvider,
+  { client: new QueryClient() }, createElement(Conversation, { state, invocations: [invocation(status)], active: false, loading: false, onRetry() {} })));
+
+test('Fork is available beside answer actions only for a completed reply', () => {
+  const state = applyEvents(fixture(), [complete('final')]);
+  const markup = (status: string) => renderToStaticMarkup(createElement(QueryClientProvider,
+    { client: new QueryClient() }, createElement(Conversation, { state, invocations: [invocation(status)], active: false,
+      loading: false, onRetry() {}, async onFork() {} })));
+  assert.match(markup('completed'), /aria-label="Fork conversation"/);
+  assert.doesNotMatch(markup('running'), /aria-label="Fork conversation"/);
+  assert.doesNotMatch(markup('failed'), /aria-label="Fork conversation"/);
+});
 
 test('one Invocation groups all model rounds and uses only the declared final response', () => {
   const state = applyEvents(fixture(), [complete('final'), response('later', [{ type: 'text', text: 'Later text is not the final answer.' }])]);

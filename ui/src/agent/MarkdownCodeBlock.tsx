@@ -17,14 +17,12 @@ export function MarkdownCodeBlock({ source, diagram, children }: { source: strin
     if (copied) timer.current = setTimeout(() => setFeedback(undefined), 1600);
   };
   const pre = <pre>{children}</pre>;
+  const actions = <ToolButton className="agent-code-copy" label={diagram ? 'Copy Mermaid source' : 'Copy code'}
+    tooltip={current?.copied ? 'Copied' : diagram ? 'Copy Mermaid source' : 'Copy code'} onClick={event => void copy(event.currentTarget)}>
+    {current?.copied ? <CheckIcon /> : <CopyIcon />}
+  </ToolButton>;
   return <div className="agent-code-block">
-    <div className="agent-code-actions">
-      <ToolButton className="agent-code-copy" label={diagram ? 'Copy Mermaid source' : 'Copy code'}
-        tooltip={current?.copied ? 'Copied' : diagram ? 'Copy Mermaid source' : 'Copy code'} onClick={event => void copy(event.currentTarget)}>
-        {current?.copied ? <CheckIcon /> : <CopyIcon />}
-      </ToolButton>
-    </div>
-    {diagram ? <MermaidDiagram source={source} fallback={pre} /> : pre}
+    {diagram ? <MermaidDiagram source={source} fallback={pre} actions={actions} /> : <><div className="agent-code-actions">{actions}</div>{pre}</>}
     {current?.copied && <span className="sr-only" role="status">Copied</span>}
     {current && !current.copied && <ManualCopyText label={diagram ? 'Mermaid source to copy' : 'Code to copy'}
       text={source} onDismiss={() => setFeedback(undefined)} />}

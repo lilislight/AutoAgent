@@ -24,7 +24,10 @@ interface Props {
 
 export function AgentComposer({ mobile = false, active = true, controlsDisabled = false, primary, onControl, session, draft, busy, running, disabled, canSend, caption, inputRef, onDraft, onSend, images, preparingImages = false, onPickImages, onRemoveImage, onSendNow, canSendNow = false, settings, providerOptions = [], onSettingsChange, canCancel = false, contextUsage, contextLoading }: Props) {
   const [actions, setActions] = useState(false);
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const actionsButton = useRef<HTMLButtonElement>(null);
+  const dragDepth = useRef(0);
+  const canAttachImages = active && !disabled && canSend && !busy && !preparingImages;
   const hasContent = !!draft.trim() || images.length > 0;
   const sendNow = hasContent && !!onSendNow;
   const hasActions = canCancel || sendNow;
@@ -50,14 +53,42 @@ export function AgentComposer({ mobile = false, active = true, controlsDisabled 
     return () => { observer.disconnect(); window.removeEventListener('resize', resize); if (mobile) window.visualViewport?.removeEventListener('resize', resize); };
   }, [draft, inputRef, mobile]);
   return <>
-    <form className="agent-composer" onSubmit={event => { event.preventDefault(); if (primary.kind === 'send' && !primary.disabled && canSend && hasContent && !busy) onSend(); }}>
+    <form className={`agent-composer${draggingFiles && canAttachImages ? ' is-image-drop-target' : ''}`}
+      onDragEnter={event => {
+        if (!event.dataTransfer.types.includes('Files')) return;
+        dragDepth.current += 1;
+        setDraggingFiles(true);
+      }}
+      onDragOver={event => {
+        if (!event.dataTransfer.types.includes('Files')) return;
+        event.preventDefault();
+        event.dataTransfer.dropEffect = canAttachImages ? 'copy' : 'none';
+      }}
+      onDragLeave={() => {
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDraggingFiles(false);
+      }}
+      onDrop={event => {
+        const files = Array.from(event.dataTransfer.files);
+        dragDepth.current = 0;
+        setDraggingFiles(false);
+        if (!files.length) return;
+        event.preventDefault();
+        if (canAttachImages) onPickImages(files);
+      }}
+      onSubmit={event => { event.preventDefault(); if (primary.kind === 'send' && !primary.disabled && canSend && hasContent && !busy) onSend(); }}>
       {images.length > 0 && <ImageThumbnails images={images} disabled={disabled || preparingImages} active={active} onRemove={onRemoveImage} />}
       <label className="sr-only" htmlFor={`agent-message-${session}`}>Message Agent</label>
       <textarea ref={inputRef} id={`agent-message-${session}`} rows={2} value={draft} onChange={event => onDraft(event.target.value)} placeholder={running ? 'Queue a message…' : 'Message Agent…'} onKeyDown={event => {
         if (!mobile && event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); if (primary.kind === 'send' && !primary.disabled && canSend && hasContent && !busy) onSend(); }
+      }} onPaste={event => {
+        const files = Array.from(event.clipboardData.files).filter(file => file.type.startsWith('image/'));
+        if (!files.length) return;
+        event.preventDefault();
+        if (canAttachImages) onPickImages(files);
       }} disabled={disabled} />
       <div className="agent-composer-toolbar">
-        <AddImages mobile={mobile} preparing={preparingImages} disabled={disabled || !canSend || images.length >= maxImages} onPick={onPickImages} />
+        <AddImages mobile={mobile} preparing={preparingImages} disabled={!canAttachImages || images.length >= maxImages} onPick={onPickImages} />
         <ComposerSettings mobile={mobile} active={active} settings={settings} providers={providerOptions} disabled={controlsDisabled || busy} onChange={onSettingsChange} contextUsage={contextUsage} contextLoading={contextLoading} />
         {!mobile && sendNow ? <Tooltip content="Send to current task"><button type="button" className="agent-send-now" disabled={busy || !canSendNow} onClick={onSendNow}><AgentIcon name="message" />Send now</button></Tooltip> : null}
         {mobile && hasActions && <button ref={actionsButton} type="button" className="agent-run-actions" aria-label="Run actions"

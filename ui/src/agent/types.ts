@@ -12,16 +12,18 @@ export interface SessionSettings {
   approval_mode: 'always_ask' | 'policy' | 'auto_approve';
 }
 export interface AgentWorkspaceInfo { id: string; name: string; backend: string; path: string | null; is_project: boolean; available: boolean | null }
-export interface SettingsRecord { session_id: string; version: number; settings: SessionSettings; workspace: { workspace_id: string; working_directory: string } | null; title: string | null; metadata_version: number }
+export interface SettingsRecord { session_id: string; version: number; settings: SessionSettings; workspace: { workspace_id: string; working_directory: string } | null; title: string | null; metadata_version: number; fork_source_session_id?: string | null; fork_source_invocation_id?: string | null; fork_source_sequence?: number | null }
 export interface WorkspaceAgent {
   revision_id: string; user_signal_endpoint: string;
   include_ask_user: boolean; subagents: boolean;
   context_policy: { context_window: number | null; compact_at_ratio: number; compact_at_tokens: number | null; target_ratio: number; target_tokens: number | null };
 }
 export interface AgentCatalog { agent: WorkspaceAgent | null; providers: string[]; provider_options?: { id: string; name: string; models: string[]; model_details?: import('./settings/types.js').ConfiguredModel[] }[]; defaults: SessionSettings; project_workspace_id: string }
-export interface AgentSession { session_id: string; title: string; invocation_id: string; updated_at_us: number; invocation_count: number; workspace_id?: string | null; status?: string; control_state?: string; last_sequence?: number }
+export interface AgentSession { session_id: string; title: string; invocation_id: string | null; updated_at_us: number; invocation_count: number; workspace_id?: string | null; status?: string; control_state?: string; last_sequence?: number }
 export interface Page<T> { items: T[]; next_cursor: string | null }
-export interface AgentInvocation { invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number | null; completed_at_us?: number | null; [key: string]: unknown }
+export interface AgentInvocation { inherited?: boolean; invocation_id: string; session_id: string; workflow_id: string; workflow_revision_id: string; root_invocation_id?: string; parent_invocation_id?: string | null; status: string; started_at_us?: number | null; completed_at_us?: number | null; [key: string]: unknown }
+export interface AgentTurnPage extends Page<AgentInvocation> { events: AgentEvent[]; details: Record<string, number> }
+export interface AgentTurnIndexItem { invocation_id: string; message_id: string; at: number; question: string; answer: string }
 export interface SessionSubagent { invocation_id: string; session_id: string; task: string | null; status: string }
 export interface PendingWait { invocation_id: string; wait_id: string; node_id?: string; occurrence_id: string }
 export interface Controls {

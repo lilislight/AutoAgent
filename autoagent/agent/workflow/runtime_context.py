@@ -8,6 +8,7 @@ from ..models import LLMMessage, LLMResponse, TextContent
 
 
 TIME_KEY = "_autoagent_runtime_time"
+PLAN_KEY = "_autoagent_runtime_plan"
 _ESTIMATE_TIME = "2000-01-01T00:00:00+00:00"
 
 
@@ -26,10 +27,14 @@ def time_message(timestamp, target=None):
 
 
 def time_characters(preparation):
-    if not preparation.inject_current_time:
-        return 0
     from .policy import item_characters
-    return item_characters(time_message(_ESTIMATE_TIME, preparation.replay_target))
+    return item_characters(time_message(_ESTIMATE_TIME, preparation.replay_target)) if preparation.inject_current_time else 0
+
+
+def runtime_characters(preparation):
+    from .policy import item_characters
+    return time_characters(preparation) + (item_characters(plan_message(
+        preparation.conversation.plan, preparation.replay_target)) if preparation.inject_plan else 0)
 
 
 def append_time(request, target=None):
@@ -41,14 +46,27 @@ def append_time(request, target=None):
     })
 
 
+def plan_message(plan, target=None):
+    import json
+    value = plan.model_dump(mode="json") if plan is not None else None
+    return LLMMessage(role=target.context_role if target is not None else "user", content=(TextContent(text=(
+        "Runtime plan snapshot (not a user request):\n"
+        + json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        + "\nThis is the current Session plan; it supersedes historical plan snapshots. "
+          "Null means no current plan. Continue the user's task; do not acknowledge this record. "
+          "Update the plan at meaningful milestones using update_plan. Completed plans remain until replaced."
+    )),))
+
+
+def append_plan(request, plan, target=None):
+    return request.model_copy(update={"input": (*request.input, plan_message(plan, target)),
+        "routing": {**request.routing, PLAN_KEY: plan.model_dump(mode="json") if plan else None}})
+
+
 class AgentLLMStreamReducer(LLMStreamReducer):
     """Commit the clock actually sent, including after a pause or Node retry."""
 
     def finish(self, context: StreamContext, state: LLMStreamState) -> LLMResponse:
         response = super().finish(context, state)
-        timestamp = context.input.routing.get(TIME_KEY)
-        if timestamp is None:
-            return response
-        return response.model_copy(update={"provider_metadata": {
-            **response.provider_metadata, TIME_KEY: timestamp,
-        }})
+        snapshots = {key: context.input.routing[key] for key in (TIME_KEY, PLAN_KEY) if key in context.input.routing}
+        return response.model_copy(update={"provider_metadata": {**response.provider_metadata, **snapshots}}) if snapshots else response

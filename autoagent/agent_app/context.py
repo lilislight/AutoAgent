@@ -302,6 +302,26 @@ class ApplicationContext(AgentRuntime):
             revision_id=catalog["agent"]["revision_id"], entry_node_id="start", session_id=session_id,
             session_context=initial_context, require_existing_session=started, require_new_session=not started, before_start=before_start)
 
+    async def tool_context(self, snapshot, call, *, context, phase):
+        context = await super().tool_context(snapshot, call, context=context, phase=phase)
+        if call.name == "register_workflow":
+            from dataclasses import replace
+            import asyncio
+            import json
+            key = self._workspaces.key(snapshot)
+            group = self._workspaces._workflow_tools.get(key)
+            registry = self._workspaces._catalogs.get(key)
+            binding = context.authorization.get("tool_binding", {})
+            if group is not None and registry is not None and any(entry.name == call.name and
+                    entry.resource_id == binding.get("resource_id") for entry in registry.entries("tool")):
+                try:
+                    arguments = json.loads(call.arguments)
+                    digest = await asyncio.to_thread(group.source_fingerprint, arguments)
+                except (ValueError, TypeError, AttributeError, OSError):
+                    digest = None
+                context = replace(context, attributes={**context.attributes, "workflow_source_digest": digest})
+        return context
+
     async def resolve_request_media(self, request):
         from autoagent.agent.models import AssetSource, ImageContent, LLMMessage
         from autoagent.core import OperatorCallContext
@@ -391,6 +411,7 @@ class ApplicationContext(AgentRuntime):
             await self.approvals._run(lambda: self.prepare_workspace(snapshot))
             tools, skills = workflow_catalog(self, snapshot, self.options_for_workflow(ir))
             workspace_skills = {entry.name for entry in self._workspaces.catalog(snapshot, ir.workflow_id)[1]}
+            from .builtin_skills import is_bundled
             return dict(user_signal_endpoint=self.options_for_workflow(ir).user_signal_endpoint,
                 tools=[dict(name=name, description=entry.value.definition.description,
                 origin="Built-in" if entry.resource_id.startswith("builtin:") else
@@ -398,5 +419,5 @@ class ApplicationContext(AgentRuntime):
                 version=entry.version, resource_id=entry.resource_id) for name, entry in tools.items()],
                 skills=[dict(name=skill.metadata.name, description=skill.metadata.description,
                     origin="Workspace" if skill.metadata.name in workspace_skills
-                        else "Project") for skill in skills])
+                        else "Built-in" if is_bundled(skill) else "Project") for skill in skills])
         return await self.host._perform(read)

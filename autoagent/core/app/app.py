@@ -217,6 +217,12 @@ class AutoAgentApp(SignalRuntime, WaitRuntime, UserEventRuntime, PauseRuntime, T
             self._ensure_open()
             return self._compile_and_register(workflow)
 
+    async def aregister_workflow(self, workflow: Workflow) -> WorkflowIR:
+        """Publish a definition on the Runtime loop between scheduling turns."""
+        async def register():
+            return self.register_workflow(workflow)
+        return await self._await(self._submit(register()))
+
     def _compile_and_register(self, workflow: Workflow) -> WorkflowIR:
         compiled = self._compiler.compile(workflow).require_workflow_ir()
         self._register_ir(compiled)

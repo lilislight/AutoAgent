@@ -34,7 +34,7 @@ from .subagents import WaitPreparationBatch, WaitPreparation, CompletedToolWait,
 from .history import HistoryRoute, TokenAnchor, PendingToolRound
 from .projection import PROJECTION_VERSION
 from .provenance import restore_response
-from .runtime_context import AgentLLMStreamReducer, TIME_KEY, append_time
+from .runtime_context import AgentLLMStreamReducer, TIME_KEY, PLAN_KEY, append_time, append_plan
 from .policy import ContextPolicy, ContextLimitExceeded, UsagePlusCharacters, over_context_limit, always_compact
 from .events import AgentEventMessage
 from ._events import map_agent_event
@@ -227,7 +227,8 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
             raise ValueError("Prepared Context no longer matches the Session history.")
         updated = Conversation(items=previous.items, view=value.view, origins=previous.origins,
             token_anchor=previous.token_anchor if previous.view == value.view else None,
-            runtime_times=previous.runtime_times if previous.view == value.view else {})
+            runtime_times=previous.runtime_times if previous.view == value.view else {}, plan=previous.plan,
+            runtime_plans=previous.runtime_plans if previous.view == value.view else {})
         return ContextPatch(invocation=(ContextOperation.set("agent.prepared", value.model_dump(mode="json")),
             ContextOperation.set("agent.request_snapshot_id", value.request.routing["agent_snapshot_id"])),
             session=(ContextOperation.set("agent_conversation", updated.model_dump(mode="json")),))
@@ -243,24 +244,32 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         snapshot = await current_agent_context().execution_snapshot(context.self_handle.invocation_id)
         request = bind_request(prepared.request, snapshot, options.llm_options, role="agent",
             prepared_snapshot_id=state(context)["request_snapshot_id"])
-        if prepared.runtime_time is not None:
-            request = request.model_copy(update={"input": request.input[:-1]})
-        if state(context)["request_snapshot_id"] != snapshot.snapshot_id:
-            # Re-render the frozen sources from original history. The old
-            # request may have deliberately omitted another model's replay data.
-            target = current_agent_context().history_route(snapshot, request.model)
-            evaluation = ContextPreparation(conversation=conversation(context), fixed_input=prepared.fixed_input, tools=request.tools,
-                settings=request.model_dump(mode="json", exclude={"input", "tools"}),
-                fingerprint="resumed-request", snapshot_id=snapshot.snapshot_id, replay_target=target,
-                inject_current_time=options.inject_current_time)
+        tail = int(prepared.runtime_time is not None) + int(prepared.inject_plan)
+        if tail:
+            request = request.model_copy(update={"input": request.input[:-tail]})
+        changed = state(context)["request_snapshot_id"] != snapshot.snapshot_id
+        target = current_agent_context().history_route(snapshot, request.model)
+        evaluation = ContextPreparation(conversation=conversation(context), fixed_input=prepared.fixed_input, tools=request.tools,
+            settings=request.model_dump(mode="json", exclude={"input", "tools"}),
+            fingerprint="resumed-request" if changed else prepared.fingerprint,
+            snapshot_id=snapshot.snapshot_id, replay_target=target,
+            inject_current_time=options.inject_current_time, inject_plan=prepared.inject_plan,
+            model_input_limit=preparation.model_input_limit(snapshot, request.model))
+        if changed:
+            # Re-render the frozen sources when recovery changes the model route.
             request = request.model_copy(update={"input": evaluation.model_input})
-            estimate = await context_policy.estimate_input(evaluation)
-            limit = context_policy.budget(evaluation.settings).input_limit
-            if limit is not None and estimate.input_tokens > limit:
-                raise ContextLimitExceeded("Resumed request exceeds the configured Context window.")
+        # A Host catalog reload can narrow the same model between preparation
+        # and dispatch without changing the Invocation's execution snapshot.
+        estimate = await context_policy.estimate_input(evaluation)
+        limit = context_policy.budget(evaluation.settings, model_input_limit=evaluation.model_input_limit).input_limit
+        if limit is not None and estimate.input_tokens > limit:
+            raise ContextLimitExceeded("Request exceeds the configured Context window.")
         if options.inject_current_time:
             target = current_agent_context().history_route(snapshot, request.model)
             request = append_time(request, target)
+        if prepared.inject_plan:
+            target = current_agent_context().history_route(snapshot, request.model)
+            request = append_plan(request, conversation(context).plan, target)
         return request
 
     @hook
@@ -268,6 +277,8 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         response, route, response_snapshot_id = restore_response(restore(LLMResponse, context.output))
         metadata = dict(response.provider_metadata)
         runtime_time = metadata.pop(TIME_KEY, None)
+        has_plan = PLAN_KEY in metadata
+        runtime_plan = metadata.pop(PLAN_KEY, None)
         response = response.model_copy(update={"provider_metadata": metadata})
         prepared = restore(PreparedRequest, state(context)["prepared"])
         snapshot = await current_agent_context().execution_snapshot(context.self_handle.invocation_id)
@@ -282,11 +293,15 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
             previous = previous.model_copy(update={"runtime_times": {
                 **previous.runtime_times, str(len(previous.items)): runtime_time,
             }})
+        if has_plan:
+            from ..plan import SessionPlan
+            previous = previous.model_copy(update={"runtime_plans": {**previous.runtime_plans,
+                str(len(previous.items)): restore(SessionPlan, runtime_plan) if runtime_plan is not None else None}})
         updated = previous.append(*response.output, origin=route)
         updated = Conversation(items=updated.items, view=updated.view, origins=updated.origins,
             pending=PendingToolRound(start=len(previous.items)) if response.tool_calls else None,
             token_anchor=restore(TokenAnchor, anchor) if anchor is not None else None,
-            runtime_times=updated.runtime_times)
+            runtime_times=updated.runtime_times, plan=updated.plan, runtime_plans=updated.runtime_plans)
         operations = [ContextOperation.set("agent.response", response.model_dump(mode="json"))]
         if options.user_events:
             operations.append(ContextOperation.set("agent.response_id", OperatorCallContext.current().occurrence_id))
@@ -307,12 +322,20 @@ def agent_workflow(*, options: AgentWorkflowOptions | None = None,
         history = conversation(context)
         if history.pending is None:
             raise ValueError("Tool results require a recorded LLM Tool round.")
-        expected = {call.call_id for call in restore(LLMResponse, state(context)["response"]).tool_calls}
+        calls = {call.call_id: call for call in restore(LLMResponse, state(context)["response"]).tool_calls}
+        expected = set(calls)
+        prepared = restore(PreparedRequest, state(context)["prepared"])
+        plan_tools = {item.name for item in prepared.tools if item.updates_plan}
         operations, seen = [], set()
         for result in results:
             if result.call_id not in expected or result.call_id in seen or result.call_id in history.pending.results:
                 raise ValueError("Every Tool result must be recorded exactly once for the current round.")
             seen.add(result.call_id)
+            if calls[result.call_id].name in plan_tools and not result.is_error:
+                from ..plan import SessionPlan
+                value = result.structured_content["plan"]
+                plan = restore(SessionPlan, value).model_dump(mode="json") if value is not None else None
+                operations.append(ContextOperation.set(("agent_conversation", "plan"), plan))
             operations.append(ContextOperation.set(("agent_conversation", "pending", "results", result.call_id),
                 result.model_dump(mode="json")))
         return tuple(operations)

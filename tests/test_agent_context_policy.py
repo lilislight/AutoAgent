@@ -1,11 +1,13 @@
 """Context projection, feedback estimates, budget selection and custom compaction."""
 
 from contextlib import asynccontextmanager
+import json
 import math
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from autoagent.agent import (
     AgentExecutionSnapshot, AgentInput, AgentModelSettings, AgentHostSettings,
@@ -27,6 +29,7 @@ from tests.test_agent_workflow import ScriptedProvider, answer, settings
 class Service:
     def __init__(self, provider, *, compaction_model=None):
         self.provider, self.compaction_model, self.definitions = provider, compaction_model, ()
+        self.model_limits = {}
         self.state = AgentExecutionSnapshot(snapshot_id="stage-1", session_id="session", invocation_id="invocation",
             epoch=1, settings_version=0, settings=settings(), bindings={"provider": "1"}, reason="start", created_at_us=0)
 
@@ -39,8 +42,12 @@ class Service:
     def history_route(self, snapshot, model):
         return None
 
+    def model_input_limit(self, snapshot, model, *, provider=None):
+        return self.model_limits.get((provider or snapshot.settings.model.provider, model))
+
     def catalog(self, snapshot):
-        return {item.name: SimpleNamespace(name=item.name, version="1", resource_id="test/tool/" + item.name)
+        return {item.name: SimpleNamespace(name=item.name, version="1", resource_id="test/tool/" + item.name,
+            value=SimpleNamespace(definition=item))
             for item in self.definitions}, ()
 
     def finalize_catalog(self, snapshot, catalog, skills):
@@ -59,6 +66,19 @@ def preparation(conversation, *, fingerprint="fixed-1"):
 
 
 class ContextHistoryTests(unittest.TestCase):
+    def test_default_budget_uses_272k_90_percent_trigger_and_30_percent_target(self):
+        """Both the default budget and a smaller model use ratios of the effective window."""
+        policy = ContextPolicy()
+        self.assertEqual((policy.context_window, policy.compact_at_ratio, policy.target_ratio), (272_000, .9, .3))
+        for maximum, window in ((None, 272_000), (1_000_000, 272_000), (128_000, 128_000)):
+            budget = policy.budget({"max_output_tokens": 4096}, model_input_limit=maximum)
+            self.assertEqual(budget.input_limit, window - 4096)
+            self.assertEqual(budget.trigger_tokens, math.floor(window * .9))
+            self.assertEqual(budget.target_tokens, math.floor(window * .3))
+        budget = policy.budget({"max_output_tokens": 20_000}, model_input_limit=128_000)
+        self.assertEqual(budget.trigger_tokens, 108_000)
+        self.assertEqual(budget.target_tokens, 38_400)
+
     def test_repeated_replacement_and_append_preserve_original_items(self):
         """Successive summaries replace visible ranges while all original records survive."""
         original = tuple(message("user" if i % 2 == 0 else "assistant", f"item-{i}") for i in range(13))
@@ -122,6 +142,50 @@ class ContextHistoryTests(unittest.TestCase):
 
 
 class ContextStrategyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_model_limit_controls_trigger_and_follows_selected_model(self):
+        """Request model overrides select their own Host metadata before evaluating compression."""
+        service = Service(ScriptedProvider())
+        service.model_limits = {("offline", "model-a"): 128_000, ("offline", "larger"): 1_000_000}
+        policy = ContextPolicy(estimate=lambda prep: TokenEstimate(input_tokens=120_000))
+        history = Conversation(items=(message("user", "Current task"),))
+        with agent_runtime_context(service):
+            small = await prepare_agent_context(history, AgentWorkflowOptions(), policy)
+            larger = await prepare_agent_context(history, AgentWorkflowOptions(llm_options={"model": "larger"}), policy)
+        self.assertTrue(small.needs_compaction)
+        self.assertFalse(larger.needs_compaction)
+        self.assertEqual(small.preparation.model_input_limit, 128_000)
+        self.assertEqual(larger.preparation.model_input_limit, 1_000_000)
+
+    async def test_reloaded_model_limit_is_checked_again_before_build(self):
+        """A catalog reduction cannot dispatch an oversized request with the same snapshot ID."""
+        service = Service(ScriptedProvider())
+        service.model_limits = {("offline", "model-a"): 8192}
+        policy = ContextPolicy(estimate=lambda prep: TokenEstimate(input_tokens=3000))
+        with agent_runtime_context(service):
+            plan = await prepare_agent_context(Conversation(items=(message("user", "Task"),)), AgentWorkflowOptions(), policy)
+            self.assertFalse(plan.needs_compaction)
+            service.model_limits["offline", "model-a"] = 2048
+            with self.assertRaises(ContextLimitExceeded):
+                await build_agent_request(plan, policy)
+        self.assertEqual(service.provider.requests, [])
+
+    async def test_compaction_batches_follow_compaction_model_window(self):
+        """A separate smaller summarizer uses its own window rather than the main model's."""
+        provider = ScriptedProvider(*(answer(f"Checkpoint {index}") for index in range(8)))
+        service = Service(provider, compaction_model="small-summary")
+        service.model_limits = {("offline", "model-a"): 8192, ("offline", "small-summary"): 2048}
+        history = Conversation(items=tuple(item for index in range(3) for item in (
+            message("user", f"Goal {index}"), message("assistant", "x" * 4000))) + (message("user", "Continue"),))
+        policy = ContextPolicy(target_tokens=400, trigger=always_compact,
+            compact=LLMHistoryCompactor(max_output_tokens=128))
+        with agent_runtime_context(service):
+            plan = await prepare_agent_context(history, AgentWorkflowOptions(), policy)
+            await compact_agent_context(plan, policy)
+        self.assertGreater(len(provider.requests), 1)
+        for request in provider.requests:
+            self.assertEqual(request.model, "small-summary")
+            self.assertLessEqual(UsagePlusCharacters()(preparation(Conversation(items=request.input))).input_tokens + 128, 2048)
+
     async def test_repeated_compaction_uses_current_summary_instead_of_original_prefix(self):
         """A second LLM summary sees S1 plus new history without reopening large original logs."""
         provider = ScriptedProvider(answer("S1 checkpoint"), answer("S2 checkpoint"))
@@ -325,6 +389,41 @@ class ContextHostContracts:
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         return "sqlite+aiosqlite:///" + str(Path(temporary.name) / "runtime.db")
+
+    async def test_json_model_windows_bound_main_and_compaction_requests(self):
+        """Host JSON metadata caps the SDK main budget and its smaller summarizer on both databases."""
+        from autoagent.host.providers import CatalogProvider
+        provider = ScriptedProvider(*(answer(f"Checkpoint {index}") for index in range(12)))
+        provider.aclose = AsyncMock()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "providers.json").write_text(json.dumps({
+                "compaction_model": {"provider": "bounded", "model": "summary"},
+                "providers": {"bounded": {"api_key": "offline-test", "models": [
+                    {"id": "small", "model_info": {"max_input_tokens": 8192}},
+                    {"id": "summary", "model_info": {"max_input_tokens": 4096}}]}}}))
+            @asynccontextmanager
+            async def lifespan(setup):
+                setup.extensions["agent"].context.set_defaults(settings(provider="bounded", model="small"))
+                yield
+            history = Conversation(items=tuple(item for index in range(6) for item in (
+                message("user", f"Task {index}"), message("assistant", "x" * 6000))))
+            with patch.object(CatalogProvider, "_make_transport", return_value=provider):
+                async with AutoAgentHost(root=root, workflows=[agent_workflow()], lifespan=lifespan,
+                        settings=HostSettings(database_url=await self.database_url()), environment={}) as host:
+                    result = await host.join(await host.execute("agent", AgentInput(message="Continue"),
+                        session_context={"agent_conversation": history.model_dump(mode="json")}))
+                    self.assertEqual(result.status, "completed", result.error)
+                    snapshot = await host.extensions["agent"].context.get_snapshot(result.invocation_id)
+                    self.assertEqual(host.extensions["agent"].context.model_input_limit(snapshot, "small"), 8192)
+            self.assertGreater(len(provider.requests), 1)
+            for request in provider.requests[:-1]:
+                self.assertEqual(request.model, "summary")
+                size = UsagePlusCharacters()(preparation(Conversation(items=request.input))).input_tokens
+                self.assertLessEqual(size + request.max_output_tokens, 4096)
+            self.assertEqual(provider.requests[-1].model, "small")
+            size = UsagePlusCharacters()(preparation(Conversation(items=provider.requests[-1].input))).input_tokens
+            self.assertLessEqual(size + provider.requests[-1].max_output_tokens, 8192)
 
     async def test_compaction_model_priority_and_persistent_view_after_restart(self):
         """Explicit compaction models override code defaults and restarted Sessions keep their compacted view."""

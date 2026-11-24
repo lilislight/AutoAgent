@@ -9,6 +9,11 @@ Use the project's Python environment and its selected AutoAgent V2 version.
 Check it with `autoagent --version`. When starting from a supplied wheel,
 install that wheel with the `cli` extra to use the project commands.
 
+When authoring from Agent App, use [live registration](live-registration.md)
+to publish into its current Host. The bundled Skills are already available;
+they do not need to be copied into `.agents/skills`. Explicit user Skills of the
+same name take precedence over the bundled guide.
+
 For an existing project, find its `auto-agent.toml` or decorated Workflow
 factories and follow the project's layout. Run CLI commands from the project
 directory or use `autoagent --project PATH`. An explicit manifest path can
@@ -60,6 +65,10 @@ name = "text-normalizer"
 [[workflows]]
 entrypoint = "workflows:normalize_workflow"
 ```
+
+For a Workflow in another source directory, a Workflow table may also contain
+`source_dir = "path/to/source"`. Relative paths resolve beside the manifest.
+Agent App's registration Tool writes the appropriate source entry automatically.
 
 An entrypoint uses `module:attribute`. The CLI uses the Workflow ID
 `normalize` and the Entry Node ID `normalize` from the returned definition.

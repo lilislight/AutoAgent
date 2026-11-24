@@ -1,3 +1,4 @@
+import { useWorkflowCatalogWatch } from './components/useWorkflowCatalogWatch';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ApiError, config, getExecutionTrace, getWorkflowGraph } from "./api";
@@ -125,7 +126,14 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
   }, [hiddenSelection, location, navigate]);
   useEffect(() => { if ((location.execution || location.workflow) && !hiddenSelection) setHiddenNotice(false); },
     [location.execution, location.workflow, hiddenSelection]);
+  const pinnedRevision = useRef(false);
+  useWorkflowCatalogWatch(active, (previous, current) => {
+    const id = location.workflow, next = id ? current.workflows[id] : null;
+    if (!executionMode && !comparing && id && next && !pinnedRevision.current && location.revision === previous.workflows[id] && next !== location.revision)
+      navigate({ ...location, revision: next, selection: null }, true);
+  });
   const select = useCallback((row: { workflow_id: string; revision_id: string }, replace = false) => {
+    pinnedRevision.current = false;
     navigate({ view: "workflows", execution: null, workflow: row.workflow_id, revision: row.revision_id, session: null, selection: null }, replace);
   }, [navigate]);
 
@@ -180,7 +188,7 @@ function BrowserWorkspace({ location, active, navigate, changeView, theme, accep
             const selection = snapshot.key === flowKey ? normalLocation.selection
               : snapshot.trace ? selections.current.get(snapshot.trace.invocation.invocation_id)?.selection ?? null : null;
             return snapshot.trace ? <ExecutionWorkspace onRunAccepted={onRunAccepted} active={active && snapshot.key === flowKey} trace={snapshot.trace} workflow={snapshot.workflow} selection={selection} onSelect={chooseObject} onOpenExecution={openFamilyMember} onRefresh={async () => { await trace.refetch({ throwOnError: true, cancelRefetch: false }); }} view={location.executionView ?? getExecutionLayout().view} onChangeView={mode => navigate({ ...location, executionView: mode })} theme={theme} /> : <>
-              <WorkflowToolbar workflow={snapshot.workflow} onRevision={revision => select({ workflow_id: snapshot.workflow.workflow_id, revision_id: revision })} onDefinition={() => chooseObject({ kind: "workflow", id: snapshot.workflow.workflow_revision_id })} onCompare={startComparison} />
+              <WorkflowToolbar workflow={snapshot.workflow} onRevision={revision => { select({ workflow_id: snapshot.workflow.workflow_id, revision_id: revision }); pinnedRevision.current = true; }} onDefinition={() => chooseObject({ kind: "workflow", id: snapshot.workflow.workflow_revision_id })} onCompare={startComparison} />
               <FlowLoadingSurface><Suspense fallback={null}><WorkflowGraph workflow={snapshot.workflow} selection={selection} onSelect={chooseObject} theme={theme} focusRequest={workflowFocus} /></Suspense>
                 <InspectorPresence open={Boolean(selection)}>{selection ? <Inspector workflow={snapshot.workflow} selection={selection} onClose={closeInspector} onRunAccepted={onRunAccepted} onEntry={id => { chooseObject({ kind: "node", id }); setWorkflowFocus(value => value + 1); }} /> : null}</InspectorPresence></FlowLoadingSurface>
             </>;

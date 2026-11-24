@@ -527,3 +527,28 @@
 @media(prefers-reduced-motion:reduce) { .agent-composer-popover { animation:none; }.agent-composer-toolbar .agent-cancel-action { transition:none; } }
 
 .agent-app .agent-composer-toolbar .agent-send:hover:not(:disabled) { background:color-mix(in srgb,var(--accent) 88%,var(--text)); color:var(--on-accent); }
+
+/* Read-only Session plan, paired with the existing Workspace context row. */
+.agent-composer-context { display:flex; align-items:center; gap:12px; min-width:0; min-height:27px; }
+.agent-composer-context .agent-workspace-context { flex:1; overflow:hidden; }
+.agent-app .agent-plan-trigger { flex:none; display:inline-flex; align-items:center; gap:5px; min-height:24px; padding:2px 6px; border:0; border-radius:5px; color:var(--muted); font-size:11px; line-height:18px; }
+.agent-app .agent-plan-trigger:hover { color:var(--text); background:var(--surface-muted); }
+.agent-plan-trigger svg { width:13px; height:13px; flex:none; }
+.agent-plan-trigger svg:last-child { width:11px; }
+.agent-plan-trigger[aria-expanded=true] svg:last-child { transform:rotate(180deg); }
+.agent-plan-count { font-variant-numeric:tabular-nums; }
+.agent-plan-placeholder { width:88px; height:20px; border-radius:5px; }
+.agent-popover.agent-plan-panel { display:flex; flex-direction:column; width:min(360px,calc(100vw - 24px)); overflow:hidden; }
+.agent-plan-panel .agent-popover-heading,.agent-plan-panel .agent-sheet-heading { flex:none; }
+.agent-plan-details { min-height:0; overflow:auto; overscroll-behavior:contain; }
+.agent-plan-summary { margin:0 0 12px; color:var(--muted); font-size:12px; }
+.agent-plan-steps { display:grid; gap:12px; list-style:none; padding:0; margin:0; }
+.agent-plan-steps li { display:grid; grid-template-columns:18px minmax(0,1fr); align-items:start; gap:9px; font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
+.agent-plan-status { display:grid; place-items:center; width:18px; height:20px; color:var(--muted); }
+.agent-plan-status svg { width:16px; height:16px; }
+.agent-plan-dot { width:9px; height:9px; border:1.5px solid currentColor; border-radius:50%; }
+.agent-plan-steps li[data-state=in_progress] { font-weight:600; }
+.agent-plan-steps li[data-state=in_progress] .agent-plan-status { color:var(--accent); }
+.agent-plan-steps li[data-state=in_progress] .agent-plan-dot { background:currentColor; border-color:currentColor; }
+.agent-plan-steps li[data-state=completed] { color:var(--muted); }
+.agent-plan-explanation { padding-top:12px; margin:14px 0 0; border-top:1px solid var(--line); color:var(--muted); font-size:12px; line-height:1.55; overflow-wrap:anywhere; }

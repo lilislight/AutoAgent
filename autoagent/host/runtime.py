@@ -89,6 +89,7 @@ class Runtime:
         self.resource_scopes = tuple(resource_scopes)
         self.journal = InMemoryUserEventJournal()
         self.definitions = {}
+        self.workflow_definitions = {}
         self.revisions = {}
         self.workflow_irs = {}
         self.workflow_ids = {}
@@ -162,14 +163,14 @@ class Runtime:
                     ):
                         pending.append(node.executable.workflow)
                     elif isinstance(node.executable, Operator):
-                        self._definition(node.executable)
+                        self.workflow_definitions[current.workflow_revision_id, node.id] = OperatorDefinition.from_operator(node.executable)
         await self.extensions.call("prepare", closure, self.setup)
         for capability_id, resolver in self.setup.capability_resolvers.items():
             self.app.register_capability_resolver(capability_id, resolver)
         for registration in self.setup.operators:
             self._definition(registration.operator)
         # Persistence is complete before any definition becomes executable.
-        for definition in self.definitions.values():
+        for definition in (*self.definitions.values(), *self.workflow_definitions.values()):
             await self.persistence.register_operator(definition)
         for revision, ir in closure.items():
             snapshot = WorkflowDefinitionSnapshot.from_workflow_ir(ir)
@@ -197,6 +198,51 @@ class Runtime:
                 default=registration.default,
             )
 
+    def stage_workflow(self, workflow):
+        """Compile and validate a complete dynamic closure without making it executable."""
+        from autoagent.core.workflow import Capability
+        ir = WorkflowCompiler().compile_or_raise(workflow)
+        closure, definitions, capabilities = {}, {}, []
+        pending = [ir]
+        while pending:
+            current = pending.pop()
+            if current.workflow_revision_id in closure:
+                continue
+            closure[current.workflow_revision_id] = current
+            for node in current.nodes:
+                if isinstance(node.executable, CommandIR) and node.executable.workflow is not None:
+                    pending.append(node.executable.workflow)
+                elif isinstance(node.executable, Operator):
+                    if getattr(node.executable.handler, "__runtime_extension__", None) is not None:
+                        raise HostError("Dynamic registration supports ordinary Workflows using existing Host resources; runtime extension lifespans require startup registration.")
+                    definitions[current.workflow_revision_id, node.id] = OperatorDefinition.from_operator(node.executable)
+                elif isinstance(node.executable, Capability):
+                    capabilities.append(node.executable)
+                    if not self.app.operator_registry.for_capability(node.executable.id):
+                        raise HostError(f"No enabled Operator is registered for Capability {node.executable.id!r}.")
+        self.app.operator_registry.validate_capabilities(tuple(capabilities))
+        return ir, closure, definitions
+
+    async def persist_registration(self, closure, definitions):
+        for definition in definitions.values():
+            await self.persistence.register_operator(definition)
+        for ir in closure.values():
+            await self.persistence.register_workflow(WorkflowDefinitionSnapshot.from_workflow_ir(ir))
+
+    async def publish_registration(self, workflow, closure, definitions):
+        prior_irs, prior_definitions, prior_revisions = dict(self.workflow_irs), dict(self.workflow_definitions), dict(self.revisions)
+        self.workflow_definitions.update(definitions)
+        self.workflow_irs.update(closure)
+        try:
+            await self.app.aregister_workflow(workflow)
+        except BaseException:
+            self.workflow_irs, self.workflow_definitions, self.revisions = prior_irs, prior_definitions, prior_revisions
+            raise
+        # Admission must not see a new Revision until Core can execute it.
+        self.revisions.update({revision: WorkflowDefinitionSnapshot.from_workflow_ir(ir) for revision, ir in closure.items()})
+        for revision, ir in closure.items():
+            self.workflow_ids[ir.workflow_id] = revision
+
     def _definition(self, operator):
         definition = OperatorDefinition.from_operator(operator)
         previous = self.definitions.get(operator.id)
@@ -211,6 +257,14 @@ class Runtime:
             operator_id = event.payload.operator_id
             if not operator_id.startswith("system_command:"):
                 definition = self.definitions.get(operator_id)
+                if event.event_name == "operator_call.started":
+                    state = self.repository.state(event.session_id)
+                    invocation = state.invocation
+                    occurrence = invocation.scheduler.occurrences.get(event.payload.occurrence_id) if invocation else None
+                    if occurrence is not None:
+                        direct = self.workflow_definitions.get((invocation.workflow_revision_id, occurrence.node_id))
+                        if direct is not None and direct.operator_id == operator_id:
+                            definition = direct
                 if definition is None:
                     raise HostError(
                         f"Operator has no registered historical definition: {operator_id}"
@@ -311,11 +365,12 @@ class Runtime:
             required_calls={(inv.id,call.id) for checkpoint in graph.sessions
                 if (inv:=checkpoint.state.invocation) is not None and inv.status in ('created','running','waiting','settling')
                 for call in inv.scheduler.operator_calls.values() if call.status in ('running','lost')}
+            implementations = {definition.definition_id for definition in
+                (*self.definitions.values(), *self.workflow_definitions.values())}
             for historical in bundle["operator_bindings"]:
                 if (historical['invocation_id'],historical['call_id']) not in required_calls:
                     continue
-                current = self.definitions.get(historical["operator_id"])
-                if current is None or current.definition_id != historical["definition_id"]:
+                if historical["definition_id"] not in implementations:
                     raise HostError(f"Required Operator implementation is unavailable: {historical['operator_id']}")
             kept = {item.state.invocation.id for item in graph.sessions if item.state.invocation}
             for iid, sequence in bundle["user_frontiers"].items():

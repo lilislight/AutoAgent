@@ -116,6 +116,12 @@ class Residency:
             self.budget = sample.budget_bytes
         return sample
 
+    def _reclamation_jobs(self, sid):
+        # Admission already owns sid's coordination lock. Its queued snapshot
+        # needs that lock too, so only join reclamation of other Sessions.
+        busy = {item.job for key, item in self.entries.items() if key == sid or item.users}
+        return tuple(job for job in self.jobs if job not in busy)
+
     async def reserve(self, sid):
         if self.fault is not None:
             raise HostCapacityError('Host residency persistence failed; admission is stopped.') from self.fault
@@ -126,7 +132,7 @@ class Residency:
                 or self._usage() >= self.budget * self.settings.memory_high_ratio
                 or shared.pressure_ratio() >= self.settings.memory_high_ratio):
             await self.cycle(activate=False, force_slot=True, exclude=sid)
-            pending = tuple(self.jobs)
+            pending = self._reclamation_jobs(sid)
             if pending:
                 await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
         shared = self._resources()
@@ -143,8 +149,9 @@ class Residency:
         shared = self._resources()
         if self._usage() >= self.budget * self.settings.memory_high_ratio or shared.pressure_ratio() >= self.settings.memory_high_ratio:
             await self.cycle(activate=False, exclude=sid)
-            if self.jobs:
-                await asyncio.shield(asyncio.gather(*tuple(self.jobs), return_exceptions=True))
+            pending = self._reclamation_jobs(sid)
+            if pending:
+                await asyncio.shield(asyncio.gather(*pending, return_exceptions=True))
         shared = self._resources()
         if shared.pressure_ratio() >= self.settings.memory_critical_ratio:
             raise HostCapacityError('Shared system or Cgroup memory headroom is exhausted.')

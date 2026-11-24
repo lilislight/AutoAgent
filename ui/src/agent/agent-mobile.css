@@ -143,3 +143,12 @@
 .agent-effort-buttons button[aria-pressed=true] { background:var(--selected); color:var(--text); box-shadow:inset 0 0 0 1px var(--accent); }
 @keyframes agent-sheet-arrive { from { transform:translateY(20px); opacity:.7; } to { transform:translateY(0); opacity:1; } }
 @media(prefers-reduced-motion:reduce) { .agent-sheet-content { animation:none; } }
+
+@media (max-width: 760px), (pointer:coarse) {
+  .agent-app .agent-plan-trigger { min-height:44px; padding:5px 8px; font-size:12px; touch-action:manipulation; }
+  .agent-sheet.agent-plan-panel .agent-sheet-content { display:flex; flex-direction:column; overflow:hidden; }
+  .agent-sheet.agent-plan-panel .agent-plan-summary { margin:0 8px 16px; }
+  .agent-sheet.agent-plan-panel .agent-plan-steps { gap:16px; padding:0 8px 8px; }
+  .agent-sheet.agent-plan-panel .agent-plan-steps li { font-size:15px; gap:10px; }
+  .agent-sheet.agent-plan-panel .agent-plan-explanation { margin:14px 8px 0; font-size:13px; }
+}

@@ -140,3 +140,6 @@ __all__ += ["AgentResources"]
 from .files import FileTools
 from .execution import CommandTools
 __all__ += ["FileTools", "CommandTools"]
+
+from .plan import PlanStep, SessionPlan, PlanTools
+__all__ += ["PlanStep", "SessionPlan", "PlanTools"]

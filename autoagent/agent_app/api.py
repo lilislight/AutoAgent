@@ -300,6 +300,10 @@ def agent_router(application, settings, query, *, user_events):
     async def execution(invocation_id: str = Query(min_length=1, max_length=4096)):
         return await agent_query(application.execution(invocation_id))
 
+    @router.get('/agent/plan')
+    async def session_plan(session_id: str = Query(min_length=1, max_length=512)):
+        return await agent_query(application.plan(session_id))
+
     @router.get('/agent/usage')
     async def usage(session_id: str = Query(min_length=1, max_length=512),
                     invocation_id: str | None = Query(None, min_length=1, max_length=4096)):

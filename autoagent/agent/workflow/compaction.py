@@ -8,7 +8,7 @@ import json
 from ..context import current_agent_context
 from ..models import LLMMessage, LLMProviderItem, LLMReasoning, LLMRequest, LLMResponse, LLMToolCall, LLMToolResult, TextContent
 from .history import Conversation
-from .policy import CompactionInput, CompactionResult, ContextLimitExceeded
+from .policy import CompactionInput, CompactionResult, ContextLimitExceeded, effective_context_window
 
 
 DEFAULT_COMPACTION_PROMPT = """You are performing a CONTEXT CHECKPOINT COMPACTION. Create a handoff summary
@@ -33,7 +33,8 @@ Agent-specific requirements:
   Keep references needed to inspect, wait for, or communicate with a subtask. Never invent or paraphrase identifiers.
 - Retain unresolved questions, approval decisions and their scope, outstanding Tool work, and live process handles
   or output cursors needed to continue. A past approval does not authorize unrelated future actions.
-- Omit automatically injected runtime clock records; when enabled, fresh server time is supplied separately.
+- Omit automatically injected runtime clock records; fresh server time is supplied separately.
+- Omit injected runtime plan snapshots; the current Session plan is stored and supplied separately.
   Preserve task-relevant dates, deadlines, schedules, and timestamps from the user or Tool results.
 
 Use short sections: Goals; Constraints and preferences; Progress and blockers; Decisions; Next steps;
@@ -163,13 +164,15 @@ class LLMHistoryCompactor:
         model = self.model or context.preparation.compaction_model or context.preparation.settings.get("model")
         if model is None:
             raise ValueError("Configure a compaction model or a main model.")
-        from .context import request_settings
+        from .context import request_settings, model_input_limit
         settings = request_settings(snapshot, {"model": model, "streaming": False,
             "max_output_tokens": self.max_output_tokens}, role="compaction")
         if self.model is None and context.preparation.compaction_provider is not None:
             settings["routing"]["compaction_provider"] = context.preparation.compaction_provider
             settings["reasoning_effort"] = context.preparation.compaction_reasoning_effort
-        window = self.context_window or context.policy.context_window
+        summary_limit = model_input_limit(snapshot, model, provider=settings["routing"].get("compaction_provider")
+            or settings["routing"].get("provider"))
+        window = effective_context_window(self.context_window or context.policy.context_window, summary_limit)
         summary, index = "", 0
         while index < len(selected):
             accepted = []
@@ -181,7 +184,8 @@ class LLMHistoryCompactor:
                 # Measure the compaction request itself, including its instructions.
                 preparation = context.preparation.model_copy(update={
                     "fixed_input": (), "tools": (), "settings": settings,
-                    "inject_current_time": False,
+                    "model_input_limit": summary_limit,
+                    "inject_current_time": False, "inject_plan": False,
                     "fingerprint": "compaction", "conversation": Conversation(items=request.input)})
                 estimate = await context.policy.estimate_input(preparation)
                 if window is not None and estimate.input_tokens + self.max_output_tokens > window:

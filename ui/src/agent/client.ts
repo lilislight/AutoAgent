@@ -1,3 +1,4 @@
+import type { TaskPlan } from './types.js';
 import { newId } from '../ids.js';
 import { config, request } from '../http.js';
 import type { ActionInput, ActionSpec, AgentCatalog, AgentEvent, AgentExecution, AgentResources, AgentSession, AgentTurnIndexItem, AgentTurnPage, AgentWorkspaceInfo, Controls, MessageQueue, Operation, Page, QueuedMessage, SessionSettings, SessionSubagent, SettingsRecord, Usage } from './types.js';
@@ -40,6 +41,7 @@ export const agentClient = {
   settings: (sid: string, signal: AbortSignal, workspace?: string | null) => request<SettingsRecord>(`/agent/settings?${new URLSearchParams({ session_id: sid, ...(workspace ? { workspace_id: workspace } : workspace === null ? { unbound: 'true' } : {}) })}`, signal),
   configure: (sid: string, settings: SessionSettings, version: number, signal: AbortSignal) => request<SettingsRecord>('/agent/settings', signal, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, settings, expected_version: version }) }),
   resources: (revision: string, session: string, signal: AbortSignal, workspace?: string | null) => request<AgentResources>(`/agent/resources?${new URLSearchParams({ revision_id: revision, session_id: session, ...(workspace ? { workspace_id: workspace } : workspace === null ? { unbound: 'true' } : {}) })}`, signal),
+  plan: (sid: string, signal: AbortSignal) => request<{ plan: TaskPlan | null }>(`/agent/plan?${new URLSearchParams({ session_id: sid })}`, signal),
   usage: (sid: string, iid: string | null, signal: AbortSignal) => request<{ session: Usage; invocation: Usage | null }>(`/agent/usage?${new URLSearchParams({ session_id: sid, ...(iid ? { invocation_id: iid } : {}) })}`, signal),
   async history(iid: string, signal: AbortSignal): Promise<AgentEvent[]> {
     const items: AgentEvent[] = [];

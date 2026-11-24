@@ -1,3 +1,4 @@
+import { SessionPlan } from './SessionPlan';
 import { BusyLabel } from '../components/LoadingState';
 import { newId } from '../ids';
 import { ApiError, config } from '../http';
@@ -274,7 +275,8 @@ export default function AgentSession({ session, existing, title, catalog, agent,
     </>} footer={<div className="agent-composer-area"><MessageQueue items={queue.data?.items ?? []} pending={queuePending} canSendNow={canSignal && !child} onAction={(item, action) => void queueAction(item, action)} />
       {queue.error ? <p className="agent-error-text" role="alert">Could not refresh queued messages. <button onClick={() => void queue.refetch()}>Retry</button></p> : null}
       {error ? <p className="agent-error-text" role="alert">{error}</p> : null}{controlOperation.error && pendingControl ? <p className="agent-error-text" role="alert">Could not refresh execution status.<button type="button" onClick={() => void controlOperation.refetch()}>Retry</button></p> : null}
-        <WorkspacePicker active={active} mobile={mobile} value={workspace} items={workspaces} loading={workspacesLoading} error={workspaceError} onRetry={onRetryWorkspaces} locked={existing} disabled={busy || !settings.data} onChange={onWorkspaceChange} />
+        <div className="agent-composer-context"><WorkspacePicker active={active} mobile={mobile} value={workspace} items={workspaces} loading={workspacesLoading} error={workspaceError} onRetry={onRetryWorkspaces} locked={existing} disabled={busy || !settings.data} onChange={onWorkspaceChange} />
+          <SessionPlan session={session} active={active} existing={existing} mobile={mobile} /></div>
         <AgentComposer active={active} mobile={mobile} contextUsage={context} contextLoading={loadingHistory} primary={primary} onControl={action => void control(action)} session={session} draft={draft} onDraft={setDraft} inputRef={inputRef} busy={busy} running={running || paused} disabled={busy || child} canSend={canSend} canSendNow={canSignal && !child && !preparingImages} onSendNow={running ? () => void send(true) : undefined} onSend={() => void send()} settings={saved?.settings} providerOptions={catalog.provider_options ?? []} onSettingsChange={changeSettings} canCancel={!child && !!controls?.actions.cancel.available && pending !== 'cancel' && !busy} caption={caption}
           images={images} preparingImages={preparingImages} onPickImages={files => void pickImages(files)}
           onRemoveImage={id => { setImages(current => current.filter(image => image.id !== id)); setError(''); }} />

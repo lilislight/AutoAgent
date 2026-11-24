@@ -10,7 +10,7 @@ import sys
 import threading
 import tomllib
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import dotenv_values
@@ -113,6 +113,9 @@ class Project:
     entrypoints: tuple[str, ...] | None = None
     lifespan_entrypoint: str | None = None
     evaluation_entrypoints: tuple[str, ...] = ()
+    source_dirs: tuple[Path | None, ...] = ()
+    manifest_path: Path | None = None
+    origins: dict = field(default_factory=dict, init=False, compare=False, repr=False)
 
     @classmethod
     def find(cls, path="."):
@@ -153,16 +156,25 @@ class Project:
         }:
             raise ProjectError("Invalid project metadata.")
         entries = raw.get("workflows")
+        source_dirs = ()
         if entries is not None:
             if not isinstance(entries, list):
                 raise ProjectError("workflows must be an array.")
             if any(
-                not isinstance(item, dict) or set(item) != {"entrypoint"}
+                not isinstance(item, dict) or "entrypoint" not in item or set(item) - {"entrypoint", "source_dir"}
                 for item in entries
             ):
-                raise ProjectError("Each Workflow entry requires only entrypoint.")
+                raise ProjectError("Each Workflow entry requires entrypoint and optional source_dir.")
+            roots = []
+            for item in entries:
+                source = item.get("source_dir")
+                if source is not None and (not isinstance(source, str) or not source.strip()):
+                    raise ProjectError("source_dir must be a nonempty path string.")
+                path = Path(source).expanduser() if source is not None else None
+                roots.append((path if path.is_absolute() else root / path).resolve() if path is not None else None)
+            source_dirs = tuple(roots)
             entries = tuple(validate_entrypoint(item["entrypoint"]) for item in entries)
-            if len(entries) != len(set(entries)):
+            if len(entries) != len(set(zip((str(path or root) for path in source_dirs), entries))):
                 raise ProjectError("Duplicate Workflow entrypoints.")
         evaluations = raw.get('evaluations', [])
         if not isinstance(evaluations, list) or any(not isinstance(item, dict) or set(item) != {'entrypoint'} for item in evaluations):
@@ -176,14 +188,16 @@ class Project:
         name = metadata.get("name", root.name)
         if not isinstance(name, str) or not name.strip():
             raise ProjectError("Project name cannot be empty.")
-        return cls(root, name, entries, lifespan, evaluations)
+        return cls(root, name, entries, lifespan, evaluations, source_dirs, manifest)
 
     def load(self, environment=None):
         with _IMPORT_LOCK, import_scope(self.root):
             if self.entrypoints is not None:
-                definitions = [
-                    resolve_entrypoint(entry, self.root) for entry in self.entrypoints
-                ]
+                from .source_loading import resolve_source_entrypoint
+                roots = self.source_dirs or (None,) * len(self.entrypoints)
+                definitions = [(resolve_source_entrypoint(entry, source) if source is not None else
+                    resolve_entrypoint(entry, self.root), source or self.root, entry)
+                    for entry, source in zip(self.entrypoints, roots)]
             else:
                 definitions = []
                 for path in source_files(self.root):
@@ -191,14 +205,13 @@ class Project:
                         continue
                     module_name = module_for(path, self.root)
                     module = import_project_module(module_name, self.root)
-                    definitions.extend(
-                        value
+                    definitions.extend((value, self.root, module_name + ":" + value.__name__)
                         for value in vars(module).values()
                         if getattr(value, "__autoagent_workflow__", False)
-                        and getattr(value, "__module__", None) == module.__name__
-                    )
+                        and getattr(value, "__module__", None) == module.__name__)
             seen, workflows = set(), []
-            for value in definitions:
+            self.origins.clear()
+            for value, source, entry in definitions:
                 if id(value) in seen:
                     continue
                 seen.add(id(value))
@@ -219,6 +232,17 @@ class Project:
                 if any(existing.id == built.id for existing in workflows):
                     raise ProjectError(f"Duplicate Workflow id: {built.id}")
                 workflows.append(built)
+                self.origins[built.id] = (source, entry)
+                pending, nested_seen = [built], set()
+                while pending:
+                    current = pending.pop()
+                    if id(current) in nested_seen:
+                        continue
+                    nested_seen.add(id(current))
+                    self.origins.setdefault(current.id, (source, entry))
+                    pending.extend(child for node in current.nodes
+                        if isinstance((child := getattr(node.executable, "workflow", None)), Workflow))
+                    pending.extend(child.workflow for child in current.sub_workflows)
             lifespan = (
                 resolve_entrypoint(self.lifespan_entrypoint, self.root)
                 if self.lifespan_entrypoint

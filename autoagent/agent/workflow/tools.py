@@ -40,6 +40,7 @@ async def branch_tools(value):
         raise ValueError("Model response contains duplicate Tool call IDs.")
     bindings = {item.name: item for item in value.prepared.tools}
     allow, ask, questions, waits, immediate, decisions = [], [], [], [], [], []
+    plan_seen = False
     for call in calls:
         if value.response.finish_reason == "length":
             immediate.append(error_result(call, "truncated_tool_call", "Model output was truncated; Tool arguments cannot be trusted."))
@@ -47,6 +48,11 @@ async def branch_tools(value):
         if call.name not in bindings:
             immediate.append(error_result(call, "tool_not_advertised", "The Tool was not advertised in this model request."))
             continue
+        if bindings[call.name].updates_plan:
+            if plan_seen:
+                immediate.append(error_result(call, "duplicate_plan_update", "Submit only one plan update per response."))
+                continue
+            plan_seen = True
         task = ToolTask(request_id=value.prepared.request_id, call=call, binding=bindings[call.name])
         catalog, _ = workflow_catalog(service, snapshot)
         error = binding_error(service, snapshot, task, catalog=catalog)

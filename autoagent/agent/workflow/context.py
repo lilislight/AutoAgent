@@ -46,6 +46,12 @@ def message(role, text):
     return LLMMessage(role=role, content=(TextContent(text=text),))
 
 
+def model_input_limit(snapshot, model, *, provider=None):
+    """Custom SDK runtimes may omit model metadata; Host-backed runtimes supply it."""
+    resolver = getattr(current_agent_context(), "model_input_limit", None)
+    return resolver(snapshot, model, provider=provider) if resolver is not None else None
+
+
 def request_fingerprint(fixed_input, tools, settings, snapshot, replay_target, *, inject_current_time=False):
     fields = {key: settings.get(key) for key in ("model", "provider_options", "output_options", "reasoning_effort")}
     value = dict(projection_version=PROJECTION_VERSION, fixed=[item.model_dump(mode="json") for item in fixed_input],
@@ -76,8 +82,10 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
             definitions.append(entry.value.definition)
         elif name in advertised and access.rules.get(name, access.default) != "deny":
             definitions.append(advertised[name])
+    from ..plan import is_plan_tool
     bindings = tuple(ToolBinding(name=item.name, resource_id=catalog[item.name].resource_id, version=catalog[item.name].version,
-        definition_hash=definition_hash(item), kind=tool_kind(catalog[item.name])) for item in definitions)
+        definition_hash=definition_hash(item), kind=tool_kind(catalog[item.name]),
+        updates_plan=is_plan_tool(catalog[item.name].value)) for item in definitions)
     fixed = []
     if options.instructions.strip():
         fixed.append(message("system", options.instructions))
@@ -95,12 +103,14 @@ async def prepare_agent_context(conversation: Conversation, options: AgentWorkfl
         compaction_model=getattr(service, "compaction_model", None), replay_target=target,
         compaction_provider=getattr(service, "compaction_provider", None),
         compaction_reasoning_effort=getattr(service, "compaction_reasoning_effort", None),
+        model_input_limit=model_input_limit(snapshot, settings.get("model")),
         inject_current_time=options.inject_current_time,
+        inject_plan=conversation.plan is not None or bool(conversation.runtime_plans) or any(item.updates_plan for item in bindings),
         fingerprint=request_fingerprint(fixed, definitions, settings, snapshot, target,
             inject_current_time=options.inject_current_time))
     validate_tool_history(conversation.visible)
     estimate = await policy.estimate_input(preparation)
-    budget = policy.budget(settings)
+    budget = policy.budget(settings, model_input_limit=preparation.model_input_limit)
     evaluation = ContextEvaluation(preparation, estimate, budget)
     decision = policy.trigger(evaluation) if policy.trigger in (over_context_limit, always_compact) else await call_policy(policy.trigger, evaluation)
     if type(decision) is not bool:
@@ -113,10 +123,11 @@ async def refresh_preparation(preparation: ContextPreparation) -> ContextPrepara
     """Adopt an explicit resumed stage without changing the advertised resources."""
     snapshot = await current_agent_context().snapshot()
     if snapshot.snapshot_id == preparation.snapshot_id:
-        return preparation
+        return preparation.model_copy(update={"model_input_limit": model_input_limit(snapshot, preparation.settings.get("model"))})
     settings = request_settings(snapshot, preparation.generation_options, role="agent", require_model=False)
     target = current_agent_context().history_route(snapshot, settings.get("model"))
     return preparation.model_copy(update={"settings": settings, "snapshot_id": snapshot.snapshot_id,
+        "model_input_limit": model_input_limit(snapshot, settings.get("model")),
         "compaction_model": getattr(current_agent_context(), "compaction_model", None),
         "replay_target": target,
         "fingerprint": request_fingerprint(preparation.fixed_input, preparation.tools, settings, snapshot, target,
@@ -128,7 +139,7 @@ async def compact_agent_context(plan: ContextPlan, policy: ContextPolicy):
     preparation = await refresh_preparation(plan.preparation)
     estimate_before = await policy.estimate_input(preparation)
     value = await call_policy(policy.compact, CompactionInput(preparation, policy,
-        policy.budget(preparation.settings), estimate_before))
+        policy.budget(preparation.settings, model_input_limit=preparation.model_input_limit), estimate_before))
     if not isinstance(value, CompactionResult):
         raise TypeError("Context compactor must return CompactionResult.")
     if not isinstance(value.view, ContextView):
@@ -139,7 +150,8 @@ async def compact_agent_context(plan: ContextPlan, policy: ContextPolicy):
         raise ValueError("A changed Context view must advance its generation.")
     conversation = Conversation(items=previous.items, view=view, origins=previous.origins,
         token_anchor=previous.token_anchor if view == previous.view else None,
-        runtime_times=previous.runtime_times if view == previous.view else {})
+        runtime_times=previous.runtime_times if view == previous.view else {}, plan=previous.plan,
+        runtime_plans=previous.runtime_plans if view == previous.view else {})
     validate_tool_history(conversation.visible)
     updated = preparation.model_copy(update={"conversation": conversation})
     estimate = await policy.estimate_input(updated)
@@ -150,7 +162,7 @@ async def compact_agent_context(plan: ContextPlan, policy: ContextPolicy):
 async def build_agent_request(plan: ContextPlan, policy: ContextPolicy) -> PreparedRequest:
     """Assemble only the prepared sources; do not reread dynamic resource catalogs."""
     preparation = await refresh_preparation(plan.preparation)
-    budget = policy.budget(preparation.settings)
+    budget = policy.budget(preparation.settings, model_input_limit=preparation.model_input_limit)
     estimate = await policy.estimate_input(preparation)
     if budget.input_limit is not None and estimate.input_tokens > budget.input_limit:
         raise ContextLimitExceeded(f"Estimated input {estimate.input_tokens} exceeds available Context {budget.input_limit}.")
@@ -162,10 +174,13 @@ async def build_agent_request(plan: ContextPlan, policy: ContextPolicy) -> Prepa
         from .runtime_context import append_time, TIME_KEY
         request = append_time(request, preparation.replay_target)
         runtime_time = request.routing[TIME_KEY]
+    if preparation.inject_plan:
+        from .runtime_context import append_plan
+        request = append_plan(request, preparation.conversation.plan, preparation.replay_target)
     return PreparedRequest(request=request, tools=preparation.bindings, view=preparation.conversation.view,
         fingerprint=preparation.fingerprint, source_count=len(preparation.conversation.items),
         base_generation=plan.base_generation, fixed_input=preparation.fixed_input, replay_target=preparation.replay_target,
-        estimated_input_tokens=estimate.input_tokens, runtime_time=runtime_time)
+        estimated_input_tokens=estimate.input_tokens, runtime_time=runtime_time, inject_plan=preparation.inject_plan)
 
 
 class CompactionReducer:

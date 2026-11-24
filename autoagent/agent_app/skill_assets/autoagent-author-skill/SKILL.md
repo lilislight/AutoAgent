@@ -1,6 +1,6 @@
 ---
 name: autoagent-author-skill
-description: Author AutoAgent V2 Workflows and their business Evaluation Suites. Use for Core graphs, typed Operators, Context, waits and streaming, Agent SDK capabilities and Agent Workflows, or integrating a Workflow project through Host, CLI, and Server.
+description: Author AutoAgent V2 Workflows and business Evaluation Suites. Use for typed graphs, native commands, Agent SDK integration, and registering Workspace code into the current running Host from Agent App.
 ---
 
 # Author AutoAgent Workflows
@@ -26,6 +26,8 @@ importable and use the project's existing registration and dependency layout.
 5. Run static checks and exercise the affected paths. Use a business Eval
    to preserve required outcomes, routes, and intermediate invariants.
    Validate external effects with isolated fixtures when they matter.
+   In Agent App, register the current source with `register_workflow` before
+   running it through the owning Server. Source edits require registration again.
 6. Report the Workflow and Entry IDs, commands run, observed outcomes,
    and any behavior the available fixtures could not verify.
 
@@ -34,6 +36,7 @@ importable and use the project's existing registration and dependency layout.
 | Task | Reference |
 | --- | --- |
 | Find or create project registration and choose public imports | [Project setup](references/project.md) |
+| Create or update a Workflow inside Agent App and publish it to the current Host | [Live registration](references/live-registration.md) |
 | Define a graph, typed Operator, Hook, Context change, Map, or loop | [Workflow graph and data contracts](references/workflow.md) |
 | Add Wait, Timer, Select, Child coordination, or execution policies | [Native interaction and recovery](references/interaction-recovery.md) |
 | Reduce an Operator stream or expose business notifications | [Streaming Operators and User Events](references/streaming-user-events.md) |

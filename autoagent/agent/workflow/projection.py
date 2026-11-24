@@ -104,6 +104,9 @@ def project_history(conversation, target, *, start=0):
             if (timestamp := conversation.runtime_times.get(str(index + 1))) is not None:
                 from .runtime_context import time_message
                 result.append(time_message(timestamp, target))
+            if str(index + 1) in conversation.runtime_plans:
+                from .runtime_context import plan_message
+                result.append(plan_message(conversation.runtime_plans[str(index + 1)], target))
     return tuple(result)
 
 

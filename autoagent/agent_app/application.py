@@ -343,6 +343,27 @@ class AgentApplication:
         return dict(current=family['current'], root=root, ancestors=family['ancestors'], children=children.items,
             children_truncated=children.next_cursor is not None, controls=controls, snapshot=snapshot)
 
+    async def plan(self, session_id):
+        """Read just the durable plan subtree, including an unstarted Fork's cut."""
+        info = await self.workspace_session(session_id, allow_new=True)
+        if info is None:
+            return {"plan": None}
+        if not info.get("runtime_started", True):
+            fork = await self.forks.info(session_id)
+            invocation_id, sequence = fork["fork_source_invocation_id"], fork["fork_source_sequence"]
+        else:
+            invocation_id, sequence = info["latest_invocation_id"], info["durable_sequence"]
+        if not invocation_id or not sequence:
+            return {"plan": None}
+        value = await self.host.load_execution_context(invocation_id, sequence=sequence,
+            scope="session", pointer="/agent_conversation/plan")
+        if not value["available"]:
+            return {"plan": None}
+        from autoagent.agent.plan import SessionPlan
+        from autoagent.agent.context import restore
+        plan = restore(SessionPlan, value["value"]) if value["value"] is not None else None
+        return {"plan": plan.model_dump(mode="json") if plan else None}
+
     async def usage(self, session_id, invocation_id=None):
         await self.workspace_session(session_id, allow_new=True)
         if invocation_id is not None:

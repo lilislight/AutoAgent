@@ -22,6 +22,7 @@ evaluation = [
   "aiosqlite>=0.22,<1",
   "asyncpg>=0.31,<1",
   "python-dotenv>=1.1,<2",
+  "tomlkit>=0.13,<1",
 ]
 cli = [
   "httpx>=0.28,<1",
@@ -29,6 +30,7 @@ cli = [
   "aiosqlite>=0.22,<1",
   "asyncpg>=0.31,<1",
   "python-dotenv>=1.1,<2",
+  "tomlkit>=0.13,<1",
 ]
 skills = [
   "PyYAML>=6,<7",
@@ -57,12 +59,20 @@ server = [
   "aiosqlite>=0.22,<1",
   "asyncpg>=0.31,<1",
   "python-dotenv>=1.1,<2",
+  "tomlkit>=0.13,<1",
+  "httpx>=0.28,<1",
+  "PyYAML>=6,<7",
+  "pathspec>=0.12.1,<1",
+  "regex>=2024.11.6",
+  "jsonschema>=4.23,<5",
+  "openai>=2.53,<3",
 ]
 host = [
   "sqlalchemy[asyncio]>=2.0.54,<2.1",
   "aiosqlite>=0.22,<1",
   "asyncpg>=0.31,<1",
   "python-dotenv>=1.1,<2",
+  "tomlkit>=0.13,<1",
 ]
 persistence = [
   "sqlalchemy[asyncio]>=2.0.54,<2.1",
@@ -71,8 +81,10 @@ persistence = [
 ]
 
 [tool.setuptools.packages.find]
+exclude = ["autoagent.agent_app.skill_assets*"]
 include = ["autoagent", "autoagent.core", "autoagent.core.*", "autoagent.agent", "autoagent.agent.*", "autoagent.agent_app", "autoagent.agent_app.*", "autoagent.host", "autoagent.host.*", "autoagent.server", "autoagent.cli", "autoagent.cli.*", "autoagent.evaluation", "autoagent.evaluation.*"]
 
 [tool.setuptools.package-data]
 "autoagent" = ["py.typed"]
+"autoagent.agent_app" = ["skill_assets/**/*.md", "skill_assets/**/*.py", "skill_assets/**/*.toml"]
 "autoagent.server" = ["static/index.html", "static/assets/*"]

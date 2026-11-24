@@ -148,7 +148,7 @@ class ServerDemoContracts:
             self.assertEqual(result.status, "completed", result.error)
             self.assertEqual(len(provider.requests), 3)
 
-    async def test_chat_uses_demo_rules_and_200k_sdk_context(self):
+    async def test_chat_uses_demo_rules_and_272k_sdk_context(self):
         """The actual /agent chat receives scoped demo resources and the SDK Context default."""
         prefix = ["-u", "-m", "agent_demo.cli_probe"]
         provider = ScriptedProvider(response(
@@ -158,7 +158,7 @@ class ServerDemoContracts:
             response(call("skill_read_resource", {"name": "demo-guide", "path": "references/tool-checklist.md"}, "read")), answer())
         async with self.client(provider) as (host, client, _):
             catalog = (await client.get("/api/v2/agent/catalog")).json()
-            self.assertEqual(catalog["agent"]["context_policy"]["context_window"], 200_000)
+            self.assertEqual(catalog["agent"]["context_policy"]["context_window"], 272_000)
             run = await client.post("/api/v2/agent/messages", json={"session_id": uuid4().hex, "message": "Test demo tools"})
             self.assertEqual(run.status_code, 202, run.text)
             result = await host.join(run.json()["invocation_id"])

@@ -254,6 +254,14 @@ class AgentRuntime:
                 return selected.model_copy(update={"reasoning_effort": model.reasoning_effort.default})
         return selected
 
+    def model_input_limit(self, snapshot, model, *, provider=None):
+        """Read effective Host model metadata for the selected request route."""
+        provider = provider or snapshot.settings.model.provider
+        if model is None or provider not in getattr(self.services.providers, "managed_ids", ()):
+            return None
+        _, info = self.services.providers.model(provider, model)
+        return info.get("max_input_tokens")
+
     def _remember(self, record):
         with self._lock:
             previous = self._session_records.get(record.session_id)

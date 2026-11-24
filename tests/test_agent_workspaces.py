@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from autoagent.agent import (
-    AgentInput, LLMResponse, LLMToolCall, LocalWorkspace,
+    AgentInput, LLMResponse, LLMToolCall, LLMToolResult, LocalWorkspace,
     SkillSet, ToolSet, WorkspaceBinding, WorkspaceError, WorkspaceRegistry,
     WorkspaceDiscovery, WorkspaceInfo,
 )
@@ -169,7 +169,9 @@ class WorkspaceContracts:
             self.assertNotIn("SECOND_PROJECT_INSTRUCTIONS", first)
             self.assertIn("second-skill", second)
             self.assertNotIn("first-skill", second)
-            self.assertNotIn("skill_load", {tool.name for tool in provider.requests[-1].tools})
+            self.assertIn("skill_load", {tool.name for tool in provider.requests[-1].tools})
+            self.assertNotIn("first-skill", unbound)
+            self.assertNotIn("second-skill", unbound)
             self.assertNotIn("PROJECT_INSTRUCTIONS", unbound)
 
     async def test_configuration_rejects_binding_changes_but_accepts_model_changes(self):
@@ -230,7 +232,10 @@ class WorkspaceContracts:
         async with self.host(provider, workspaces=[LocalWorkspace("first", self.first)], defaults=defaults) as host:
             result = await self.run_agent(host, "session")
             self.assertEqual(result.status, "completed", result.error)
-            self.assertIn("tool_unavailable", provider.requests[1].model_dump_json())
+            observation = next(item for item in provider.requests[1].input
+                if isinstance(item, LLMToolResult) and item.call_id == "load")
+            self.assertTrue(observation.is_error, str(observation))
+            self.assertNotIn("Use report conventions.", str(observation))
 
     async def test_parallel_file_tools_share_workspace_discovery(self):
         """A batch reuses its Workspace catalog and still executes each file call."""
@@ -327,9 +332,11 @@ class WorkspaceContracts:
                 params = {"revision_id": catalog["agent"]["revision_id"], "session_id": "chat"}
                 resources = await client.get("/api/v2/agent/resources", params=params)
                 self.assertEqual(resources.status_code, 200, resources.text)
-                self.assertEqual(resources.json()["skills"], [{"name": "report", "description": "report instructions", "origin": "Workspace"}])
+                self.assertEqual([row for row in resources.json()["skills"] if row['origin'] == 'Workspace'],
+                    [{"name": "report", "description": "report instructions", "origin": "Workspace"}])
                 params["session_id"] = "other"
-                self.assertEqual((await client.get("/api/v2/agent/resources", params=params)).json()["skills"], [])
+                self.assertTrue(all(row['origin'] == 'Built-in' for row in
+                    (await client.get("/api/v2/agent/resources", params=params)).json()["skills"]))
                 payload["workspace"] = None
                 rejected = await client.put("/api/v2/agent/settings", json={"session_id": "chat", "expected_version": 1, "settings": payload})
                 self.assertEqual(rejected.status_code, 422, rejected.text)
@@ -456,7 +463,7 @@ class WorkspaceContracts:
             self.assertEqual(tools.status_code, 200, tools.text)
             skills = await client.get("/api/v2/agent/resource-configs")
             self.assertEqual(skills.status_code, 200, skills.text)
-            self.assertEqual([row["name"] for row in skills.json()["resources"] if row["kind"] == "skill"], ["healthy"])
+            self.assertEqual([row["name"] for row in skills.json()["resources"] if row["kind"] == "skill" and row['origin'] == 'workspace'], ["healthy"])
             self.assertTrue(skills.json()["skill_diagnostics"][0]["location"].endswith("broken/SKILL.md"))
             response = await client.post("/api/v2/agent/messages", json={"session_id": "chat", "message": "Continue"})
             self.assertEqual(response.status_code, 202, response.text)

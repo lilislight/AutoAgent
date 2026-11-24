@@ -174,7 +174,7 @@ class ApplicationResourceContracts:
         async with self.product(provider=provider) as host:
             manager = host.applications["agent"].context.shared_resources
             inventory = await manager.describe()
-            builtin = [row for row in inventory['resources'] if row['origin'] == 'builtin']
+            builtin = [row for row in inventory['resources'] if row['origin'] == 'builtin' and row['kind'] == 'tool']
             self.assertTrue(builtin)
             native = [row for row in builtin if row["group_id"] in {"builtin/collaboration", "builtin/interaction"}]
             self.assertEqual(len(native), 7)

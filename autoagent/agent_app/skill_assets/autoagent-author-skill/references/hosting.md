@@ -12,7 +12,11 @@ and its database writer.
 
 ## Configure the project and start the Server
 
-Use `autoagent[cli,server]` in the selected project environment. Set
+Use `autoagent[server]` in the selected project environment. This extra includes
+the Agent App and CLI dependencies; LiteLLM and MCP integrations have their own
+optional extras. The default Agent App loads the bundled authoring and debugging
+Skills. Configure its models in the project `providers.json`; the initial
+Workspace is the resolved project root. Set
 `AUTOAGENT_DATABASE_URL` in the project `.env` or process environment.
 For example, the default URL
 `sqlite+aiosqlite:///.autoagent/runtime.db` resolves relative to the

@@ -59,6 +59,7 @@ class ManagedAgentResources:
         self.enabled = False
         self._known_resources = {}
         self._file_read_rules = (None, None)
+        self.builtin_skills = AgentResourceRegistry(namespace="builtin:agent-app-skills")
 
     def skill_roots(self):
         roots = [workspace.root for workspace in self.service.workspaces.entries() if hasattr(workspace, "root")]
@@ -75,6 +76,9 @@ class ManagedAgentResources:
     @asynccontextmanager
     async def lifespan(self):
         self.enabled = self.service.host.applications["agent"].enabled
+        if self.enabled:
+            from .builtin_skills import install
+            await asyncio.to_thread(install, self.builtin_skills)
         rows = await self.service.storage("resource_records")
         self.mcp_catalogs = await self.service.storage("mcp_catalogs")
         for row in rows:
@@ -265,11 +269,12 @@ class ManagedAgentResources:
                     if config.kind == "resource":
                         target = self._known_resources.get(config.resource_id)
                         if target is None:
-                            registries = [self.service.resources,
+                            registries = [self.service.resources, self.builtin_skills,
                                 *self.service._build_resources.values(), *self.service._workspaces._catalogs.values(),
                                 *(source.registry for source in self.sources.values())]
                             target = next((entry for registry in registries for kind in ("tool", "skill")
-                                for entry in registry.entries(kind, include_disabled=True) if entry.resource_id == config.resource_id), None)
+                                for entry in registry.entries(kind, include_disabled=True) if entry.resource_id == config.resource_id
+                                or self.resource_identity(entry, kind)["management_id"] == config.resource_id), None)
                         if target is not None:
                             config = config.model_copy(update={"resource_id": self.resource_identity(target)["management_id"]})
                         if target is not None and hasattr(target.value, "metadata") and not hasattr(target.value, "definition"):
@@ -396,6 +401,10 @@ class ManagedAgentResources:
                         diagnostics = [item.model_dump(mode="json") for item in discovery.skill_diagnostics]
             inventory = []
             seen = set()
+            shadowed_skills = {entry.name for registry in registries
+                for entry in registry.entries("skill", include_disabled=True)}
+            if scope is None:
+                registries.append(self.builtin_skills)
             for registry in registries:
                 for kind in ("tool", "skill"):
                     for entry in registry.entries(kind, include_disabled=True):
@@ -412,7 +421,8 @@ class ManagedAgentResources:
                             if identity["management_id"] not in seen:
                                 seen.add(identity["management_id"])
                                 inventory.append(self._resource_description(entry, kind,
-                                    available=registry.has(kind, entry.name)))
+                                    available=registry.has(kind, entry.name) and not (
+                                        registry is self.builtin_skills and entry.name in shadowed_skills)))
             for entry in builtins:
                 identity = self.resource_identity(entry, "tool")
                 if scope == "mcp" or scope == "tools" and identity["origin"] == "mcp":
@@ -503,7 +513,7 @@ class ManagedAgentResources:
     async def skill_document(self, management_id, workspace_id=None):
         await self.describe(workspace_id)
         async def read():
-            registries = [self.service.resources,
+            registries = [self.service.resources, self.builtin_skills,
                 *self.service._build_resources.values(), *self.service._workspaces._catalogs.values(),
                 *(source.registry for source in self.sources.values())]
             for registry in registries:
@@ -538,6 +548,10 @@ class ManagedAgentResources:
             source.error = None
             skills.extend(published)
             skill_names.update(entry.name for entry in published)
+        # User sources, including explicitly disabled documents, shadow the
+        # bundled guide of the same name. Never publish duplicate Skill names.
+        skills.extend(entry for entry in self.builtin_skills.catalog(BUILTIN_AGENT_WORKFLOW_ID)[1]
+            if entry.name not in skill_names)
         if mcp:
             skillset = SkillSet(entry.value for entry in self.filter((*reserved[1], *skills)))
             tool_names.update(tool.definition.name for tool in skillset.as_tools())
@@ -618,7 +632,7 @@ class ManagedAgentResources:
         if group_owner is not None:
             group = group_owner.group_id
             return dict(management_id=f"builtin/tool/{name}", group_id=f"builtin/{group}",
-                group_name={"files":"Files", "commands":"Commands"}.get(group, group), origin="builtin")
+                group_name={"files":"Files", "commands":"Commands", "planning":"Planning", "workflows":"Workflows"}.get(group, group), origin="builtin")
         if entry.resource_id.startswith(("builtin:", "skills:")):
             if kind == "skill":
                 group, label = "builtin/skills", "Built-in Skills"

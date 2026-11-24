@@ -7,6 +7,10 @@ from autoagent.agent.runtime.resources import AgentResources
 class ApplicationResources(AgentResources):
     def __init__(self, service, **configuration):
         self.service = service
+        from autoagent.agent.plan import PlanTools
+        from autoagent.agent.plan import is_plan_tool
+        tools = tuple(configuration.get("tools", ()))
+        configuration["tools"] = tools if any(is_plan_tool(item) for item in tools) else (*tools, *PlanTools().tools())
         super().__init__(**configuration)
 
     def snapshot(self, context=None):

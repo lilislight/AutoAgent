@@ -124,14 +124,22 @@ def create_router(host: AutoAgentHost, *, settings: ServerSettings | None = None
         if hubs is None:
             hubs = _app.state._autoagent_trace_hubs = set()
         hubs.add(hub)
+        watches = getattr(_app.state, '_autoagent_catalog_watches', None)
+        if watches is None:
+            watches = _app.state._autoagent_catalog_watches = set()
+        watches.add(catalog_watch)
         try:
             yield
         finally:
+            await catalog_watch.close()
+            watches.discard(catalog_watch)
             await hub.close()
             hubs.discard(hub)
     visibility = WorkflowVisibility(host, settings)
     router = APIRouter(prefix=settings.api_prefix, tags=["AutoAgent Workflows"], lifespan=watch_lifespan,
         dependencies=[Depends(visibility.guard)])
+    from .catalog_watch import install_catalog_watch
+    catalog_watch = install_catalog_watch(router, host, settings, _query)
     from .user_events import user_event_routes
     user_events = user_event_routes(host, settings, _query)
     router.include_router(user_events.router)

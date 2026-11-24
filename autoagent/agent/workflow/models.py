@@ -44,6 +44,7 @@ class ToolBinding(Model):
     version: NonEmpty
     definition_hash: NonEmpty
     kind: Literal["tool", "ask_user", "agent_builtin"] = "tool"
+    updates_plan: bool = False
 
 
 class ContextPreparation(Model):
@@ -60,6 +61,8 @@ class ContextPreparation(Model):
     snapshot_id: NonEmpty
     replay_target: HistoryRoute | None = None
     inject_current_time: bool = False
+    inject_plan: bool = False
+    model_input_limit: int | None = Field(default=None, gt=0)
 
     @property
     def model_input(self) -> tuple[LLMItem, ...]:
@@ -93,6 +96,7 @@ class PreparedRequest(Model):
     replay_target: HistoryRoute | None = None
     estimated_input_tokens: int | None = Field(default=None, ge=0)
     runtime_time: NonEmpty | None = None
+    inject_plan: bool = False
 
 
 class CompactionChunk(Model):

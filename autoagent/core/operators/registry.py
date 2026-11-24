@@ -37,6 +37,15 @@ class OperatorRegistry:
 
     def bind_capabilities(self, capabilities) -> None:
         """Validate and bind one Workflow closure without partial mutation."""
+        with self._lock:
+            self._contracts = self._checked_capabilities(capabilities)
+
+    def validate_capabilities(self, capabilities) -> None:
+        """Check a proposed closure without publishing its nominal contracts."""
+        self._checked_capabilities(capabilities)
+
+    def _checked_capabilities(self, capabilities):
+        """Validate and bind one Workflow closure without partial mutation."""
 
         with self._lock:
             pending = dict(self._contracts)
@@ -55,7 +64,7 @@ class OperatorRegistry:
                         registration.operator.contract,
                     )
                 pending[capability.id] = contract
-            self._contracts = pending
+            return pending
 
     def register(
         self,

@@ -17,7 +17,7 @@ def builtin_agent_workflow(*, resources=None, execution=True, command_policy=Non
         instructions=DEFAULT_AGENT_APP_INSTRUCTIONS,
         resources=resources,
         max_rounds=None,
-        context_policy=ContextPolicy(context_window=200_000),
+        context_policy=ContextPolicy(),
         user_events=True,
         include_ask_user=True,
         inject_current_time=True,

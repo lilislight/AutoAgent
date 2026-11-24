@@ -134,6 +134,33 @@ class AdaptiveHostTests(unittest.IsolatedAsyncioTestCase):
                     await host.execute('work', {'text': 'new'})
             self.assertEqual((await host.get_execution(first.ref)).status, 'completed')
 
+    async def test_admission_never_joins_snapshots_for_busy_sessions(self):
+        """Admission cannot join snapshots waiting for its own lock or another active request's lock."""
+        from autoagent.host.memory_resources import MemoryResourcesSnapshot
+        gib = 1024**3
+        async with self.host(memory_budget_bytes=gib) as host:
+            first = await completed(host, session_id='queued-snapshot')
+            other = await completed(host, session_id='other-snapshot')
+            policy = host._runtime.residency
+            policy.memory_usage = lambda: 100 * 1024**2
+            critical = MemoryResourcesSnapshot(gib, 'explicit', 16 * gib, 'physical',
+                16 * gib, gib // 2, None, ((16 * gib, gib // 2),))
+            other_item = policy.entry(other.session_id)
+            other_item.users += 1
+            try:
+                for result in (first, other):
+                    info = await host._runtime.app.aresidency_info(result.ref)
+                    item = policy.entry(result.session_id)
+                    async with host._runtime.coordinated(result.session_id):
+                        policy._snapshot(item, info, evict=False)
+                        with patch.object(policy.resources, 'sample', return_value=critical):
+                            with self.assertRaises(HostCapacityError):
+                                await asyncio.wait_for(policy.admit_resident(first.session_id), .5)
+                    await asyncio.gather(*tuple(policy.jobs), return_exceptions=True)
+            finally:
+                other_item.users -= 1
+                await asyncio.gather(*tuple(policy.jobs), return_exceptions=True)
+
     async def test_large_auto_budget_does_not_stop_existing_live_work(self):
         """A live graph survives shared pressure while additional execution is rejected."""
         from autoagent.host.memory_resources import MemoryResourcesSnapshot

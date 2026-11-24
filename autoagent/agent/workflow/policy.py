@@ -25,6 +25,14 @@ class ContextBudget:
     target_tokens: int | None
 
 
+def effective_context_window(configured, model_input_limit=None):
+    """A caller's budget may narrow, but never enlarge, a configured model limit."""
+    limits = [value for value in (configured, model_input_limit) if value is not None]
+    if any(type(value) is not int or value <= 0 for value in limits):
+        raise ValueError("Context windows must be positive integers or None.")
+    return min(limits) if limits else None
+
+
 def item_characters(item):
     """Count model content, including opaque replay text, without native duplicates."""
     value = item.model_dump(mode="json", exclude={"native", "id", "tool_metadata"}, exclude_none=True)
@@ -33,10 +41,10 @@ def item_characters(item):
 
 def fixed_characters(preparation):
     from .projection import project_items
-    from .runtime_context import time_characters
+    from .runtime_context import runtime_characters
     return sum(item_characters(item) for item in project_items(preparation.fixed_input, preparation.replay_target)) + (
         len(json.dumps([tool.model_dump(mode="json", exclude_none=True) for tool in preparation.tools],
-                       ensure_ascii=False, separators=(",", ":"))) if preparation.tools else 0) + time_characters(preparation)
+                       ensure_ascii=False, separators=(",", ":"))) if preparation.tools else 0) + runtime_characters(preparation)
 
 
 @dataclass(frozen=True)
@@ -55,8 +63,8 @@ class UsagePlusCharacters:
                 and anchor.view_generation == history.view.generation):
             trailing = sum(item_characters(item) for item in project_history(
                 history, preparation.replay_target, start=anchor.source_count))
-            from .runtime_context import time_characters
-            trailing += time_characters(preparation)
+            from .runtime_context import runtime_characters
+            trailing += runtime_characters(preparation)
             return TokenEstimate(input_tokens=anchor.input_tokens + math.ceil(trailing / self.chars_per_token), anchored=True)
         size = fixed_characters(preparation) + sum(item_characters(item) for item in project_history(history, preparation.replay_target))
         return TokenEstimate(input_tokens=math.ceil(size / self.chars_per_token))
@@ -109,7 +117,8 @@ class CompactionInput:
     async def estimate(self, view: ContextView) -> TokenEstimate:
         from .history import Conversation
         candidate = Conversation(items=self.conversation.items, view=view, origins=self.conversation.origins,
-            runtime_times=self.conversation.runtime_times if view == self.view else {})
+            runtime_times=self.conversation.runtime_times if view == self.view else {}, plan=self.conversation.plan,
+            runtime_plans=self.conversation.runtime_plans if view == self.view else {})
         return await self.policy.estimate_input(self.preparation.model_copy(update={"conversation": candidate}))
 
     def over_limit(self, estimate: TokenEstimate) -> bool:
@@ -121,7 +130,8 @@ class CompactionInput:
         from .history import Conversation
         preparation = self.preparation.model_copy(update={"conversation": Conversation(
             items=self.conversation.items, view=view, origins=self.conversation.origins,
-            runtime_times=self.conversation.runtime_times if view == self.view else {})})
+            runtime_times=self.conversation.runtime_times if view == self.view else {}, plan=self.conversation.plan,
+            runtime_plans=self.conversation.runtime_plans if view == self.view else {})})
         return await LLMHistoryCompactor()(CompactionInput(preparation, self.policy, self.budget,
                                                         await self.policy.estimate_input(preparation)))
 
@@ -141,10 +151,10 @@ class ContextPolicy:
 
     id: str = "agent.context"
     version: str = "1"
-    context_window: int | None = None
-    compact_at_ratio: float = 0.8
+    context_window: int | None = 272_000
+    compact_at_ratio: float = 0.9
     compact_at_tokens: int | None = None
-    target_ratio: float = 0.5
+    target_ratio: float = 0.3
     target_tokens: int | None = None
     estimate: Callable = field(default_factory=UsagePlusCharacters)
     trigger: Callable = over_context_limit
@@ -165,8 +175,8 @@ class ContextPolicy:
             raise TypeError("Context estimate, trigger and compact must be callable.")
         self.budget({})
 
-    def budget(self, settings) -> ContextBudget:
-        window = self.context_window
+    def budget(self, settings, *, model_input_limit=None) -> ContextBudget:
+        window = effective_context_window(self.context_window, model_input_limit)
         limit = window - (settings.get("max_output_tokens") or 0) if window is not None else None
         if limit is not None and limit <= 0:
             raise ContextLimitExceeded("The configured output limit leaves no input Context space.")

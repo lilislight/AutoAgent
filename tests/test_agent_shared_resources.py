@@ -195,7 +195,7 @@ class SharedResourceContracts:
                 async def resources(session='old'):
                     return (await client.get('/api/v2/agent/resources', params={
                         'revision_id':catalog['agent']['revision_id'],'session_id':session,'unbound':True})).json()
-                await self.eventually(resources, lambda result: bool(result['skills']))
+                await self.eventually(resources, lambda result: any(row['name'] == 'sample' for row in result['skills']))
                 self.assertEqual((await resources('new'))['skills'][0]['name'], 'sample')
                 private = await host.extensions["agent"].context.resource_catalog(host._runtime.workflow_ids['private'])
                 self.assertEqual(private['skills'],[])
@@ -205,8 +205,8 @@ class SharedResourceContracts:
                 disabled = await client.put('/api/v2/agent/resource-configs/'+config['id'], json={
                     'configuration':{**config['configuration'],'enabled':False},'expected_version':config['version']})
                 self.assertEqual(disabled.status_code, 200, disabled.text)
-                self.assertEqual((await resources())['skills'], [])
-                self.assertNotIn('skill_load', {tool['name'] for tool in (await resources('new'))['tools']})
+                self.assertNotIn('sample', {row['name'] for row in (await resources())['skills']})
+                self.assertNotIn('sample', {row['name'] for row in (await resources('new'))['skills']})
                 stale = await client.delete('/api/v2/agent/resource-configs/'+config['id'], params={'expected_version':1})
                 self.assertEqual(stale.status_code, 409)
                 deleted = await client.delete('/api/v2/agent/resource-configs/'+config['id'], params={'expected_version':2})
@@ -293,9 +293,9 @@ class SharedResourceContracts:
                     lambda value: value['items'][0]['state'] == 'ready')
             async with AutoAgentHost(**options) as host:
                 restored = await self.eventually(host.applications["agent"].context.shared_resources.describe,
-                    lambda value: bool(value['resources']))
+                    lambda value: any(row['kind'] == 'skill' and row['name'] == 'sample' for row in value['resources']))
                 self.assertEqual(restored['items'][0]['id'],created['id'])
-                self.assertEqual(restored['resources'][0]['name'],'sample')
+                self.assertEqual([row['name'] for row in restored['resources'] if row['kind'] == 'skill' and row['origin'] == 'manual'], ['sample'])
             async with AutoAgentHost(**{**options,'workflows':[agent_workflow(workflow_id='private')]}) as host:
                 self.assertNotIn("agent", host.applications)
                 private = await host.extensions["agent"].context.resource_catalog(host._runtime.workflow_ids["private"])
@@ -316,21 +316,26 @@ class SharedResourceContracts:
                 managed = host.applications["agent"].context.shared_resources
                 created = await managed.save(MCPResourceConfig(name='Local wire',transport={
                     'type':'sse','server_id':'wire','url':'https://server.test/sse'}))
-                ready = await self.eventually(managed.describe,lambda value: bool(value['resources']) and value['items'][0]['state'] == 'ready' or value['items'][0]['state'] == 'error')
+                ready = await self.eventually(managed.describe,lambda value:
+                    any(row['origin'] == 'mcp' for row in value['resources']) and value['items'][0]['state'] == 'ready'
+                    or value['items'][0]['state'] == 'error')
                 self.assertEqual(ready['items'][0]['state'],'ready',(ready,repr(getattr(managed.sources[created['id']].source,'last_error',None))))
-                version = ready['resources'][0]['version']
+                remote = next(row for row in ready['resources'] if row['origin'] == 'mcp')
+                version = remote['version']
                 await host.applications["agent"].context.approvals._run(clients[0].areconnect)
                 refreshed = await managed.describe()
-                self.assertNotEqual(refreshed['resources'][0]['version'],version)
+                remote = next(row for row in refreshed['resources'] if row['origin'] == 'mcp')
+                self.assertNotEqual(remote['version'],version)
                 state = managed.sources[created['id']]
                 revised = await managed.save(MCPResourceConfig.model_validate_json(
                     json.dumps({**created['configuration'],'permissions':{'default':'ask'}})),
                     resource_id=created['id'],expected_version=created['version'])
                 self.assertIs(managed.sources[created['id']],state)
-                self.assertEqual((await managed.describe())['resources'][0]['version'],refreshed['resources'][0]['version'])
+                current = next(row for row in (await managed.describe())['resources'] if row['origin'] == 'mcp')
+                self.assertEqual(current['version'], remote['version'])
                 entered, release = asyncio.Event(), asyncio.Event()
                 async def borrow():
-                    async with managed.borrow(refreshed['resources'][0]['resource_id']):
+                    async with managed.borrow(remote['resource_id']):
                         entered.set()
                         await release.wait()
                 async def begin():

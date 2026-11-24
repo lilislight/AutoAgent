@@ -20,6 +20,9 @@ owns that history.
 
 Use [evidence.md](references/evidence.md) for source selection, command
 syntax, and historical Context.
+For a Workflow registered from Agent App, also use
+[live registration and source revisions](references/live-registration.md)
+to distinguish disk edits from the implementation actually loaded by its Host.
 
 ## Investigate and verify
 

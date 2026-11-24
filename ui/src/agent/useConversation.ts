@@ -3,7 +3,7 @@ import { useQueries, useQueryClient } from '@tanstack/react-query';
 import { agentClient } from './client';
 import { applyEvents, emptyConversation, resetTransient, type ConversationState } from './conversationState';
 import type { AgentEvent, AgentInvocation } from './types';
-import { eventRefresh } from './eventRefresh';
+import { eventRefresh, planChanged } from './eventRefresh';
 import { retryAgentRead, agentReadRetryDelay } from './readFeedback';
 
 type Action = { type: 'events'; events: AgentEvent[] } | { type: 'reset' };
@@ -37,6 +37,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
     }
     // Empty snapshots also complete hydration and must release the loader.
     if (applied) dispatch({ type: 'events', events });
+    if (planChanged(events)) void client.invalidateQueries({ queryKey: ['agent-plan', session] }, { cancelRefetch: false });
   }, [historyStamp, ids, session, client]);
 
   useEffect(() => {
@@ -49,6 +50,8 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       const events = pending; pending = [];
       dispatch({ type: 'events', events });
       const reads = eventRefresh(events);
+      if (reads.invocations || planChanged(events))
+        void client.invalidateQueries({ queryKey: ['agent-plan', session] }, { cancelRefetch: false });
       if (reads.execution) void client.invalidateQueries({ queryKey: ['agent-execution'] }, { cancelRefetch: false });
       if (reads.invocations) void client.invalidateQueries({ queryKey: ['agent-invocations', session] }, { cancelRefetch: false });
       if (reads.directory) void client.invalidateQueries({ queryKey: ['agent-turn-index', session] }, { cancelRefetch: false });
@@ -63,6 +66,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
       void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
       void client.invalidateQueries({ queryKey: ['agent-turn-index', session] });
       void client.invalidateQueries({ queryKey: ['agent-queue', session] });
+      void client.invalidateQueries({ queryKey: ['agent-plan', session] });
     };
     const receive = (message: MessageEvent<string>) => {
       try {
@@ -93,6 +97,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
         void client.invalidateQueries({ queryKey: ['agent-turn-index', session] });
         void client.invalidateQueries({ queryKey: ['agent-execution'] });
         void client.invalidateQueries({ queryKey: ['agent-queue', session] });
+        void client.invalidateQueries({ queryKey: ['agent-plan', session] });
       }
     };
     const restored = (event: PageTransitionEvent) => { if (event.persisted) setEpoch(value => value + 1); };
@@ -112,6 +117,7 @@ export function useConversation(session: string, invocations: AgentInvocation[],
     void client.invalidateQueries({ queryKey: ['agent-history', session] });
     void client.invalidateQueries({ queryKey: ['agent-invocations', session] });
     void client.invalidateQueries({ queryKey: ['agent-turn-index', session] });
+    void client.invalidateQueries({ queryKey: ['agent-plan', session] });
   }, [client, session, connection]);
   return { state, refresh, error: queries.find(item => item.error)?.error };
 }

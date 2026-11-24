@@ -30,7 +30,8 @@ class _Server(uvicorn.Server):
         # Uvicorn drains HTTP responses before sending lifespan.shutdown.
         # Close our unbounded responses first, while Host is still available.
         hubs = (tuple(getattr(self.config.app.state, '_autoagent_trace_hubs', ()))
-                + tuple(getattr(self.config.app.state, '_autoagent_user_event_hubs', ())))
+                + tuple(getattr(self.config.app.state, '_autoagent_user_event_hubs', ()))
+                + tuple(getattr(self.config.app.state, '_autoagent_catalog_watches', ())))
         callback = self.on_stopping
         if self.started and callback:
             callback()

@@ -63,3 +63,8 @@ export interface InteractionReview { reviewer: 'user' | 'system' | 'policy' | 'a
 export interface ActionSpec { root_invocation_id: string; request: Record<string, Json> | null; review?: InteractionReview; response_example: Json; input_schema: unknown; endpoints: string[]; next_sequence: number }
 export interface ActionInput { invocation_id: string; action: 'pause' | 'recover' | 'cancel' | 'respond' | 'signal'; request_id: string; expected_version?: number; target_invocation_id?: string; wait_id?: string; payload?: unknown; endpoint?: string; source_id?: string; sequence?: number }
 export interface Operation { operation_id: string; status: 'running' | 'succeeded' | 'failed' | 'unobserved'; result: Record<string, Json> | null; error: { code: string; message: string } | null }
+
+export interface TaskPlan {
+  plan: { step: string; status: 'pending' | 'in_progress' | 'completed' }[];
+  explanation: string | null;
+}

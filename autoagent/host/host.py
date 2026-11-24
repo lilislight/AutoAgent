@@ -34,6 +34,7 @@ from .history import HistoryQueries
 from .forks import ForkControls
 from .operations import ExecutionOperations, OperationControls
 from .user_events import UserEvents, UserEventHub
+from .registration import WorkflowRegistration
 
 _json_output = TypeAdapter(object)
 
@@ -43,7 +44,7 @@ def _result_view(result):
     return replace(result, output=_json_output.dump_python(result.output, mode="json"))
 
 
-class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, CheckpointControls, Exploration, ExecutionObservation, HistoryQueries, ForkControls):
+class AutoAgentHost(WorkflowRegistration, UserEvents, OperationControls, ExecutionControls, CheckpointControls, Exploration, ExecutionObservation, HistoryQueries, ForkControls):
     """Own runtime and persistence behind business operations, in one caller loop.
 
     CLI/Server use ``async with host``. Loading and residency are automatic;
@@ -67,6 +68,11 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
         applications=(),
     ):
         self.root = Path(root or Path.cwd()).expanduser().resolve()
+        self._workflow_registration_lock = asyncio.Lock()
+        self._registered_workflow_sources = {}
+        self._catalog_epoch = uuid4().hex
+        self._catalog_revision = 0
+        self._catalog_changed = asyncio.Event()
         self.environment = MappingProxyType(
             dict(os.environ if environment is None else environment)
         )
@@ -213,6 +219,7 @@ class AutoAgentHost(UserEvents, OperationControls, ExecutionControls, Checkpoint
                 self._import_context = import_scope(self.root)
                 self._import_context.__enter__()
                 workflows, declared_lifespan = self._project.load(self.environment)
+                self._registered_workflow_sources.update(self._project.origins)
                 lifespan = lifespan or declared_lifespan
             # Static checks precede creating databases or project resources.
             for application in self.applications.values():

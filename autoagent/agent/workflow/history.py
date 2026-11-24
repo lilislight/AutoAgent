@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Literal
+from ..plan import SessionPlan
+
 from pydantic import Field, model_validator
 
 from ..models import LLMItem, LLMMessage, LLMToolCall, LLMToolResult, TextContent
@@ -93,7 +95,7 @@ class PendingToolRound(Model):
 
 
 class Conversation(Model):
-    """Keep hidden clock snapshots keyed by the original Item boundary they follow.
+    """Keep the current plan and hidden runtime snapshots at original Item boundaries.
 
     String keys keep the Context JSON-native. Snapshots do not enter visible
     conversation Items or summary material, and a replacement view drops them.
@@ -105,6 +107,8 @@ class Conversation(Model):
     origins: tuple[HistoryOrigin, ...] = ()
     pending: PendingToolRound | None = None
     runtime_times: dict[str, NonEmpty] = Field(default_factory=dict)
+    plan: SessionPlan | None = None
+    runtime_plans: dict[str, SessionPlan | None] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _coverage(self):
@@ -113,8 +117,8 @@ class Conversation(Model):
         if self.view.source_count != len(self.items):
             raise ValueError("Context view must cover all original history.")
         if any(not position.isdecimal() or str(int(position)) != position
-               or not 0 < int(position) <= len(self.items) for position in self.runtime_times):
-            raise ValueError("Runtime time records must follow existing history.")
+               or not 0 < int(position) <= len(self.items) for position in (*self.runtime_times, *self.runtime_plans)):
+            raise ValueError("Runtime records must follow existing history.")
         if self.token_anchor is not None and self.token_anchor.source_count > len(self.items):
             raise ValueError("Token anchor exceeds original history.")
         end = 0
@@ -170,7 +174,7 @@ class Conversation(Model):
         origins = self.origins + ((HistoryOrigin(start=len(self.items), end=end, route=origin),) if origin else ())
         return Conversation(items=(*self.items, *items), token_anchor=self.token_anchor, origins=origins,
             view=ContextView(segments=tuple(segments), generation=self.view.generation),
-            runtime_times=self.runtime_times)
+            runtime_times=self.runtime_times, plan=self.plan, runtime_plans=self.runtime_plans)
 
     def replace(self, start: int, end: int, items: tuple[LLMItem, ...]) -> Conversation:
         """Replace a source range without reopening an existing summary's contents."""
@@ -191,7 +195,7 @@ class Conversation(Model):
                     before.append(HistorySegment(start=segment.start, end=start))
                 if segment.end > end:
                     after.append(HistorySegment(start=end, end=segment.end))
-        return Conversation(items=self.items, origins=self.origins, view=ContextView(generation=self.view.generation + 1,
+        return Conversation(items=self.items, origins=self.origins, plan=self.plan, view=ContextView(generation=self.view.generation + 1,
             segments=(*before, HistorySegment(start=start, end=end, replacement=items), *after)))
 
 

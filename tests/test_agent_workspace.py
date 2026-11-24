@@ -267,7 +267,7 @@ class WorkspaceContracts:
             self.assertEqual((partial['call_count'], partial['total_tokens'], partial['missing_cost_calls']), (6, 30, 0))
             self.assertEqual(partial['cost_usd'], '0.000045')
             self.assertEqual((await client.get('/api/v2/agent/usage', params=dict(
-                invocation_id=worker['invocation_id'], session_id=root.session_id))).status_code, 400)
+                invocation_id=worker['invocation_id'], session_id=root.session_id))).status_code, 404)
 
     async def test_history_pages_include_final_snapshots_and_stream_is_session_scoped(self):
         """Session subscribers reject unrelated traffic before buffering; reload reads complete events."""

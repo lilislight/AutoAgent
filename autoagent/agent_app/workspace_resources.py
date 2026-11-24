@@ -24,6 +24,7 @@ class AgentWorkspaces:
         self._file_sources = {}
         self._execution_services = {}
         self._execution_sources = {}
+        self._workflow_tools = {}
         self.process_manager = None
 
 
@@ -35,6 +36,7 @@ class AgentWorkspaces:
         self._file_sources.clear()
         self._execution_services.clear()
         self._execution_sources.clear()
+        self._workflow_tools.clear()
 
     async def close_execution(self):
         if self.process_manager is not None:
@@ -78,6 +80,7 @@ class AgentWorkspaces:
                 registry.claim_source("skills", workflows={ir.workflow_id})
                 registry.claim_source("files", workflows={ir.workflow_id})
                 registry.claim_source("execution", workflows={ir.workflow_id})
+                registry.claim_source("workflow-registration", workflows={ir.workflow_id})
             try:
                 bound = key[0] != "@unbound"
                 workspace = await self.registry.aresolve(key[0] if bound else self.project_id)
@@ -141,12 +144,27 @@ class AgentWorkspaces:
                 else:
                     registry.replace_source("execution", {})
                     self._execution_sources.pop(key, None)
+                if bound and isinstance(workspace, LocalWorkspace):
+                    from .workflow_tools import WorkflowRegistrationTools
+                    group = self._workflow_tools.get(key)
+                    root = (workspace.root / key[1]).resolve()
+                    if group is None or group.root != root:
+                        group = self._workflow_tools[key] = WorkflowRegistrationTools(self.service.host, root)
+                        from autoagent.agent.workflow.resources import digest, tool_identity
+                        tools = group.tools()
+                        registry.replace_source("workflow-registration", {("tool", value.definition.name):
+                            (digest({"root": str(root), "tool": tool_identity(value)}), value) for value in tools})
+                else:
+                    registry.replace_source("workflow-registration", {})
+                    self._workflow_tools.pop(key, None)
                 self._discoveries[key] = (workspace, discovery)
                 return discovery if bound else None
             except BaseException:
                 registry.remove_source("skills")
                 registry.remove_source("files")
                 registry.remove_source("execution")
+                registry.remove_source("workflow-registration")
+                self._workflow_tools.pop(key, None)
                 self._file_sources.pop(key, None)
                 self._execution_sources.pop(key, None)
                 self._discoveries.pop(key, None)

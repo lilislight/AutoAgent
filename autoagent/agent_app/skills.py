@@ -1,13 +1,15 @@
 """Product-only Skill switches stored in SKILL.md, never per-Skill database rows."""
 
-from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 from threading import RLock
-from uuid import uuid4
+
+from autoagent.agent.files import FileToolsConfig, LocalFileService
+from autoagent.agent.files.service import resource_locks
+from autoagent.agent.tools import ToolBusinessError
 
 KEY = 'autoagent-app-enabled'
 _lock = RLock()
@@ -26,59 +28,42 @@ def location(skill):
 
 def _managed_path(skill, roots):
     path = location(skill)
-    if (path is None or '..' in path.parts or os.open not in os.supports_dir_fd
-            or not hasattr(os, 'O_NOFOLLOW')):
+    if path is None or '..' in path.parts:
         return None
     for root in roots:
         try:
-            if path.is_relative_to(Path(root).resolve(strict=True)):
+            if (path.is_relative_to(Path(root).resolve(strict=True))
+                    and not any(part.is_symlink() or part.is_junction() for part in (path, *path.parents))):
                 return path
         except (OSError, RuntimeError):
             continue
     return None
 
 
-@contextmanager
-def _parent_descriptor(path):
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    parent = os.open(path.anchor, flags)
-    try:
-        for part in path.parent.parts[1:]:
-            child = os.open(part, flags, dir_fd=parent)
-            os.close(parent)
-            parent = child
-        yield parent
-    finally:
-        os.close(parent)
-
-
-def _writable(parent, name, info):
+def _writable(path, info):
     bits = stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH
     return (stat.S_ISREG(info.st_mode) and bool(info.st_mode & bits)
-            and bool(os.fstat(parent).st_mode & bits) and os.access('.', os.W_OK, dir_fd=parent)
-            and os.access(name, os.W_OK, dir_fd=parent))
+            and bool(path.parent.stat().st_mode & bits) and os.access(path.parent, os.W_OK)
+            and os.access(path, os.W_OK))
 
 
 def editable(skill, roots):
     path = _managed_path(skill, roots)
     if path is not None:
         try:
-            with _parent_descriptor(path) as parent:
-                return _writable(parent, path.name, os.stat(path.name, dir_fd=parent, follow_symlinks=False))
+            return _writable(path, path.stat(follow_symlinks=False))
         except OSError:
             pass
     return False
 
 
-def _read_document(parent, name, maximum):
-    descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
-    with os.fdopen(descriptor, 'rb') as stream:
-        info = os.fstat(stream.fileno())
-        if not _writable(parent, name, info):
-            raise ValueError('This Skill document is read-only or has no managed local source.')
-        data = stream.read(maximum + 1)
-        if len(data) > maximum:
-            raise ValueError('Skill document exceeds its size limit.')
+def _read_document(files, path):
+    try:
+        data, info = files._bytes(path)
+    except ToolBusinessError as error:
+        raise ValueError(str(error)) from error
+    if not _writable(path, info):
+        raise ValueError('This Skill document is read-only or has no managed local source.')
     return data, info
 
 
@@ -95,9 +80,10 @@ def set_enabled(skill, value, *, roots):
         raise ValueError('This Skill document is read-only or has no managed local source.')
     import yaml
     from autoagent.agent.skills.parser import parse_skill
-    with _lock, _parent_descriptor(path) as parent:
+    with _lock, resource_locks((path,)):
         maximum = skill.limits.max_document_bytes
-        data, original = _read_document(parent, path.name, maximum)
+        files = LocalFileService(path.parent, config=FileToolsConfig(max_file_bytes=maximum))
+        data, original = _read_document(files, path)
         if hashlib.sha256(data).hexdigest() != skill.load().revision:
             raise ValueError('Skill document changed; refresh its configuration and try again.')
         text = data.decode('utf-8-sig')
@@ -126,23 +112,10 @@ def set_enabled(skill, value, *, roots):
         if data.startswith(b'\xef\xbb\xbf'):
             updated = b'\xef\xbb\xbf' + updated
         parse_skill(updated, directory_name=skill.metadata.name)
-        temporary = '.SKILL.' + uuid4().hex
-        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
         try:
-            with os.fdopen(descriptor, 'wb') as stream:
-                stream.write(updated)
-                os.fchmod(stream.fileno(), stat.S_IMODE(original.st_mode))
-                stream.flush()
-                os.fsync(stream.fileno())
-            with _parent_descriptor(path) as current_parent:
-                if not os.path.samestat(os.fstat(parent), os.fstat(current_parent)):
-                    raise ValueError('Skill directory changed; refresh its configuration and try again.')
-            current, info = _read_document(parent, path.name, maximum)
+            current, info = _read_document(files, path)
             if current != data or _identity(original) != _identity(info):
                 raise ValueError('Skill document changed; refresh its configuration and try again.')
-            os.replace(temporary, path.name, src_dir_fd=parent, dst_dir_fd=parent)
-        finally:
-            try:
-                os.unlink(temporary, dir_fd=parent)
-            except FileNotFoundError:
-                pass
+            files._change(path, data, updated)
+        except ToolBusinessError as error:
+            raise ValueError(str(error)) from error

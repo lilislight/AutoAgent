@@ -1,8 +1,7 @@
-"""Process memory capacity and shared headroom, without external dependencies."""
+"""Portable physical capacity sampling and optional Linux cgroup headroom."""
 
 from dataclasses import dataclass
 from pathlib import Path
-import os
 import re
 
 FALLBACK_BUDGET = 512 * 1024**2
@@ -31,11 +30,12 @@ def system_memory():
         pass
     total = values.get('MemTotal') or None
     if total is None:
+        import psutil
         try:
-            total = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
-            total = total if total > 0 else None
-        except (AttributeError, OSError, ValueError):
-            pass
+            sample = psutil.virtual_memory()
+            return sample.total or None, sample.available
+        except (OSError, psutil.Error):
+            return None, None
     return total, values.get('MemAvailable')
 
 

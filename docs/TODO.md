@@ -1,6 +1,6 @@
 # AutoAgent V2 后续事项
 
-更新日期：2026-11-16。
+更新日期：2026-11-24。
 
 本文记录当前确认的推进顺序、阶段边界和验收目标，不代表下面的 API 已经实现。
 当前源码和测试是具体行为的依据；V1 只用于参考，不保留旧 API 或数据模型兼容层。
@@ -204,37 +204,43 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 ## 2. AutoAgent 开发 Skill
 
 目标：让外部 Coding Agent 根据已安装的 V2 SDK 和 CLI 正确创建、诊断和优化项目。
-这是项目开发指导，与业务 Agent 使用的 `autoagent.agent.skills` 不同，
-也不依赖第 5 阶段的原生 Coding Agent 已完成。
-
-当前 Workflow SDK、CLI 和业务 Evaluation 已支持首版 Skill 所需的编写、诊断和验证流程。
-首版采用 Workflow 编写、Invocation 诊断两个入口，在定稿 Skill 参考前确认 SDK 的公开导入路径。
+这是面向项目开发的指导内容，复用 `autoagent.agent.skills` 的加载机制，
+不依赖第 5 阶段的原生 Coding Agent 已完成。首版已有 Workflow 编写、Invocation/Session
+诊断两个入口，随 SDK 分发并由 Agent App 默认加载；真实任务质量验收单独跟踪。
 
 ### SDK 公开入口
 
-- [x] 初审 V2 根包、Core、Host、Agent、Evaluation 的导出和示例用法。根包目前同时导出
-  Workflow 声明类型、编译器、嵌入运行类型及恢复模型。V1 已单列 Workflow 编写契约，
-  仍保留部分旧根属性。V2 整理时直接迁移导入路径。
-- [ ] 确认 `autoagent` 的 Workflow 编写入口，覆盖图、Operator、Context/Hook、值契约、
+- [x] 整理 V2 根包、Core、Host、Agent、Evaluation 的导出和示例用法；根包聚焦 Workflow
+  编写，运行、编译、Event 和恢复能力使用所属 Core 模块，旧根属性不保留兼容别名。
+- [x] 确认 `autoagent` 的 Workflow 编写入口，覆盖图、Operator、Context/Hook、值契约、
   策略和 Workflow 内使用的 System Command。按真实用法审查配套类型，例如 `TimerRequest`
   用于 Input Mapping，`SelectResult` 用于下游处理。
-- [ ] 让嵌入运行、编程式编译、Event Sink 和恢复等能力从所属 Core 模块访问。
-  检查 `autoagent.core` 的聚合导出，区分明确支持的集成协议和内部执行、调度、状态实现。
+- [x] 嵌入运行、编程式编译、Event Sink 和恢复能力从 `core.app`、`core.compiler`、
+  `core.sinks` 和 `core.runtime` 等所属模块访问；公开导出边界有回归测试约束。
   Host、Agent、Evaluation 和 Server 保留各自的公开入口；首版只核对 Skill 涉及的接口。
-- [ ] 迁移框架内部、示例和测试的导入，确认拟移除的根属性无需保留旧别名。用安装后的 wheel
+- [x] 迁移框架内部、示例和测试的导入，确认拟移除的根属性无需保留旧别名。用安装后的 wheel
   验证公开导入、离线项目可运行和旧根属性已移除，再定稿 Skill 的 SDK 参考。
 
 ### Skill 首版
 
-- [ ] 编写 V2 Workflow authoring Skill，覆盖图、值契约、Context 和恢复边界。
-- [ ] 提供最小项目模板、规范示例及按需读取的 SDK/CLI 参考，明确 SDK 版本。
-- [ ] 编写 Invocation 诊断 Skill，从执行摘要或失败的 Eval Case 出发定位证据，结合代码
+- [x] 编写 V2 Workflow authoring Skill，覆盖图、值契约、Context 和恢复边界。
+- [x] 提供 Core 审批 Workflow 和离线 Agent 模板，以及按需读取的 SDK/CLI 参考；指导先核对
+  目标项目实际安装的 SDK 版本与公开入口。
+- [x] 编写 Invocation/Session 诊断 Skill，从执行摘要或失败的 Eval Case 出发定位证据，结合代码
   做最小修复，重新检查编译，并用同一组业务规则比较基线与候选结果。
-- [ ] 指导何时查询摘要、Node/Call 详情或精确历史 Context，避免一次读取完整 Event/大值。
-- [ ] 用两道仓库外任务验证：从零编写一个 Workflow；修复一个最终结果正确但中间业务行为
+- [x] 指导何时查询摘要、Node/Call 详情或精确历史 Context，避免一次读取完整 Event/大值。
+- [x] 提供 Invocation 审批金额错误、Session Context 继承错误两组诊断任务夹具，包含原始历史
+  准备、业务要求及复现 Eval，位于 `skill-evals/autoagent-debug-skill`。
+- [ ] 用两道仓库外真实 LLM 任务完成验收：从零编写一个 Workflow；修复一个最终结果正确但中间业务行为
   违规的 Workflow。提供安装后的 V2、Skill 和任务材料，核对代码、检查结果和执行证据。
-- [ ] 确定 Skill、参考材料和示例的分发方式，使仓库外项目也能获取准确说明。
-- [ ] 随 Harness、ReAct 和 Coding Agent API 增量更新 Skill 和任务集。
+  已有独立环境 wheel 安装、离线执行和模型桩注册链路验证，不能代替上述真实任务验收。
+- [x] 两套 Skill、参考材料和示例统一存放在 `autoagent/agent_app/skill_assets`，随 wheel 分发；
+  Agent App 默认提供、正文按需读取，用户同名 Skill 可覆盖，自定义 Agent 不自动继承。
+- [x] 根目录提供 `build.sh` / `build.ps1` 打包入口，wheel 包含构建后的 UI 和内置 Skill 资源。
+- [ ] 后续随 Harness、ReAct 和 Coding Agent API 持续维护 Skill 和任务集。
+
+核对依据包括公开导出边界测试、`tests/test_agent_bundled_skills.py` 和当前 Skill 内容。
+`2.0.0a2` wheel 已在仓库外独立环境核对公开导入、旧根属性移除及离线 Workflow 执行。
 
 验收：外部 LLM 无需依赖框架内部实现，即可用 SDK/CLI 修复真实失败案例，
 并交付代码、编译检查、业务评测结果和证据。参考 V1 Skill/Skill Evals，按 V2 重写。
@@ -281,11 +287,30 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
   已有队列在启动时补齐历史立即发送回执的目标。
 - [x] MCP 工具目录支持离线查看和 Schema 变更审核。同名工具冲突在设置中显示，同组其他工具照常可用。
 - [x] Agent App 通过 `SKILL.md` 的 `metadata.autoagent-app-enabled` 管理 Skill 开关。单个 Workspace Skill 解析失败时显示文件和原因，可继续使用其他 Skill 和聊天。
-- [ ] 补齐开发 Skill 中对应的编写、调试说明。
+- [x] 补齐开发 Skill 中 Agent Workflow 资源配置、审批、协作、运行及调试说明，加入当前 Host 热注册指南。
+- [x] Host 从 `providers.json` 加载模型目录、默认模型、压缩模型、费用与推理强度配置，支持运行中重新加载；Agent App 展示和选择 Host 提供的模型。
+- [x] Session 级 Plan 工具与只读 UI；请求准备时注入当前计划，暂停、失败、重启后保留，完成后展示至替换或清除。
+- [x] 可选秒级时间注入位于请求末尾，SDK 默认关闭、Agent App 开启；压缩不保留临时时间。
+  默认 Context 上限为 272K 且不超过模型输入上限，90% 触发压缩、目标 30%。
+- [x] 聊天 Fork 支持多层来源引用、独立后续执行、历史 Context 和附件解析，不复制先前执行记录。
+- [x] 历史回复分页、折叠过程按需加载，同时保留完整轻量轮次索引用于跳转。
+- [x] 默认 Instructions 整合 Review、Plan、Execute 的意图判断与阶段进展汇报规范。
 - [ ] 调试产品默认 Instructions 和通用 Skills，验证真实任务质量。
 
 验收：少量配置即可创建具备工具调用和多轮能力的 Agent，继续通过现有 Host、CLI、UI
 检查执行。内置 Agent 按产品提供默认行为，自定义 Workflow 使用 SDK 构建入口。
+
+### 侧边聊天：暂缓
+
+参考 Codex `/side`，让用户在主任务继续执行时独立讨论问题。本轮只记录，后续再确认设计和实现范围。
+
+- [ ] 创建关联主会话的独立 Side Session，独立保存问答、执行状态和用量；侧聊内容不自动进入主上下文。
+- [ ] 从运行中的主会话取得完整、已提交的上下文，按 Session、Invocation 和事件序号固定来源。
+  复用现有 Fork 的历史与附件引用能力，补齐运行中切点；排除不完整的流式内容和未配对的工具交互。
+- [ ] 侧聊关闭后可重新打开，保留主聊天的滚动位置和草稿；不接管主会话的队列、计划、审批或子 Agent。
+- [ ] 在聊天标题菜单提供 `Side chat`，支持选中文字后 `Ask in side chat`；桌面采用侧面板，手机采用全屏页面。
+- [ ] 产品逻辑放在 `agent_app`，优先扩展现有 `agent_app_sessions`，复用 SDK、Host 和现有消息存储。
+- [ ] 实现前确认工具能力、背景更新方式，以及是否提供用户主动 `Send to main`；第一版范围和权限尚待确定。
 
 ## 5. Coding Agent
 
@@ -294,11 +319,13 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
 - [x] 本地 Workspace 解析、项目指令发现、Skill 发现及三个按需读取工具。
 - [x] Python 文件工具：目录浏览、搜索、读取、写入、定点编辑和文件管理。
   Agent App 默认对 Workspace 外部文件操作发起审批。支持自定义路径规则、可选版本检查和文件修改并发控制。
-- [x] `execute_command` / `manage_process`：exec、Bash/Pwsh、统一 ToolPolicy 参数匹配、
+- [x] `execute_command` / `manage_process`：exec、Bash/PowerShell、统一 ToolPolicy 参数匹配、
   进程超时、清理、有界输出、stdin 和游标读取；Git/测试可通过 CLI 执行。
 - [x] 可替换 Workspace/Execution 接口和本地实现；文件工具需要绑定 Workspace，CLI 支持无 Workspace 的会话。
 - [x] 组合模型、Tool、Skill、Context 管理、Ask User 和子 Agent 协作。
 - [x] 提供本地可监督使用方式及可交互测试示例。
+- [x] Agent App 提供 `register_workflow`，经审批将 Workspace 当前源码注册到当前 Host，更新
+  实际项目 TOML 并通知 Workflow UI；源码变更需重新注册或重启，不新增代码持久化表。
 - [ ] 独立补丁应用/交付流程及完整 Coding Agent 任务验收。
 - [ ] 真正的文件系统/依赖环境隔离和沙箱；现有 CLI 使用应用 OS 权限，路径策略和
   缓存/临时目录配置均不构成沙箱。PTY、远程执行适配后续按需增加。
@@ -319,10 +346,15 @@ payload/delta 结构和数据库表结构。中间业务违规不能被正确的
   Shell 仍保留自身退出语义，不把最后一个命令的状态冒充内部所有命令的状态。
 - [x] 搜索只返回定位信息。内容搜索、文件复制等读取操作共享 `read_file` 针对目标的规则，各工具的参数规则独立。
 - [x] 可选 Workspace 缓存/临时目录配置，重定向常用缓存及临时目录环境变量，复用文件权限校验。
+- [x] 实现 Windows 兼容路径：跨平台 SQLite 写锁、内存采样、Skill/文件写入和 Workflow 注册；
+  命令工具自动优先 `pwsh.exe`、回退系统 PowerShell，权限检查和结果反映实际选择。
+- [ ] Windows 真机端到端验收：打包脚本、wheel 安装与升级、Server 启动、内存监控、文件/Skill
+  操作及 PowerShell Unicode 输入输出。已有 Linux、模拟平台分支和独立安装验证，不等同真机验收。
 
 ### 明确暂缓
 
-- [ ] 优化默认 Instructions，减少多余辅助脚本、重复环境探测和过长推理；本轮不修改。
+- [ ] 用真实任务继续优化默认 Instructions，验证并减少多余辅助脚本、重复环境探测和过长推理；
+  已有统一指令和阶段汇报规范，效果验收仍未完成。
 - [ ] 单独分析框架调度和持久化耗时，区分模型、外部等待、Map/空分支及数据库开销；
   本轮不调整 Core 调度或持久化。实际任务的总耗时不能直接认定为工具执行性能问题。
 

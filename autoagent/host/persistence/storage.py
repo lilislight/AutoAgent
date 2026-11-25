@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import time
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
@@ -125,7 +124,7 @@ class Storage:
         self.read_only = read_only
         self.engine = None
         self.query_engine = None
-        self._lock_file = None
+        self._writer_lock = None
         self._pg_lock = None
         self.graph_cache = WorkflowGraphCache(graph_cache_bytes)
         self.identities = SourceIdentities(min(metadata_cache_bytes // 8, 512 * 1024))
@@ -140,19 +139,17 @@ class Storage:
         if self.read_only:
             return await self._open_reader()
         if self.sqlite and not self.memory:
-            import fcntl
+            from filelock import FileLock, Timeout
 
-            self._lock_file = open(  # noqa: ASYNC230, SIM115 -- writer lifetime lock
-                os.path.abspath(self.url.database) + ".writer.lock", "a"
-            )
+            from pathlib import Path
+            lock = FileLock(str(Path(self.url.database).resolve()) + ".writer.lock", thread_local=False)
             try:
-                fcntl.flock(self._lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                self._lock_file.close()
-                self._lock_file = None
+                lock.acquire(timeout=0)
+            except Timeout:
                 raise ConflictError(
                     "Another Persistence writer owns this SQLite database."
                 ) from None
+            self._writer_lock = lock
         # sqlite3's statement cache can retain bound payloads after COMMIT.
         self.engine = create_async_engine(
             self.url, connect_args={"cached_statements": 0} if self.sqlite else {}
@@ -210,11 +207,10 @@ class Storage:
         url, arguments = self.url, {}
         if self.sqlite:
             from pathlib import Path
-            from urllib.parse import quote
             path = Path(self.url.database).expanduser().resolve()
             if not path.is_file():
                 raise FileNotFoundError(f"Persistence database does not exist: {path}")
-            url = self.url.set(database="file:" + quote(str(path), safe="/"),
+            url = self.url.set(database=path.as_uri(),
                 query={**self.url.query, "mode": "ro", "uri": "true"})
             arguments = {"cached_statements": 0}
         else:
@@ -302,9 +298,9 @@ class Storage:
         if self.engine is not None:
             await self.engine.dispose()
             self.engine = None
-        if self._lock_file is not None:
-            self._lock_file.close()
-            self._lock_file = None
+        if self._writer_lock is not None:
+            self._writer_lock.release()
+            self._writer_lock = None
 
     @asynccontextmanager
     async def transaction(self):

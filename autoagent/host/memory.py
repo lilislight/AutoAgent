@@ -86,14 +86,19 @@ _sampler = _ProcessSampler()
 
 
 def process_sample():
-    """Linux current and peak RSS; unavailable measurements remain null."""
+    """Current RSS on every supported OS; unavailable peak measurements remain null."""
     result = dict(rss_bytes=None, peak_rss_bytes=None, cpu_seconds=time.process_time())
     try:
         fields = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines() if ':' in line)
         result.update(rss_bytes=int(fields['VmRSS'].split()[0]) * 1024,
                       peak_rss_bytes=int(fields['VmHWM'].split()[0]) * 1024)
     except (OSError, ValueError, KeyError):
-        pass
+        import psutil
+        try:
+            sample = psutil.Process().memory_info()
+            result.update(rss_bytes=sample.rss, peak_rss_bytes=getattr(sample, 'peak_wset', None))
+        except (OSError, psutil.Error):
+            pass
     return result
 
 

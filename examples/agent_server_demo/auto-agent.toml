@@ -12,4 +12,4 @@ entrypoint = "agent_demo.project:main_agent"
 entrypoint = "agent_demo.project:research_agent"
 [[workflows]]
 entrypoint = "greeting_demo:build_workflow"
-source_dir = "/home/chengqian/projects/AutoAgent/examples/agent_server_demo/workflows"
+source_dir = "workflows"

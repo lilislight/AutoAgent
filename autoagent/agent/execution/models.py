@@ -42,7 +42,7 @@ class ExecCommand(Model):
 
 class ShellCommand(Model):
     mode: Literal["shell"]
-    shell: Literal["bash", "pwsh"]
+    shell: Literal["bash", "pwsh", "powershell"]
     script: NonEmpty = Field(description="Script interpreted by the selected shell without startup profiles. Use exec for a program with literal arguments.")
 
 

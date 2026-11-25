@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -112,10 +113,11 @@ class MemoryResourcesTests(unittest.TestCase):
             self.assertIsNone(memory_controller())
 
     def test_physical_memory_fallback_and_missing_availability(self):
-        """Unsupported procfs can still expose physical capacity, without inventing available memory."""
-        with patch.object(Path, 'read_text', side_effect=OSError), patch('os.sysconf', side_effect=[16 * GIB // 4096, 4096]):
-            self.assertEqual(system_memory(), (16 * GIB, None))
-        with patch.object(Path, 'read_text', side_effect=OSError), patch('os.sysconf', side_effect=ValueError):
+        """Without procfs, portable sampling supplies real capacity and availability or explicit unknowns."""
+        with patch.object(Path, 'read_text', side_effect=OSError), patch('psutil.virtual_memory',
+                return_value=SimpleNamespace(total=16 * GIB, available=5 * GIB)):
+            self.assertEqual(system_memory(), (16 * GIB, 5 * GIB))
+        with patch.object(Path, 'read_text', side_effect=OSError), patch('psutil.virtual_memory', side_effect=OSError):
             self.assertEqual(system_memory(), (None, None))
 
     def test_physical_capacity_caps_large_container_limit_and_zero_limit_blocks(self):

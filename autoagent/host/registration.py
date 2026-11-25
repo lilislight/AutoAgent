@@ -15,7 +15,11 @@ def _atomic_write(path, data):
     try:
         with temporary.open("xb") as stream:
             if path.exists():
-                os.fchmod(stream.fileno(), path.stat().st_mode & 0o777)
+                mode = path.stat().st_mode & 0o777
+                if hasattr(os, "fchmod"):
+                    os.fchmod(stream.fileno(), mode)
+                else:
+                    temporary.chmod(mode)
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())

@@ -22,9 +22,9 @@ def process_memory_bytes():
     """Current RSS, rather than the process lifetime's peak RSS."""
     try:
         return int(Path('/proc/self/statm').read_text().split()[1]) * os.sysconf('SC_PAGE_SIZE')
-    except (OSError, ValueError, IndexError):
-        import resource
-        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * (1 if os.uname().sysname == 'Darwin' else 1024)
+    except (AttributeError, OSError, ValueError, IndexError):
+        import psutil
+        return psutil.Process().memory_info().rss
 
 
 @dataclass(slots=True)

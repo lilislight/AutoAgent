@@ -23,6 +23,10 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
+def _is_windows():
+    return os.name == "nt"
+
+
 @runtime_checkable
 class ExecutionService(Protocol):
     """Execution backend for already authorized Tool calls."""
@@ -38,6 +42,7 @@ class LocalExecutionService:
 
     def __init__(self, root, *, working_directory=".", config=None, backend=None,
                  manager=None, environment=None, adapter_version="1"):
+        self._windows = _is_windows()
         self.root = Path(root).resolve(strict=True)
         self.cwd = (self.root / working_directory).resolve(strict=True)
         if not self.root.is_dir() or not self.cwd.is_dir() or not self.cwd.is_relative_to(self.root):
@@ -59,6 +64,8 @@ class LocalExecutionService:
         if any(not isinstance(k, str) or not isinstance(v, str) or "\x00" in k + v or "=" in k
                for k, v in self.environment.items()):
             raise ValueError("Execution environment requires valid string keys and values.")
+        if self._windows:
+            self.environment = {key.upper(): value for key, value in self.environment.items()}
         self.environment["PATH"] = os.pathsep.join(str((self.cwd / part).resolve())
             if not os.path.isabs(part) else part for part in self.environment.get("PATH", os.defpath).split(os.pathsep))
         self.version = digest(dict(config=self.config.model_dump(mode="json"), root=str(self.root),
@@ -94,11 +101,59 @@ class LocalExecutionService:
             selected = selected.resolve(strict=True)
             if not selected.is_file() or not os.access(selected, os.X_OK):
                 raise OSError("Program is not executable.")
-            if os.name == "nt" and selected.suffix.lower() in {".bat", ".cmd"}:
+            if self._windows and selected.suffix.lower() in {".bat", ".cmd"}:
                 raise OSError("Batch files require an explicit supported Shell adapter.")
             return selected
         except OSError as error:
             raise ToolBusinessError(str(error), code="program_unavailable") from error
+
+    def _shell_binary(self, shell, cwd):
+        program = shell + ".exe" if self._windows and shell in {"pwsh", "powershell"} else shell
+        try:
+            return self._binary(program, cwd)
+        except ToolBusinessError as error:
+            if error.code != "program_unavailable" or not self._windows or shell != "powershell":
+                raise
+        # Windows PowerShell may exist even when its directory is absent from PATH.
+        for name in ("SYSTEMROOT", "WINDIR"):
+            if root := self.environment.get(name):
+                candidate = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+                if candidate.is_absolute():
+                    try:
+                        return self._binary(str(candidate), cwd)
+                    except ToolBusinessError as error:
+                        if error.code != "program_unavailable":
+                            raise
+        raise ToolBusinessError("Windows PowerShell (powershell.exe) was not found in PATH or the Windows system directory.",
+            code="program_unavailable")
+
+    @property
+    def default_shell(self):
+        if not self._windows:
+            return "bash"
+        for shell in ("pwsh", "powershell"):
+            try:
+                self._shell_binary(shell, self.cwd)
+                return shell
+            except ToolBusinessError as error:
+                if error.code != "program_unavailable":
+                    raise
+        return "pwsh"
+
+    @property
+    def shell_description(self):
+        shell = self.default_shell
+        try:
+            executable = self._shell_binary(shell, self.cwd)
+        except ToolBusinessError:
+            return ("No default shell is available. Install PowerShell 7 (pwsh.exe) or enable Windows PowerShell "
+                "(powershell.exe); exec mode can still run installed programs.") if self._windows else (
+                "Default shell bash is unavailable; install bash or select an installed shell explicitly.")
+        label = {"bash": "Bash", "pwsh": "PowerShell 7+", "powershell": "Windows PowerShell 5.1"}[shell]
+        return (f"Omit to use {label} ({shell}) at {executable}. "
+            "Explicit shell selections require that interpreter and never switch to another. "
+            "Shell scripts run without startup profiles." + (
+                " Use Windows PowerShell 5.1 syntax; && and || are unavailable." if shell == "powershell" else ""))
 
     def _managed_path(self, requested):
         path = self.files._resolve(requested)
@@ -150,10 +205,20 @@ class LocalExecutionService:
             raise ToolBusinessError("The log file cannot be a cache/temp directory or its ancestor.", code="invalid_output_path")
         if command["mode"] == "exec":
             program, args = command["program"], tuple(command.get("args", ()))
-        elif command["shell"] == "bash":
-            program, args = "bash", ("--noprofile", "--norc", "-c", command["script"])
         else:
-            program, args = "pwsh", ("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command["script"])
+            shell = command.get("shell") or self.default_shell
+            program = str(self._shell_binary(shell, cwd))
+            if shell == "bash":
+                args = ("--noprofile", "--norc", "-c", command["script"])
+            else:
+                script = command["script"]
+                if self._windows:
+                    # Keep UTF-8 pipes consistent with the backend, including legacy PowerShell.
+                    # A script block keeps a leading param() valid after initialization.
+                    script = ("$OutputEncoding = [System.Text.UTF8Encoding]::new($false);\n"
+                        "[Console]::InputEncoding = $OutputEncoding;\n"
+                        "[Console]::OutputEncoding = $OutputEncoding;\n& {\n" + script + "\n}")
+                args = ("-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script)
         try:
             command_bytes = sum(len(v.encode("utf-8")) for v in (program, *args))
         except UnicodeError as error:
@@ -240,7 +305,7 @@ class LocalExecutionService:
                 hints.append("Older output left the memory buffer; consult log_path if configured.")
             if hints:
                 visible["output_hint"] = " ".join(hints)
-        return ToolOutput(structured_content={"process_id": record.id, "cwd": record.cwd, **visible},
+        return ToolOutput(structured_content={"process_id": record.id, "cwd": record.cwd, "program": record.command[0], **visible},
             tool_metadata={"execution": {key: result[key] for key in ("wall_time_seconds", "total_output_bytes", "retained_start")}},
             is_error=result["state"] in {"timed_out", "terminated"} or result["exit_code"] not in (None, 0)
                 or bool(result["error"]) or bool(result.get("log_error")))

@@ -51,7 +51,8 @@ class _ExecutionTool(Tool):
                 if record.get("program") is not None or record.get("args") is not None:
                     raise ValueError("Shell mode accepts script and optional shell; omit program and args.")
                 command = ShellCommand.model_validate({"mode": "shell", "script": record.get("script"),
-                    "shell": record.get("shell") or ("pwsh" if os.name == "nt" else "bash")}, strict=True)
+                    "shell": record.get("shell") or getattr(self.service, "default_shell", None)
+                        or ("pwsh" if os.name == "nt" else "bash")}, strict=True)
         except ValidationError as error:
             details = error.errors(include_url=False, include_input=False, include_context=False)
             return self._invalid_arguments(call, "; ".join(
@@ -69,7 +70,8 @@ class _ExecutionTool(Tool):
             props = value.parameters["properties"]
             props["args"]["description"] = "Literal argument array for exec mode. Do not repeat program; no shell expansion or splitting."
             props["program"]["description"] = "Executable name or path for exec mode, not an entire command line."
-            props["shell"]["description"] = "Shell interpreter for shell mode. Omit to use bash on POSIX or pwsh on Windows."
+            props["shell"]["description"] = getattr(self.service, "shell_description",
+                "Shell interpreter for shell mode. Omit to use bash on POSIX or automatically select PowerShell on Windows.")
             for name, description in {
                 "cwd": "Working directory relative to this Workspace's working directory, or an absolute directory subject to policy. Omitted '.' does not mean the repository root; the result reports resolved cwd.",
                 "yield_seconds": "Maximum initial wait, returning sooner on exit. 0 immediately returns a process handle. A running result is not a failure: continue with manage_process rather than starting the command again.",
@@ -111,7 +113,7 @@ def execution_tools(service, *, context=None, policy=None):
         raise TypeError("Execution Tools require an ExecutionService.")
     async def execute_command(mode: Literal["exec", "shell"], program: str | None = None,
             args: Annotated[list[str] | None, Field(max_length=1024)] = None,
-            script: str | None = None, shell: Literal["bash", "pwsh"] | None = None,
+            script: str | None = None, shell: Literal["bash", "pwsh", "powershell"] | None = None,
             cwd: str = ".", stdin: str | None = None,
             keep_stdin_open: bool = False,
             yield_seconds: Annotated[float | None, Field(ge=0)] = None,

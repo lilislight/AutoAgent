@@ -278,7 +278,7 @@ class MemoryConfigurationTests(unittest.TestCase):
         """Unavailable RSS stays null; pressure logs change only across hysteresis boundaries."""
         from types import SimpleNamespace
         from autoagent.host.memory import MemoryMonitor
-        with patch('pathlib.Path.read_text', side_effect=OSError('unsupported')):
+        with patch('pathlib.Path.read_text', side_effect=OSError('unsupported')), patch('psutil.Process', side_effect=OSError):
             self.assertIsNone(process_sample()['rss_bytes'])
             self.assertIsNone(cgroup_sample(None))
         host = SimpleNamespace(settings=HostSettings(memory_budget_bytes=100), _runtime=None)

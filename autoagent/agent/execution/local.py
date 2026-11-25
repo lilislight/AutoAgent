@@ -4,7 +4,9 @@ import asyncio
 from collections import deque
 import codecs
 import os
+from pathlib import Path
 import signal
+import subprocess
 import time
 
 from .backend import ExecutionCapabilities
@@ -243,6 +245,17 @@ class LocalProcess:
         return result
 
 
+def _windows_process_options(argv):
+    if Path(argv[0]).name.lower() == "powershell.exe":
+        # .NET Framework's Console encodings require a console code page even
+        # when standard streams are pipes. Give legacy PowerShell a hidden console.
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+        return {"creationflags": subprocess.CREATE_NEW_CONSOLE, "startupinfo": startup}
+    return {"creationflags": subprocess.CREATE_NO_WINDOW}
+
+
 class LocalExecutionBackend:
     capabilities = ExecutionCapabilities(output_logs=True)
 
@@ -252,7 +265,7 @@ class LocalExecutionBackend:
                 stdin=asyncio.subprocess.PIPE if spec.keep_stdin_open or spec.stdin is not None else asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=os.name == "posix",
-                **({"creationflags": 0x08000000} if os.name == "nt" else {}))
+                **(_windows_process_options(spec.argv) if os.name == "nt" else {}))
         except BaseException:
             if spec.output_log is not None:
                 spec.output_log.close()

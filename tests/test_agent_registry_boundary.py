@@ -211,11 +211,13 @@ class RegistryExecutionContracts:
             ref = await host.execute('custom', AgentInput(message='Hello'))
             self.assertEqual((await host.join(ref)).status, 'waiting')
             controller = host.extensions['agent'].context.approvals
-            await asyncio.gather(*tuple(controller.tasks))
+            async def drain(controller):
+                await asyncio.gather(*tuple(controller.tasks))
+            await controller._run(lambda: drain(controller))
             resources.set_policy('tool', 'publish', lambda *_: ToolDecision(action='allow'))
             app_controller = host.applications['agent'].context.approvals
             await app_controller.changed()
-            await asyncio.gather(*tuple(app_controller.tasks))
+            await app_controller._run(lambda: drain(app_controller))
             self.assertEqual((await host.join(ref)).status, 'waiting')
             self.assertEqual(len(provider.requests), 1)
 
